@@ -1,0 +1,24 @@
+# Arvore de build. Contem as dependencias baixadas pelo FetchContent
+# (raylib, raylib-cpp, raygui) alem dos objetos - centenas de MB que o
+# CMake regenera do zero.
+build/
+build-*/
+cmake-build-*/
+
+# Diretorio criado por engano por `cmake -B build -BUILD_RAYLIB_CPP_MODULES=ON`:
+# faltando o -D, o CMake leu a flag como um segundo -B e criou uma arvore de
+# build com este nome literal.
+UILD_RAYLIB_CPP_MODULES=ON/
+
+# Dependencias eram submodulo antes de migrarem para FetchContent.
+third_party/
+
+# Configuracao de terreno salva pelo painel do HUD. E estado local de
+# experimentacao; os valores que valem viram padrao em TerrainGenerator.hpp.
+terrain.cfg
+
+# Capturas de tela
+*.png
+
+.DS_Store
+compile_commands.json
