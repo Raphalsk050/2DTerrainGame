@@ -17,6 +17,24 @@ namespace terrain {
 // keeps the noise scale independent of how the world is partitioned.
 inline constexpr float kFeatureSpan = 1000.0f;
 
+// Shape of a noise field, independent of what it is used for. The terrain and
+// each ore vein describe themselves with one of these.
+struct NoiseShape {
+    float frequency = 4.0f;  // Number of features per kFeatureSpan pixels. Low
+                             // values give few broad shapes, high values many
+                             // small ones.
+    int octaves = 4;         // Layers summed together. 1 is smooth; 4-6 gives a
+                             // rugged outline with fine detail on top.
+    float lacunarity = 2.0f; // Frequency multiplier per octave.
+    float gain       = 0.5f; // Amplitude multiplier per octave.
+    float offsetX    = 0.0f; // Sampling offset. Scrolls the field without
+    float offsetY    = 0.0f; // changing its shape.
+    int seed         = 0;    // Equal seeds yield identical fields.
+};
+
+// Continuous noise value in [0,1] at a world position.
+float Sample(Vector2 world, const NoiseShape &shape);
+
 // Tunable parameters of the noise generator.
 struct Settings {
     float frequency;  // Number of large features per kFeatureSpan pixels. Low

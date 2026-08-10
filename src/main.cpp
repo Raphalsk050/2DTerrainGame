@@ -1,4 +1,6 @@
 #include "config.h"
+#include "debug_view.h"
+#include "editor.h"
 #include "hotbar.h"
 #include "liquid_layer.h"
 #include "player.h"
@@ -10,9 +12,6 @@
 #include <cmath>
 
 namespace {
-
-// Radius in pixels of the terrain brush driven by the mouse.
-constexpr float kBrushRadius = 16.0f;
 
 // Fraction of the distance to the player the camera closes per second. Framing
 // the character with a slight lag reads as smoother than pinning the view to
@@ -57,19 +56,6 @@ PlayerInput ReadPlayerInput(const Camera2D &camera) {
     return input;
 }
 
-// Left mouse button places the selected element, right button removes it.
-void HandleEditing(World &world, const Hotbar &hotbar, const Camera2D &camera) {
-    const Vector2 mouse = GetMousePosition();
-    if (hotbar.Contains(mouse)) return;
-
-    if (IsMouseButtonDown(MOUSE_BUTTON_LEFT) || IsMouseButtonDown(MOUSE_BUTTON_RIGHT)) {
-        world.Paint(hotbar.Selected(), GetScreenToWorld2D(mouse, camera), kBrushRadius,
-                    IsMouseButtonDown(MOUSE_BUTTON_LEFT));
-    }
-
-    if (IsKeyPressed(KEY_R)) world.Reset();
-}
-
 void FollowPlayer(Camera2D &camera, const Player &player, float dt) {
     const Vector2 target = player.Centre();
 
@@ -81,8 +67,27 @@ void FollowPlayer(Camera2D &camera, const Player &player, float dt) {
     camera.target.y += (target.y - camera.target.y) * t;
 }
 
-void Draw(const World &world, const Player &player, const Hotbar &hotbar, const LiquidLayer &liquids,
-          const Camera2D &camera, bool showVertices) {
+// Badge showing what the next click will do, next to the bar that decides what
+// it will do it with. The brush is modal, so the mode has to be somewhere the
+// eye passes without being sent looking for it.
+void DrawBrushMode(const Editor &editor) {
+    const bool place  = editor.CurrentMode() == Editor::Mode::Place;
+    const Color color = place ? Color{120, 200, 130, 255} : Color{235, 84, 84, 255};
+
+    const char *text = TextFormat("%s  (X)     brush %.0f  (- / +)", editor.ModeName(), editor.Radius());
+    const int width  = MeasureText(text, 14);
+
+    // Sat just clear of the bar, which reaches 76 pixels up from the bottom.
+    const Rectangle badge = {(config::kScreenWidth - width) / 2.0f - 8.0f, config::kScreenHeight - 104.0f,
+                             width + 16.0f, 22.0f};
+
+    DrawRectangleRec(badge, {30, 34, 42, 220});
+    DrawRectangleLinesEx(badge, 2.0f, color);
+    DrawText(text, static_cast<int>(badge.x + 8.0f), static_cast<int>(badge.y + 4.0f), 14, color);
+}
+
+void Draw(const World &world, const Player &player, const Hotbar &hotbar, const Editor &editor,
+          const LiquidLayer &liquids, const Camera2D &camera, const debug_view::Toggles &debug) {
     const Rectangle view = ViewBounds(camera);
 
     BeginDrawing();
@@ -95,9 +100,12 @@ void Draw(const World &world, const Player &player, const Hotbar &hotbar, const 
     // Drawn over the world rather than under it: the point of the overlay is to
     // check the fill against the samples that produced it, which is impossible
     // while the fill covers it.
-    if (showVertices) world.DrawVertexOverlay(view, config::kVertexSize, RED, LIGHTGRAY);
+    if (debug.vertices) world.DrawVertexOverlay(view, config::kVertexSize, RED, LIGHTGRAY);
+    if (debug.layers) debug_view::DrawLayers(world, view);
+    if (debug.chunks) debug_view::DrawChunks(world, view);
 
     player.Draw();
+    editor.DrawCursor(hotbar, camera);
 
     EndMode2D();
 
@@ -106,13 +114,23 @@ void Draw(const World &world, const Player &player, const Hotbar &hotbar, const 
     liquids.Compose(config::kLiquidAlpha);
 
     DrawText("A/D: move  |  space: jump  |  S: crouch  |  J: attack  |  mouse: aim", 10, 10, 14, GRAY);
-    DrawText("left: place  |  right: remove  |  1-2 or wheel: select  |  R: regenerate  |  V: vertices", 10, 28, 14,
-             GRAY);
+    DrawText("left: apply brush  |  X: place/dig  |  1-5 or wheel: material  |  - / +: brush size  |  R: regenerate",
+             10, 28, 14, GRAY);
+    DrawText("V: vertices  |  F3: chunks  |  F4: height grid", 10, 46, 14, GRAY);
 
-    DrawText(TextFormat("chunks: %d   water in view: %.1f", world.ResidentChunks(), world.TotalWater(view)), 10, 46, 14,
-             GRAY);
+    DrawText(TextFormat("chunks: %d (%d pinned)   water in view: %.1f", world.ResidentChunks(), world.PinnedChunks(),
+                        world.TotalWater(view)),
+             10, 70, 14, GRAY);
 
-    hotbar.Draw();
+    const Vector2 centre = player.Centre();
+    const auto under     = editor.Under();
+
+    DrawText(TextFormat("y: %d   under cursor: %s", static_cast<int>(centre.y),
+                        under.has_value() ? Def(*under).name : "open"),
+             10, 88, 14, GRAY);
+
+    DrawBrushMode(editor);
+    hotbar.Draw(editor.Collected());
 
     EndDrawing();
 }
@@ -141,6 +159,7 @@ int main() {
     World world(settings, config::kResolution);
     Player player({0.0f, 0.0f});
     Hotbar hotbar;
+    Editor editor;
 
     LiquidLayer liquids;
     liquids.Load(config::kScreenWidth, config::kScreenHeight);
@@ -151,7 +170,7 @@ int main() {
     camera.zoom     = 1.0f;
 
     float accumulated = 0.0f;
-    bool showVertices = false;
+    debug_view::Toggles debug;
 
     while (!WindowShouldClose()) {
         const float dt = GetFrameTime();
@@ -164,9 +183,10 @@ int main() {
         world.Update(active);
 
         hotbar.Update();
-        HandleEditing(world, hotbar, camera);
+        editor.Update(world, hotbar, camera);
 
-        if (IsKeyPressed(KEY_V)) showVertices = !showVertices;
+        debug_view::ReadToggles(debug);
+        if (IsKeyPressed(KEY_R)) world.Reset();
 
         accumulated = std::min(accumulated + dt, kMaxAccumulated);
         while (accumulated >= kWaterStep) {
@@ -180,7 +200,7 @@ int main() {
         // Captured before the frame opens, since it renders to its own target.
         liquids.Capture(world, ViewBounds(camera), camera);
 
-        Draw(world, player, hotbar, liquids, camera, showVertices);
+        Draw(world, player, hotbar, editor, liquids, camera, debug);
     }
 
     liquids.Unload();

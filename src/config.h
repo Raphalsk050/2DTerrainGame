@@ -17,6 +17,15 @@ inline constexpr int kRows = kScreenHeight / kResolution + 1;
 // Side length of the debug square drawn on each vertex.
 inline constexpr float kVertexSize = 2.0f;
 
+// Spacing of the world height grid, in pixels. It is the scale the spawn bands
+// in the element table are written against: a band reads as a range of heights,
+// and this is the ruler those heights are counted on.
+inline constexpr int kHeightGridStep = 64;
+
+// Interval at which a height line is drawn brighter and labelled. Labelling
+// every line at the fine step would leave the screen unreadable.
+inline constexpr int kHeightGridMajor = 256;
+
 // Radius around a vertex within which a click is attributed to it. Half the
 // spacing gives each vertex exactly its own neighbourhood.
 inline constexpr float kPickRadius = kResolution / 2.0f;

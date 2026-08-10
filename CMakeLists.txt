@@ -51,6 +51,8 @@ add_executable(${PROJECT_NAME}
     src/grid.cpp
     src/marching_squares.cpp
     src/noise_view.cpp
+    src/debug_view.cpp
+    src/editor.cpp
     src/hotbar.cpp
     src/liquid_layer.cpp
     src/player.cpp

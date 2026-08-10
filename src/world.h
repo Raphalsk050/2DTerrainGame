@@ -6,7 +6,10 @@
 #include "terrain.h"
 #include "water.h"
 
+#include <array>
 #include <cstdint>
+#include <limits>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
@@ -34,6 +37,13 @@ public:
     // different amounts of liquid.
     static constexpr int kChunkVertices = kChunkCells + 1;
 
+    // How many lattice vertices of each material an edit removed.
+    //
+    // A count of vertices rather than a sum of field values: a vertex either
+    // held the material or it did not, which is the unit a mining yield is
+    // naturally expressed in.
+    using Yield = std::array<int, kElementCount>;
+
     World(const terrain::Settings &settings, int spacing);
 
     // Generates the chunks covering `view` plus a margin and releases those
@@ -49,7 +59,18 @@ public:
     // noise function at that same vertex, so collision stays correct beyond
     // the loaded area and does not change as chunks come and go.
     bool IsSolidAt(Vector2 world) const;
+
+    // True where any material stops liquids.
+    bool BlocksLiquidAt(Vector2 world) const;
     bool OverlapsSolid(Rectangle rect) const;
+
+    // The single material filling a world position, or nothing where the space
+    // is open.
+    //
+    // Exclusion is what makes this answerable at all: because two occupying
+    // materials never share a vertex, digging one out has exactly one outcome
+    // and the caller does not have to decide between overlapping claims.
+    std::optional<Element> OccupantAt(Vector2 world) const;
 
     // Field value of an element at the vertex nearest to a world position.
     float ValueAt(Element element, Vector2 world) const;
@@ -58,9 +79,16 @@ public:
     // samples it covers. Bodies use it to work out how much they float.
     float SubmergedFraction(Rectangle rect) const;
 
-    // Sets every vertex within `radius` of a world position, across chunk
-    // borders. Only resident chunks are affected.
-    void Paint(Element element, Vector2 world, float radius, bool add);
+    // Fills every vertex within `radius` with a material, clearing whatever was
+    // there first. Placing is always a replacement, since two materials cannot
+    // share a vertex; a liquid is the exception and simply does not enter a
+    // vertex a solid already fills.
+    void Place(Element element, Vector2 world, float radius);
+
+    // Empties every vertex within `radius` and reports what came out. This is
+    // the shape the mining action takes: the world performs the removal, the
+    // caller decides what the yield is worth.
+    Yield Excavate(Vector2 world, float radius);
 
     // Advances the liquid inside `active` by one step. The region is copied
     // into a flat buffer, simulated, and written back, which keeps the
@@ -80,26 +108,48 @@ public:
     void DrawLiquids(Rectangle view) const;
 
     // Field a liquid is drawn from, derived from its mass and clamped against
-    // the rock. Exposed so the clamp can be checked directly.
+    // the solids around it. Exposed so the clamp can be checked directly.
     Grid LiquidRenderField(int cx, int cy, Element element) const;
     void DrawVertexOverlay(Rectangle view, float vertexSize, Color filledColor, Color emptyColor) const;
 
-    // The one threshold that decides where rock is, shared by collision, the
-    // contour, the fill and the debug overlay.
-    static float RockThreshold() { return StyleOf(Element::Rock).threshold; }
+    // Threshold of the base terrain. Liquids and veins are bounded against it,
+    // so it stays named even though every other decision now comes from the
+    // element table.
+    static constexpr float RockThreshold() { return Def(Element::Rock).threshold; }
+
+    // Procedural value of an element at a world position, exclusion included,
+    // or zero for one that is only ever placed by hand.
+    float SpawnValue(Element element, Vector2 world) const;
+
+    // One resident chunk, as the debug view sees it. Chunk bookkeeping stays
+    // private; this is a snapshot of it, not a handle into it.
+    struct ChunkView {
+        int cx = 0;
+        int cy = 0;
+        Rectangle bounds{};
+        bool edited      = false;
+        bool holdsLiquid = false;
+    };
+
+    std::vector<ChunkView> ChunksIn(Rectangle view) const;
+
+    const terrain::Settings &Settings() const { return settings_; }
 
     int Spacing() const { return spacing_; }
+    float ChunkSpan() const { return static_cast<float>(kChunkCells * spacing_); }
     int ResidentChunks() const { return static_cast<int>(chunks_.size()); }
+
+    // How many chunks are held past their usefulness because they carry state
+    // the noise cannot reproduce. Reported so the cost of editing and flooding
+    // the world is visible rather than merely suspected.
+    int PinnedChunks() const;
 
 private:
     struct Chunk {
         std::vector<Grid> fields; // One per Element.
-        bool edited     = false;  // Hand-painted, so no longer derivable.
-        bool holdsWater = false;  // Flooded, so no longer derivable either.
+        bool edited      = false; // Hand-painted, so no longer derivable.
+        bool holdsLiquid = false; // Flooded, so no longer derivable either.
     };
-
-    // World span of one chunk, in pixels.
-    float ChunkSpan() const { return static_cast<float>(kChunkCells * spacing_); }
 
     static std::int64_t Key(int cx, int cy);
 
@@ -107,6 +157,9 @@ private:
     // correct left of and above the origin where truncation would round the
     // wrong way.
     void ToChunk(Vector2 world, int &outCx, int &outCy) const;
+
+    // Chunk range a world region covers.
+    void ChunkRange(Rectangle region, int &outMinCx, int &outMinCy, int &outMaxCx, int &outMaxCy) const;
 
     // Nearest lattice position to a world point. Every query and every write
     // snaps through this, so a value cannot depend on which side of a vertex
@@ -120,17 +173,69 @@ private:
     // is up to four at a chunk corner.
     void WriteVertex(Element element, Vector2 vertex, float value);
 
+    // Marks every chunk holding a copy of a lattice position as hand-edited, so
+    // it is no longer regenerated from the noise.
+    void MarkEdited(Vector2 vertex);
+
     // Global lattice index range covering a region.
     void LatticeRange(Rectangle region, int &outI0, int &outJ0, int &outI1, int &outJ1) const;
+
+    // Value the material's own generator asks for, before any other material
+    // has had a say. Exclusion is applied on top of this, and is expressed in
+    // terms of it rather than of the finished value, so a material never
+    // depends on the outcome of the contest it is itself part of.
+    float GeneratedValue(Element element, Vector2 world) const;
+
+    // Ceiling a material's field is held under by everything that outranks it,
+    // expressed so that it equals the material's own threshold exactly where
+    // the higher-ranked one reaches its threshold.
+    //
+    // That single identity is what aligns the two contours: both cross their
+    // thresholds on the same line, so the ore ends precisely where the rock
+    // around it begins and neither leaves a seam.
+    float ExclusionHeadroom(Element element, Vector2 world) const;
+
+    // True where a material's generator is allowed to place it at all: inside
+    // its band, and on the side of the ground its `space` names.
+    bool SpawnEligible(const ElementSpawn &spawn, Vector2 world) const;
+
+    // Empties a lattice position of everything that fills it, solid and liquid
+    // alike, and adds what was there to `yield`.
+    void ClearVertex(Vector2 vertex, Yield &yield);
+
+    // Both edits a brush can make. Placing clears the vertex first, so it is
+    // the same edit as digging with a second half.
+    void ApplyBrush(Vector2 world, float radius, std::optional<Element> place, Yield &yield);
+
+    // Signed margin by which the solids of at least `minPrecedence` fill each
+    // vertex of a chunk: positive inside one of them, negative outside, and
+    // exactly zero on the contour of whichever one claims the vertex.
+    //
+    // Materials do not share a threshold, so this is the one field about a
+    // group of them that can be compared against a single number. The default
+    // takes them all, which is what the liquid clamp and the vertex overlay
+    // need; drawing asks for one rank and above.
+    Grid OccupancyField(const Chunk &chunk, int minPrecedence = std::numeric_limits<int>::min()) const;
+
+    // Cutoff each generated material's noise has to clear, measured from the
+    // noise itself so that `coverage` in the element table means what it says.
+    void CalibrateSpawn();
 
     terrain::Settings settings_;
     int spacing_;
 
+    std::array<float, kElementCount> spawnCutoff_{};
+
+    // Occupying materials in ascending order of precedence. A chunk is carved
+    // in this order so that when a material is clamped, everything that
+    // outranks it still holds the value its own generator produced.
+    std::vector<Element> exclusionOrder_;
+
     std::unordered_map<std::int64_t, Chunk> chunks_;
+
+    water::Settings waterSettings_;
 
     // Kept between steps so that a 9000-cell region is not reallocated sixty
     // times a second.
-    water::Settings waterSettings_;
-
     water::Buffer scratch_;
 };

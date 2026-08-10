@@ -19,7 +19,7 @@ namespace {
 // The result is renormalised to [-1,1] by the accumulated amplitude, which
 // keeps contrast independent of the octave count so that `threshold` stays
 // meaningful when octaves change.
-float Fbm(float x, float y, const Settings &s) {
+float Fbm(float x, float y, const NoiseShape &s) {
     float sum          = 0.0f;
     float amplitude    = 1.0f;
     float frequency    = 1.0f;
@@ -40,12 +40,16 @@ float Fbm(float x, float y, const Settings &s) {
 
 } // namespace
 
-float Sample(Vector2 world, const Settings &s) {
+float Sample(Vector2 world, const NoiseShape &shape) {
     // Both axes use the same divisor so that noise cells stay square.
-    const float nx = (world.x + s.offsetX) * s.frequency / kFeatureSpan;
-    const float ny = (world.y + s.offsetY) * s.frequency / kFeatureSpan;
+    const float nx = (world.x + shape.offsetX) * shape.frequency / kFeatureSpan;
+    const float ny = (world.y + shape.offsetY) * shape.frequency / kFeatureSpan;
 
-    return (Fbm(nx, ny, s) + 1.0f) * 0.5f; // [-1,1] -> [0,1]
+    return (Fbm(nx, ny, shape) + 1.0f) * 0.5f; // [-1,1] -> [0,1]
+}
+
+float Sample(Vector2 world, const Settings &s) {
+    return Sample(world, NoiseShape{s.frequency, s.octaves, s.lacunarity, s.gain, s.offsetX, s.offsetY, s.seed});
 }
 
 float Density(Vector2 world, const Settings &s) {

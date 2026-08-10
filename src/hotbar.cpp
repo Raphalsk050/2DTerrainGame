@@ -48,7 +48,7 @@ bool Hotbar::Contains(Vector2 screen) const {
     return CheckCollisionPointRec(screen, BarBounds());
 }
 
-void Hotbar::Draw() const {
+void Hotbar::Draw(const std::array<int, kElementCount> &collected) const {
     const Rectangle bar = BarBounds();
 
     // Opaque, because the world keeps scrolling behind the bar and a
@@ -56,9 +56,9 @@ void Hotbar::Draw() const {
     DrawRectangleRec(bar, {30, 34, 42, 255});
 
     for (int slot = 0; slot < kSlots; slot++) {
-        const Rectangle bounds    = SlotBounds(slot);
-        const ElementStyle &style = kElementStyles[slot];
-        const bool active         = (slot == selected_);
+        const Rectangle bounds  = SlotBounds(slot);
+        const ElementDef &style = kElements[slot];
+        const bool active       = (slot == selected_);
 
         DrawRectangleRec(bounds, {60, 66, 78, 255});
 
@@ -75,6 +75,16 @@ void Hotbar::Draw() const {
 
         DrawText(TextFormat("%d", slot + 1), static_cast<int>(bounds.x + 4.0f), static_cast<int>(bounds.y + 2.0f), 10,
                  RAYWHITE);
+
+        // Only once there is something to count. A row of zeroes says nothing
+        // and competes with the swatch for the eye.
+        if (collected[slot] > 0) {
+            const char *amount = TextFormat("%d", collected[slot]);
+            const int width    = MeasureText(amount, 10);
+
+            DrawText(amount, static_cast<int>(bounds.x + bounds.width - width - 4.0f),
+                     static_cast<int>(bounds.y + 2.0f), 10, {255, 214, 110, 255});
+        }
 
         const int nameWidth = MeasureText(style.name, 10);
         DrawText(style.name, static_cast<int>(bounds.x + (bounds.width - nameWidth) / 2.0f),

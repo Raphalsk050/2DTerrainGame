@@ -3,6 +3,8 @@
 #include "element.h"
 #include "raylib.h"
 
+#include <array>
+
 // Row of slots along the bottom of the screen, one per element, selecting what
 // the mouse places.
 //
@@ -12,7 +14,11 @@ class Hotbar {
 public:
     // Number keys select a slot directly; the wheel steps through them.
     void Update();
-    void Draw() const;
+
+    // `collected` is how much of each material has been dug out, shown on the
+    // slot it belongs to. The bar is where a player already looks for a
+    // material, so it is where the amount of it belongs too.
+    void Draw(const std::array<int, kElementCount> &collected) const;
 
     Element Selected() const { return static_cast<Element>(selected_); }
 
