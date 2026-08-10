@@ -50,6 +50,7 @@ add_executable(${PROJECT_NAME}
     src/main.cpp
     src/grid.cpp
     src/marching_squares.cpp
+    src/terrain.cpp
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE
