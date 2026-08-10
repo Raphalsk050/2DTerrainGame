@@ -48,15 +48,16 @@ FetchContent_MakeAvailable(raylib raylib_cpp raygui)
 
 add_executable(${PROJECT_NAME}
     src/main.cpp
+    src/grid.cpp
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE
     src
     ${raygui_SOURCE_DIR}/src
-    # stb_perlin.h: e o gerador de ruido que a propria raylib usa por dentro,
-    # mas ela nao expoe os parametros (oitavas, lacunarity, gain, semente) na
-    # API publica. Incluir o header da acesso as funcoes direto - a
-    # implementacao ja esta compilada dentro da libraylib, nada e recompilado.
+    # stb_perlin.h is the noise generator raylib uses internally, but raylib's
+    # public API does not expose its parameters (octaves, lacunarity, gain,
+    # seed). The header contributes declarations only; the implementation is
+    # already compiled into libraylib, so nothing is rebuilt.
     ${raylib_SOURCE_DIR}/src/external
 )
 
