@@ -1,26 +1,38 @@
 #include "marching_squares.h"
 
+#include <algorithm>
+
 namespace marching_squares {
 namespace {
 
-Vector2 Midpoint(Vector2 a, Vector2 b) {
-    return {(a.x + b.x) / 2.0f, (a.y + b.y) / 2.0f};
+// Point along the edge from a to b where the field reaches `threshold`.
+//
+// This is what separates a contour that follows the data from one made of
+// 45-degree facets: a surface sitting halfway through a cell is drawn halfway
+// through it, not snapped to the cell centre.
+Vector2 Crossing(Vector2 a, Vector2 b, float va, float vb, float threshold) {
+    // Equal endpoints lie on the same side of the threshold, so this edge is
+    // not crossed and the result is never used; the midpoint keeps the value
+    // finite rather than dividing by zero.
+    const float span = vb - va;
+    const float t    = (span != 0.0f) ? std::clamp((threshold - va) / span, 0.0f, 1.0f) : 0.5f;
+
+    return {a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t};
 }
 
-// Every cell has four corners that are either solid or empty, giving 16
-// possible configurations. The state index is built by reading the corners
-// clockwise from the top left (a=8, b=4, c=2, d=1), and each case selects the
-// edges the contour crosses. Corner values are binary, so the crossing always
-// falls at the edge midpoint and no interpolation is involved.
-void DrawCell(Vector2 a, Vector2 b, Vector2 c, Vector2 d, bool va, bool vb, bool vc, bool vd, Color color,
-              float thickness) {
-    const int state = (va << 3) | (vb << 2) | (vc << 1) | (vd);
+// Every cell has four corners that are either above or below the threshold,
+// giving 16 possible configurations. The state index is built by reading the
+// corners clockwise from the top left (a=8, b=4, c=2, d=1), and each case
+// selects the edges the contour crosses.
+void DrawCell(Vector2 a, Vector2 b, Vector2 c, Vector2 d, float va, float vb, float vc, float vd, float threshold,
+              Color color, float thickness) {
+    const int state = ((va > threshold) << 3) | ((vb > threshold) << 2) | ((vc > threshold) << 1) | (vd > threshold);
     if (state == 0 || state == 15) return; // Cell entirely outside or inside.
 
-    const Vector2 top    = Midpoint(a, b);
-    const Vector2 right  = Midpoint(b, c);
-    const Vector2 bottom = Midpoint(d, c);
-    const Vector2 left   = Midpoint(a, d);
+    const Vector2 top    = Crossing(a, b, va, vb, threshold);
+    const Vector2 right  = Crossing(b, c, vb, vc, threshold);
+    const Vector2 bottom = Crossing(d, c, vd, vc, threshold);
+    const Vector2 left   = Crossing(a, d, va, vd, threshold);
 
     switch (state) {
     case 1:
@@ -36,7 +48,7 @@ void DrawCell(Vector2 a, Vector2 b, Vector2 c, Vector2 d, bool va, bool vb, bool
     case 7:
     case 8: DrawLineEx(left, top, thickness, color); break;
 
-    // Ambiguous cases: the two solid corners are diagonal, so two different
+    // Ambiguous cases: the two filled corners are diagonal, so two different
     // connections are possible. The convention here is to always separate the
     // diagonals.
     case 5:
@@ -52,7 +64,7 @@ void DrawCell(Vector2 a, Vector2 b, Vector2 c, Vector2 d, bool va, bool vb, bool
 
 } // namespace
 
-void DrawContour(const Grid &grid, Color color, float thickness) {
+void DrawContour(const Grid &grid, float threshold, Color color, float thickness) {
     // One cell per pair of neighbouring columns and rows, hence the -1 bounds.
     for (int i = 0; i < grid.Cols() - 1; i++) {
         for (int j = 0; j < grid.Rows() - 1; j++) {
@@ -60,13 +72,13 @@ void DrawContour(const Grid &grid, Color color, float thickness) {
                      grid.PointAt(i + 1, j),     // top right
                      grid.PointAt(i + 1, j + 1), // bottom right
                      grid.PointAt(i, j + 1),     // bottom left
-                     grid.IsSolid(i, j), grid.IsSolid(i + 1, j), grid.IsSolid(i + 1, j + 1), grid.IsSolid(i, j + 1),
-                     color, thickness);
+                     grid.ValueAt(i, j), grid.ValueAt(i + 1, j), grid.ValueAt(i + 1, j + 1), grid.ValueAt(i, j + 1),
+                     threshold, color, thickness);
         }
     }
 }
 
-void DrawVertices(const Grid &grid, float size, Color solidColor, Color emptyColor) {
+void DrawVertices(const Grid &grid, float threshold, float size, Color filledColor, Color emptyColor) {
     const Vector2 origin = {size / 2.0f, size / 2.0f};
 
     for (int i = 0; i < grid.Cols(); i++) {
@@ -74,7 +86,7 @@ void DrawVertices(const Grid &grid, float size, Color solidColor, Color emptyCol
             const Vector2 p      = grid.PointAt(i, j);
             const Rectangle rect = {p.x, p.y, size, size};
 
-            DrawRectanglePro(rect, origin, 0.0f, grid.IsSolid(i, j) ? solidColor : emptyColor);
+            DrawRectanglePro(rect, origin, 0.0f, (grid.ValueAt(i, j) > threshold) ? filledColor : emptyColor);
         }
     }
 }

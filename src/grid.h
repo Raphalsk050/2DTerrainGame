@@ -2,10 +2,15 @@
 
 #include "raylib.h"
 
-#include <cstdint>
 #include <vector>
 
-// A rectangular block of terrain vertices anchored at a world position.
+// A rectangular block of scalar field samples anchored at a world position.
+//
+// Values are continuous rather than a solid flag. Consumers decide what counts
+// as filled by comparing against a threshold, which lets one block describe
+// rock, water or any other element, and lets the contour cross an edge at the
+// exact point where the field meets the threshold instead of always at the
+// midpoint.
 //
 // Storage is column-major, so the index of (column i, row j) is i*rows + j. All
 // index arithmetic goes through Index().
@@ -29,8 +34,8 @@ public:
         return {origin_.x + static_cast<float>(i * spacing_), origin_.y + static_cast<float>(j * spacing_)};
     }
 
-    bool IsSolid(int i, int j) const { return solid_[Index(i, j)] != 0; }
-    void SetSolid(int i, int j, bool solid) { solid_[Index(i, j)] = solid ? 1 : 0; }
+    float ValueAt(int i, int j) const { return values_[Index(i, j)]; }
+    void SetValue(int i, int j, float value) { values_[Index(i, j)] = value; }
 
     // World region this block covers, from its first to its last vertex.
     Rectangle Bounds() const;
@@ -39,6 +44,7 @@ public:
     // outside the block, which InBounds reports.
     void ToLocal(Vector2 world, int &outI, int &outJ) const;
 
+    // Resets every sample to zero, which every threshold reads as empty.
     void Clear();
 
 private:
@@ -47,7 +53,5 @@ private:
     int rows_;
     int spacing_;
 
-    // std::uint8_t rather than bool: std::vector<bool> is a bit-packed
-    // specialisation that does not hand out real references to its elements.
-    std::vector<std::uint8_t> solid_;
+    std::vector<float> values_;
 };

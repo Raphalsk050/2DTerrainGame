@@ -36,13 +36,17 @@ struct Settings {
                       // world has an open sky rather than starting inside rock.
 };
 
-// Continuous noise value in [0,1] at a world position.
+// Continuous noise value in [0,1] at a world position, before the sky is cut.
 float Sample(Vector2 world, const Settings &s);
 
-// Sample thresholded into ground or air.
+// Rock density in [0,1]: the sample, forced to zero above skyDepth. This is the
+// value stored in the field, so the contour can interpolate through it.
+float Density(Vector2 world, const Settings &s);
+
+// Density thresholded into ground or air.
 bool IsSolid(Vector2 world, const Settings &s);
 
-// Fills every vertex of a block from its own world position.
+// Fills every sample of a block from its own world position.
 void Fill(Grid &grid, const Settings &s);
 
 // Continuous field over a world region, for inspection and debug rendering.

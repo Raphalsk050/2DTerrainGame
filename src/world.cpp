@@ -102,7 +102,7 @@ bool World::IsSolidAt(Vector2 world) const {
 
     if (!chunk->grid.InBounds(i, j)) return terrain::IsSolid(vertex, settings_);
 
-    return chunk->grid.IsSolid(i, j);
+    return chunk->grid.ValueAt(i, j) > settings_.threshold;
 }
 
 bool World::OverlapsSolid(Rectangle rect) const {
@@ -150,7 +150,10 @@ void World::Paint(Vector2 world, float radius, bool solid) {
                 for (int j = 0; j < chunk.grid.Rows(); j++) {
                     if (!CheckCollisionPointCircle(chunk.grid.PointAt(i, j), world, radius)) continue;
 
-                    chunk.grid.SetSolid(i, j, solid);
+                    // Painted samples are pinned to the extremes of the range
+                    // rather than nudged, so a brush stroke reads as a definite
+                    // edit and not as a faint gradient.
+                    chunk.grid.SetValue(i, j, solid ? 1.0f : 0.0f);
                     chunk.edited = true;
                 }
             }
@@ -172,8 +175,8 @@ void World::Draw(Rectangle view, float vertexSize, Color solidColor, Color empty
             const Chunk *chunk = Find(cx, cy);
             if (chunk == nullptr) continue;
 
-            marching_squares::DrawVertices(chunk->grid, vertexSize, solidColor, emptyColor);
-            marching_squares::DrawContour(chunk->grid, contourColor);
+            marching_squares::DrawVertices(chunk->grid, settings_.threshold, vertexSize, solidColor, emptyColor);
+            marching_squares::DrawContour(chunk->grid, settings_.threshold, contourColor);
         }
     }
 }

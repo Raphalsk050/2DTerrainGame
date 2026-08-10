@@ -46,15 +46,19 @@ float Sample(Vector2 world, const Settings &s) {
     return (Fbm(nx, ny, s) + 1.0f) * 0.5f; // [-1,1] -> [0,1]
 }
 
+float Density(Vector2 world, const Settings &s) {
+    if (world.y < s.skyDepth) return 0.0f;
+    return Sample(world, s);
+}
+
 bool IsSolid(Vector2 world, const Settings &s) {
-    if (world.y < s.skyDepth) return false;
-    return Sample(world, s) > s.threshold;
+    return Density(world, s) > s.threshold;
 }
 
 void Fill(Grid &grid, const Settings &s) {
     for (int i = 0; i < grid.Cols(); i++) {
         for (int j = 0; j < grid.Rows(); j++) {
-            grid.SetSolid(i, j, IsSolid(grid.PointAt(i, j), s));
+            grid.SetValue(i, j, Density(grid.PointAt(i, j), s));
         }
     }
 }
