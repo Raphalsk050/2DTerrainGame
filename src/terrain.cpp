@@ -38,7 +38,28 @@ float Fbm(float x, float y, const Settings &s) {
 
 } // namespace
 
-Field Generate(const Settings &s, int cols, int rows) {
+float Sample(Vector2 world, const Settings &s) {
+    // Both axes use the same divisor so that noise cells stay square.
+    const float nx = (world.x + s.offsetX) * s.frequency / kFeatureSpan;
+    const float ny = (world.y + s.offsetY) * s.frequency / kFeatureSpan;
+
+    return (Fbm(nx, ny, s) + 1.0f) * 0.5f; // [-1,1] -> [0,1]
+}
+
+bool IsSolid(Vector2 world, const Settings &s) {
+    if (world.y < s.skyDepth) return false;
+    return Sample(world, s) > s.threshold;
+}
+
+void Fill(Grid &grid, const Settings &s) {
+    for (int i = 0; i < grid.Cols(); i++) {
+        for (int j = 0; j < grid.Rows(); j++) {
+            grid.SetSolid(i, j, IsSolid(grid.PointAt(i, j), s));
+        }
+    }
+}
+
+Field Generate(const Settings &s, Vector2 origin, int cols, int rows, int spacing) {
     Field field;
     field.cols = cols;
     field.rows = rows;
@@ -46,25 +67,14 @@ Field Generate(const Settings &s, int cols, int rows) {
 
     for (int i = 0; i < cols; i++) {
         for (int j = 0; j < rows; j++) {
-            // Both axes are divided by `cols` so that noise cells stay square.
-            // Dividing y by `rows` would stretch the terrain vertically
-            // whenever cols differs from rows.
-            const float nx = (i + s.offsetX) * s.frequency / cols;
-            const float ny = (j + s.offsetY) * s.frequency / cols;
+            const Vector2 world = {origin.x + static_cast<float>(i * spacing),
+                                   origin.y + static_cast<float>(j * spacing)};
 
-            field.value[i * rows + j] = (Fbm(nx, ny, s) + 1.0f) * 0.5f; // [-1,1] -> [0,1]
+            field.value[i * rows + j] = Sample(world, s);
         }
     }
 
     return field;
-}
-
-void Apply(const Field &field, const Settings &s, Grid &grid) {
-    for (int i = 0; i < grid.Cols(); i++) {
-        for (int j = 0; j < grid.Rows(); j++) {
-            grid.SetSolid(i, j, field.At(i, j) > s.threshold && j > s.skyRows);
-        }
-    }
 }
 
 Image ToImage(const Field &field) {

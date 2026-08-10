@@ -7,11 +7,19 @@
 
 // Procedural terrain generation. This module operates purely on CPU-side data;
 // it creates no textures and issues no draw calls.
+//
+// Sampling is a pure function of world position, so any region can be generated
+// on its own and neighbouring regions agree along their shared border without
+// exchanging any state.
 namespace terrain {
+
+// Span in world pixels over which `frequency` counts features. Fixing it here
+// keeps the noise scale independent of how the world is partitioned.
+inline constexpr float kFeatureSpan = 1000.0f;
 
 // Tunable parameters of the noise generator.
 struct Settings {
-    float frequency;  // Number of large features across the map width. Low
+    float frequency;  // Number of large features per kFeatureSpan pixels. Low
                       // values give few broad shapes, high values many small
                       // ones.
     int octaves;      // Noise layers summed together. 1 is smooth; 4-6 produces
@@ -22,17 +30,22 @@ struct Settings {
     float offsetX;    // Sampling offset. Scrolls the map without changing the
     float offsetY;    // shape of the terrain.
     int seed;         // Equal seeds yield identical terrain.
-    float threshold;  // Value in [0,1] above which a vertex counts as ground.
+    float threshold;  // Value in [0,1] above which a point counts as ground.
                       // Higher values leave less ground.
-    int skyRows;      // Number of rows at the top forced to stay empty.
+    float skyDepth;   // Everything above this world Y is forced empty, so the
+                      // world has an open sky rather than starting inside rock.
 };
 
-// Continuous scalar field in [0,1], sampled once per grid vertex, before the
-// threshold is applied.
-//
-// Exposing it separately allows the same noise to be reused with different
-// thresholds without regenerating, inspected or rendered for debugging, and
-// interpolated along cell edges rather than always cut at the midpoint.
+// Continuous noise value in [0,1] at a world position.
+float Sample(Vector2 world, const Settings &s);
+
+// Sample thresholded into ground or air.
+bool IsSolid(Vector2 world, const Settings &s);
+
+// Fills every vertex of a block from its own world position.
+void Fill(Grid &grid, const Settings &s);
+
+// Continuous field over a world region, for inspection and debug rendering.
 struct Field {
     int cols = 0;
     int rows = 0;
@@ -41,11 +54,7 @@ struct Field {
     float At(int i, int j) const { return value[i * rows + j]; }
 };
 
-// Evaluates fractal Brownian motion noise at one point per grid vertex.
-Field Generate(const Settings &s, int cols, int rows);
-
-// Thresholds the field into the grid's inside/outside state.
-void Apply(const Field &field, const Settings &s, Grid &grid);
+Field Generate(const Settings &s, Vector2 origin, int cols, int rows, int spacing);
 
 // Renders the field as a greyscale image. The caller owns the result and must
 // release it with UnloadImage.

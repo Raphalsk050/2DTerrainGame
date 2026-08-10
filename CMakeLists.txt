@@ -51,6 +51,8 @@ add_executable(${PROJECT_NAME}
     src/grid.cpp
     src/marching_squares.cpp
     src/noise_view.cpp
+    src/player.cpp
+    src/world.cpp
     src/terrain.cpp
 )
 
