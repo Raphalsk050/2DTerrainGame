@@ -49,6 +49,7 @@ FetchContent_MakeAvailable(raylib raylib_cpp raygui)
 add_executable(${PROJECT_NAME}
     src/main.cpp
     src/grid.cpp
+    src/marching_squares.cpp
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE
