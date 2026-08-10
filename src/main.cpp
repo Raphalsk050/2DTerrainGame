@@ -1,9 +1,14 @@
 #include "raylib.h"
+// Header do stb_perlin que a propria raylib usa por dentro. Sem definir
+// STB_PERLIN_IMPLEMENTATION ele traz so as declaracoes - a implementacao ja esta
+// compilada dentro da libraylib, entao basta linkar. O caminho vem do
+// target_include_directories no CMakeLists.txt.
+#include "stb_perlin.h"
 #include <cstddef>
 
 #define RECS_WIDTH    8
 #define RECS_HEIGHT   8
-#define FLOOR_HEIGHT  10
+#define FLOOR_HEIGHT  18
 #define SCREEN_WIDTH  800
 #define SCREEN_HEIGHT 600
 #define RESOLUTION    20
@@ -35,8 +40,8 @@ void LoadShader() {
     shader         = LoadShader(0, "assets/noise_filter_shader.fs");
     int edge0Loc   = GetShaderLocation(shader, "edge0");
     int edge1Loc   = GetShaderLocation(shader, "edge1");
-    float edge0Val = 0.55f;
-    float edge1Val = 0.6f;
+    float edge0Val = 0.2f;
+    float edge1Val = 0.8f;
 
     SetShaderValue(shader, edge0Loc, &edge0Val, SHADER_UNIFORM_FLOAT);
     SetShaderValue(shader, edge1Loc, &edge1Val, SHADER_UNIFORM_FLOAT);
@@ -98,19 +103,76 @@ static void DrawCell(Vector2 a, Vector2 b, Vector2 c, Vector2 d, bool va, bool v
     }
 }
 
-// Terreno procedural: gera um ruido Perlin com um pixel por ponto da grade e
-// liga o ponto quando a intensidade passa do limiar. 'scale' controla o tamanho
-// das ilhas (quanto maior, mais recortado) e 'threshold' quanto de terra sobra.
-static void GenerateTerrain(bool values[], int cols, int rows, float scale, unsigned char threshold) {
-    Image noise = GenImagePerlinNoise(cols, rows, 0, 0, scale);
+// Parametros do gerador. A GenImagePerlinNoise da raylib fixa oitavas em 6,
+// lacunarity em 2.0, gain em 0.5 e nao aceita semente - nada disso da para
+// ajustar de fora. Aqui cada um vira um campo.
+struct NoiseSettings {
+    float frequency;  // quantas "ilhas" cabem na largura do mapa. Baixo = poucas
+                      // formas grandes; alto = muitas formas pequenas.
+    int octaves;      // quantas camadas de ruido sao somadas. 1 = suave e liso;
+                      // 4-6 = contorno rugoso, com detalhe fino por cima.
+    float lacunarity; // quanto a frequencia cresce a cada oitava. ~2.0 e o usual.
+    float gain;       // quanto a amplitude cai a cada oitava. Abaixo de 0.5 o
+                      // detalhe fino quase some; acima, domina e vira ruido.
+    float offsetX;    // desloca a amostragem. Serve para "rolar" o mapa sem
+    float offsetY;    // mudar o formato do terreno.
+    int seed;         // mesma semente = mesmo terreno. Troque para sortear outro.
+    float threshold;  // [0,1] - acima disso o ponto conta como terra. Sobe o
+                      // valor, sobra menos terra.
+    int floorRows;    // quantas linhas do topo ficam sempre vazias (ceu).
+};
+
+// fBm (fractal brownian motion): soma varias oitavas de Perlin, cada uma com a
+// frequencia multiplicada por 'lacunarity' e a amplitude por 'gain'. E a soma
+// dessas camadas que da o aspecto natural - uma oitava sozinha fica lisa demais.
+// O retorno e normalizado de volta para [-1,1] dividindo pela soma das
+// amplitudes, senao mudar o numero de oitavas mudaria tambem o contraste.
+static float FbmNoise(float x, float y, const NoiseSettings &s) {
+    float sum          = 0.0f;
+    float amplitude    = 1.0f;
+    float frequency    = 1.0f;
+    float maxAmplitude = 0.0f;
+
+    for (int o = 0; o < s.octaves; o++) {
+        // A semente muda por oitava para as camadas nao ficarem correlacionadas
+        // (com a mesma semente elas repetiriam o mesmo padrao em escalas
+        // diferentes, e o resultado fica artificial).
+        sum += stb_perlin_noise3_seed(x * frequency, y * frequency, 0.0f, 0, 0, 0, s.seed + o) * amplitude;
+
+        maxAmplitude += amplitude;
+        frequency *= s.lacunarity;
+        amplitude *= s.gain;
+    }
+
+    return (maxAmplitude > 0.0f) ? (sum / maxAmplitude) : 0.0f;
+}
+
+// Terreno procedural: avalia o fBm num ponto por vertice da grade e liga o
+// vertice quando o valor passa do limiar. Tambem monta a textura de debug com o
+// campo continuo, antes do corte - por isso ela mostra tons de cinza e nao so
+// preto e branco.
+static void GenerateTerrain(bool values[], int cols, int rows, const NoiseSettings &s) {
+    Image noise = GenImageColor(cols, rows, BLACK);
 
     for (int i = 0; i < cols; i++) {
         for (int j = 0; j < rows; j++) {
-            // A imagem sai em tons de cinza, entao qualquer canal serve.
+            // Os dois eixos sao divididos por 'cols' (e nao cada um pelo seu
+            // tamanho) para a celula do ruido continuar quadrada. Dividir y por
+            // 'rows' esticaria o terreno na vertical, ja que cols != rows.
+            const float nx = (i + s.offsetX) * s.frequency / cols;
+            const float ny = (j + s.offsetY) * s.frequency / cols;
 
-            values[i * rows + j] = GetImageColor(noise, i, j).r > threshold && j > FLOOR_HEIGHT;
+            const float n = (FbmNoise(nx, ny, s) + 1.0f) * 0.5f; // [-1,1] -> [0,1]
+
+            values[i * rows + j] = (n > s.threshold) && (j > s.floorRows);
+
+            const unsigned char v = static_cast<unsigned char>(n * 255.0f);
+            ImageDrawPixel(&noise, i, j, {v, v, v, 255});
         }
     }
+
+    // Se o terreno for regerado, a textura anterior precisa sair da VRAM antes.
+    if (noiseTexture.id != 0) UnloadTexture(noiseTexture);
 
     noiseTexture = LoadTextureFromImage(noise);
     UnloadImage(noise);
@@ -127,7 +189,19 @@ int main() {
     Vector2 screenPoints[AMOUNT_OF_POINTS];
     bool values[AMOUNT_OF_POINTS] = {false}; // canto ligado (dentro) ou nao
 
-    GenerateTerrain(values, cols, rows, 2.0f, 128);
+    NoiseSettings terrain = {
+        .frequency  = 4.0f,
+        .octaves    = 4,
+        .lacunarity = 2.0f,
+        .gain       = 0.5f,
+        .offsetX    = 0.0f,
+        .offsetY    = 0.0f,
+        .seed       = 1337,
+        .threshold  = 0.45f,
+        .floorRows  = FLOOR_HEIGHT,
+    };
+
+    GenerateTerrain(values, cols, rows, terrain);
     LoadShader(); // uma vez so: compilar o shader a cada frame vazaria programas
                   // GL
 
@@ -184,11 +258,11 @@ int main() {
             }
         }
 
-        BeginShaderMode(shader);
+        // BeginShaderMode(shader);
 
-        DrawTextureEx(noiseTexture, {static_cast<float>(COLS), static_cast<float>(ROWS)}, 0.0f, 5.0f, WHITE);
+        // DrawTextureEx(noiseTexture, {static_cast<float>(COLS), static_cast<float>(ROWS)}, 0.0f, 5.0f, WHITE);
 
-        EndShaderMode();
+        // EndShaderMode();
 
         DrawText("esquerdo: liga  |  direito: desliga  |  C: limpa", 10, SCREEN_HEIGHT - 24, 14, GRAY);
 

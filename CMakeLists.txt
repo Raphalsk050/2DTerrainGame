@@ -53,6 +53,11 @@ add_executable(${PROJECT_NAME}
 target_include_directories(${PROJECT_NAME} PRIVATE
     src
     ${raygui_SOURCE_DIR}/src
+    # stb_perlin.h: e o gerador de ruido que a propria raylib usa por dentro,
+    # mas ela nao expoe os parametros (oitavas, lacunarity, gain, semente) na
+    # API publica. Incluir o header da acesso as funcoes direto - a
+    # implementacao ja esta compilada dentro da libraylib, nada e recompilado.
+    ${raylib_SOURCE_DIR}/src/external
 )
 
 target_compile_features(${PROJECT_NAME} PRIVATE cxx_std_26)
