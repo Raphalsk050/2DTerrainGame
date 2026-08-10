@@ -5,6 +5,8 @@
 // libraylib. The include path is set in CMakeLists.txt.
 #include "stb_perlin.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstddef>
 
 namespace terrain {
@@ -47,12 +49,18 @@ float Sample(Vector2 world, const Settings &s) {
 }
 
 float Density(Vector2 world, const Settings &s) {
-    if (world.y < s.skyDepth) return 0.0f;
-    return Sample(world, s);
+    // Scaled down towards the sky over a band rather than cut at a fixed
+    // height. Under a hard cut every column crosses the threshold at exactly
+    // the same y, and the horizon comes out perfectly straight regardless of
+    // the terrain beneath it. Fading makes the crossing depend on the local
+    // sample, so the surface follows the noise.
+    const float fade = std::clamp((world.y - s.skyDepth) / std::max(s.skyFade, 1.0f), 0.0f, 1.0f);
+
+    return Sample(world, s) * fade;
 }
 
-bool IsSolid(Vector2 world, const Settings &s) {
-    return Density(world, s) > s.threshold;
+bool IsSolid(Vector2 world, const Settings &s, float threshold) {
+    return Density(world, s) > threshold;
 }
 
 void Fill(Grid &grid, const Settings &s) {

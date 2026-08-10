@@ -21,6 +21,10 @@ inline constexpr float kVertexSize = 2.0f;
 // spacing gives each vertex exactly its own neighbourhood.
 inline constexpr float kPickRadius = kResolution / 2.0f;
 
+// Transparency of the liquid layer, applied once to the whole layer instead of
+// to each piece drawn into it.
+inline constexpr unsigned char kLiquidAlpha = 170;
+
 // Shader path, relative to the executable. The working directory is switched to
 // the binary's own directory at startup, and the build copies assets there.
 inline constexpr const char *kNoiseShaderPath = "assets/noise_filter_shader.fs";

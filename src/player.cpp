@@ -87,16 +87,49 @@ void Player::UpdateAttack(const PlayerInput &input) {
 }
 
 void Player::UpdateVelocity(const PlayerInput &input, float dt) {
-    const float topSpeed    = crouched_ ? player_config::kCrouchSpeed : player_config::kRunSpeed;
+    const float topSpeed = crouched_      ? player_config::kCrouchSpeed
+                           : IsSwimming() ? player_config::kSwimSpeed
+                                          : player_config::kRunSpeed;
+
     const float accel       = grounded_ ? player_config::kGroundAccel : player_config::kAirAccel;
     const float targetSpeed = input.moveX * topSpeed;
 
     velocity_.x = MoveTowards(velocity_.x, targetSpeed, accel * dt);
 
-    velocity_.y = std::min(velocity_.y + player_config::kGravity * dt, player_config::kMaxFallSpeed);
+    // Buoyancy cancels gravity in proportion to how much of the body is under
+    // the surface, and overtakes it once mostly submerged, so a body entering
+    // the water sinks a little and then rises back to float.
+    const float gravity = player_config::kGravity * (1.0f - submerged_ * player_config::kBuoyancy);
+    velocity_.y += gravity * dt;
+
+    if (submerged_ > 0.0f) {
+        // Applied as exponential decay rather than a subtraction: subtracting
+        // drag can overshoot past zero on a long frame and push the body
+        // backwards.
+        const float damping = std::exp(-player_config::kWaterDrag * submerged_ * dt);
+        velocity_.x *= damping;
+        velocity_.y *= damping;
+    }
+
+    const float maxFall = (submerged_ > 0.0f) ? player_config::kWaterMaxFall : player_config::kMaxFallSpeed;
+    velocity_.y         = std::min(velocity_.y, maxFall);
 }
 
 void Player::TryJump(const PlayerInput &input) {
+    if (IsSwimming()) {
+        // There is nothing to push off from, so the jump becomes a stroke that
+        // can be held. Taking the minimum keeps a stroke from cancelling speed
+        // already gained from a previous one.
+        if (input.jumpHeld) velocity_.y = std::min(velocity_.y, -player_config::kSwimStroke);
+
+        // Diving overrides buoyancy for as long as it is held, which is the
+        // only way down: a floating body otherwise returns to the surface.
+        if (input.crouchHeld) velocity_.y = std::max(velocity_.y, player_config::kSinkStroke);
+
+        jumpBufferTimer_ = 0.0f;
+        return;
+    }
+
     const bool canJump = grounded_ || coyoteTimer_ > 0.0f;
 
     if (jumpBufferTimer_ > 0.0f && canJump && !crouched_) {
@@ -147,6 +180,8 @@ void Player::MoveAndCollide(const World &terrain, float dt) {
 void Player::UpdateState() {
     if (attackTimer_ > 0.0f) {
         state_ = State::Attacking;
+    } else if (IsSwimming()) {
+        state_ = State::Swimming;
     } else if (!grounded_) {
         state_ = (velocity_.y < 0.0f) ? State::Jumping : State::Falling;
     } else if (crouched_) {
@@ -159,6 +194,10 @@ void Player::UpdateState() {
 }
 
 void Player::Update(const PlayerInput &input, const World &terrain, float dt) {
+    // Measured before anything moves, so buoyancy, drag and the choice between
+    // walking and swimming all act on the same reading.
+    submerged_ = terrain.SubmergedFraction(Bounds());
+
     UpdateTimers(input, dt);
     UpdateAim(input);
     UpdateStance(input, terrain);
@@ -171,7 +210,7 @@ void Player::Update(const PlayerInput &input, const World &terrain, float dt) {
 
 void Player::Draw() const {
     const Rectangle body = Bounds();
-    DrawRectangleRec(body, DARKGREEN);
+    DrawRectangleRec(body, IsSwimming() ? DARKBLUE : DARKGREEN);
 
     // Aim indicator, readable while there is no sprite to carry the pose.
     const Vector2 centre = Centre();

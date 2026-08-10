@@ -39,6 +39,25 @@ inline constexpr float kJumpBuffer = 0.12f;
 inline constexpr float kAttackDuration = 0.15f;
 inline constexpr float kAttackCooldown = 0.35f;
 
+// Upward push from liquid, as a multiple of gravity at full submersion. Above
+// 1 so a body that sinks in comes back up and settles at the surface instead of
+// resting on the bottom.
+inline constexpr float kBuoyancy = 1.4f;
+
+// Rate at which liquid bleeds off velocity, per second at full submersion.
+inline constexpr float kWaterDrag = 5.0f;
+
+// Submersion at which control switches from walking to swimming.
+inline constexpr float kSwimThreshold = 0.25f;
+
+inline constexpr float kSwimSpeed  = 150.0f;
+inline constexpr float kSwimStroke = 200.0f;
+
+// Downward stroke while holding crouch under water. Without it a body can only
+// bob at the surface, since buoyancy always wins once it is submerged.
+inline constexpr float kSinkStroke   = 170.0f;
+inline constexpr float kWaterMaxFall = 200.0f;
+
 // Distance from the body centre to the centre of the strike box, and the side
 // of that box. The box stays axis aligned whatever the aim angle, which is an
 // approximation of a swing but keeps the hit test a rectangle intersection.
@@ -61,7 +80,7 @@ struct PlayerInput {
 // Platform character colliding against the terrain grid.
 class Player {
 public:
-    enum class State { Idle, Running, Jumping, Falling, Crouching, Attacking };
+    enum class State { Idle, Running, Jumping, Falling, Crouching, Attacking, Swimming };
 
     explicit Player(Vector2 spawn);
 
@@ -83,6 +102,10 @@ public:
     State CurrentState() const { return state_; }
     bool IsGrounded() const { return grounded_; }
     bool IsAttacking() const { return attackTimer_ > 0.0f; }
+
+    // Deep enough in liquid that walking and jumping give way to swimming.
+    bool IsSwimming() const { return submerged_ >= player_config::kSwimThreshold; }
+    float Submerged() const { return submerged_; }
     int Facing() const { return facing_; }
 
 private:
@@ -122,6 +145,9 @@ private:
     int facing_           = 1;
     bool grounded_        = false;
     bool crouched_        = false;
+
+    // Share of the body under liquid, in [0,1].
+    float submerged_ = 0.0f;
 
     float coyoteTimer_     = 0.0f;
     float jumpBufferTimer_ = 0.0f;

@@ -12,6 +12,9 @@ namespace marching_squares {
 // Draws the isoline where the field crosses `threshold`.
 void DrawContour(const Grid &grid, float threshold, Color color, float thickness = 2.0f);
 
+// Fills the region where the field is above `threshold`.
+void DrawFilled(const Grid &grid, float threshold, Color color);
+
 // Debug overlay: one square per sample, coloured by which side of the threshold
 // it falls on.
 void DrawVertices(const Grid &grid, float threshold, float size, Color filledColor, Color emptyColor);

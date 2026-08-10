@@ -30,10 +30,12 @@ struct Settings {
     float offsetX;    // Sampling offset. Scrolls the map without changing the
     float offsetY;    // shape of the terrain.
     int seed;         // Equal seeds yield identical terrain.
-    float threshold;  // Value in [0,1] above which a point counts as ground.
-                      // Higher values leave less ground.
-    float skyDepth;   // Everything above this world Y is forced empty, so the
-                      // world has an open sky rather than starting inside rock.
+    float skyDepth;   // World Y above which the field is fully faded out, so
+                      // the world has an open sky rather than starting inside
+                      // rock.
+    float skyFade;    // Depth in pixels over which that fade happens. Zero
+                      // would cut the field at a single height and draw a
+                      // ruler-straight horizon across the whole world.
 };
 
 // Continuous noise value in [0,1] at a world position, before the sky is cut.
@@ -43,8 +45,11 @@ float Sample(Vector2 world, const Settings &s);
 // value stored in the field, so the contour can interpolate through it.
 float Density(Vector2 world, const Settings &s);
 
-// Density thresholded into ground or air.
-bool IsSolid(Vector2 world, const Settings &s);
+// Density thresholded into ground or air. The threshold is passed in rather
+// than stored here: it belongs to the element the field represents, and keeping
+// a second copy alongside the noise settings is what let drawing and collision
+// disagree about where the ground was.
+bool IsSolid(Vector2 world, const Settings &s, float threshold);
 
 // Fills every sample of a block from its own world position.
 void Fill(Grid &grid, const Settings &s);

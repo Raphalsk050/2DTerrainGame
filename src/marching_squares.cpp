@@ -78,6 +78,71 @@ void DrawContour(const Grid &grid, float threshold, Color color, float thickness
     }
 }
 
+namespace {
+
+// Signed area under the shoelace formula. Raylib emits its own quads as
+// top-left, bottom-left, bottom-right, top-right, which is negative in screen
+// coordinates, where y grows downwards. Backface culling is enabled, so a
+// polygon of the opposite sign would be discarded rather than drawn.
+float SignedArea(const Vector2 *points, int count) {
+    float sum = 0.0f;
+    for (int k = 0; k < count; k++) {
+        const Vector2 &p = points[k];
+        const Vector2 &q = points[(k + 1) % count];
+        sum += p.x * q.y - q.x * p.y;
+    }
+    return sum / 2.0f;
+}
+
+// Polygon of the filled part of one cell.
+//
+// The cell boundary is walked in order, emitting each corner that is above the
+// threshold and each crossing on an edge that straddles it. Because every
+// vertex produced lies on the boundary of the cell and they are produced in
+// boundary order, the result is always convex and can be drawn as a fan. The
+// two ambiguous configurations come out as hexagons whose edges coincide with
+// the lines DrawCell draws, so filled and outlined shapes agree.
+int FilledPolygon(Vector2 a, Vector2 b, Vector2 c, Vector2 d, float va, float vb, float vc, float vd, float threshold,
+                  Vector2 *out) {
+    const Vector2 corner[4] = {a, b, c, d};
+    const float value[4]    = {va, vb, vc, vd};
+
+    int count = 0;
+    for (int k = 0; k < 4; k++) {
+        const int next = (k + 1) % 4;
+
+        if (value[k] > threshold) out[count++] = corner[k];
+
+        if ((value[k] > threshold) != (value[next] > threshold)) {
+            out[count++] = Crossing(corner[k], corner[next], value[k], value[next], threshold);
+        }
+    }
+
+    return count;
+}
+
+} // namespace
+
+void DrawFilled(const Grid &grid, float threshold, Color color) {
+    if (color.a == 0) return;
+
+    for (int i = 0; i < grid.Cols() - 1; i++) {
+        for (int j = 0; j < grid.Rows() - 1; j++) {
+            Vector2 polygon[8];
+
+            const int count = FilledPolygon(grid.PointAt(i, j), grid.PointAt(i + 1, j), grid.PointAt(i + 1, j + 1),
+                                            grid.PointAt(i, j + 1), grid.ValueAt(i, j), grid.ValueAt(i + 1, j),
+                                            grid.ValueAt(i + 1, j + 1), grid.ValueAt(i, j + 1), threshold, polygon);
+
+            if (count < 3) continue;
+
+            if (SignedArea(polygon, count) > 0.0f) std::reverse(polygon, polygon + count);
+
+            DrawTriangleFan(polygon, count, color);
+        }
+    }
+}
+
 void DrawVertices(const Grid &grid, float threshold, float size, Color filledColor, Color emptyColor) {
     const Vector2 origin = {size / 2.0f, size / 2.0f};
 
