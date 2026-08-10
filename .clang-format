@@ -1,0 +1,48 @@
+---
+# Estilo do projeto. Sem este arquivo o clang-format cai no padrao LLVM
+# (2 espacos de indentacao, 80 colunas), que nao e o estilo usado aqui.
+BasedOnStyle: LLVM
+
+# --- indentacao ------------------------------------------------------------
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+AccessModifierOffset: -4
+ContinuationIndentWidth: 4
+
+# --- largura da linha ------------------------------------------------------
+# 80 colunas quebrava chamadas curtas no meio. 120 deixa a maioria das
+# chamadas da raylib caber inteira. Para desligar a quebra por completo,
+# troque por 0.
+ColumnLimit: 120
+
+# --- alinhamento em coluna -------------------------------------------------
+# Mantem os #define e as atribuicoes consecutivas alinhados, como ja estavam
+# escritos a mao no main.cpp.
+AlignConsecutiveMacros: Consecutive
+AlignConsecutiveAssignments: Consecutive
+AlignTrailingComments: true
+
+# --- construcoes curtas em uma linha so ------------------------------------
+# Preserva coisas como "if (state == 0) return;" e os "case 1: case 14: ..."
+# do switch do marching squares em uma unica linha.
+AllowShortIfStatementsOnASingleLine: WithoutElse
+AllowShortLoopsOnASingleLine: true
+AllowShortCaseLabelsOnASingleLine: true
+AllowShortFunctionsOnASingleLine: Empty
+AllowShortBlocksOnASingleLine: Empty
+
+# --- quebras ---------------------------------------------------------------
+BreakBeforeBraces: Attach
+BinPackArguments: true
+BinPackParameters: true
+AllowAllArgumentsOnNextLine: true
+AllowAllParametersOfDeclarationOnNextLine: true
+
+# --- diversos --------------------------------------------------------------
+PointerAlignment: Right
+SpaceBeforeParens: ControlStatements
+SortIncludes: false
+IndentCaseLabels: false
+KeepEmptyLinesAtTheStartOfBlocks: false
+MaxEmptyLinesToKeep: 1
