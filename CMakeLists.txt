@@ -50,6 +50,7 @@ add_executable(${PROJECT_NAME}
     src/main.cpp
     src/grid.cpp
     src/marching_squares.cpp
+    src/noise_view.cpp
     src/terrain.cpp
 )
 
@@ -66,3 +67,12 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 target_compile_features(${PROJECT_NAME} PRIVATE cxx_std_26)
 
 target_link_libraries(${PROJECT_NAME} PRIVATE raylib_cpp raylib)
+
+# Assets are loaded at runtime through paths relative to the executable, which
+# switches its working directory to its own location at startup.
+add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            ${CMAKE_CURRENT_SOURCE_DIR}/assets
+            $<TARGET_FILE_DIR:${PROJECT_NAME}>/assets
+    COMMENT "Copying assets next to the executable"
+)
