@@ -32,7 +32,7 @@ void Draw(const Grid &grid, const NoiseView &noiseView) {
     marching_squares::DrawVertices(grid, config::kVertexSize, RED, LIGHTGRAY);
     marching_squares::DrawContour(grid, DARKBLUE);
 
-    noiseView.Draw({static_cast<float>(config::kCols), static_cast<float>(config::kRows)}, 5.0f);
+    // noiseView.Draw({static_cast<float>(config::kCols), static_cast<float>(config::kRows)}, 5.0f);
 
     DrawText("left: fill  |  right: erase  |  C: clear", 10, config::kScreenHeight - 24, 14, GRAY);
 
