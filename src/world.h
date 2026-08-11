@@ -228,11 +228,35 @@ public:
     // the world is visible rather than merely suspected.
     int PinnedChunks() const;
 
+    // How many vertices the world remembers having been changed by hand.
+    //
+    // This is the one thing that grows without bound and never shrinks, so it is
+    // reported for the same reason the pinned chunks are: it is the price of the
+    // edits being permanent, and it should be visible rather than suspected.
+    int RememberedEdits() const;
+
 private:
     struct Chunk {
         std::vector<Grid> fields; // One per Element.
         bool edited      = false; // Hand-painted, so no longer derivable.
         bool holdsLiquid = false; // Flooded, so no longer derivable either.
+    };
+
+    // The state a hand-edited vertex was left in.
+    //
+    // Not a history and not a delta — the state. A brush leaves a vertex holding
+    // exactly one material at full or holding nothing at all, so the last stroke
+    // over a vertex is the whole truth about it and editing the same one a
+    // hundred times stores one of these.
+    struct Edit {
+        // Global lattice indices, not chunk-relative: a vertex on a border
+        // belongs to four chunks, and none of them has to be resident for the
+        // edit to be remembered.
+        int i = 0;
+        int j = 0;
+
+        // What was left there, or nothing where it was dug out.
+        std::optional<Element> element;
     };
 
     static std::int64_t Key(int cx, int cy);
@@ -258,8 +282,25 @@ private:
     void WriteVertex(Element element, Vector2 vertex, float value);
 
     // Marks every chunk holding a copy of a lattice position as hand-edited, so
-    // it is no longer regenerated from the noise.
+    // it is no longer regenerated from the noise while it is resident.
     void MarkEdited(Vector2 vertex);
+
+    // Records what a brush left at a lattice position, so that the chunk holding
+    // it can be thrown away and rebuilt exactly.
+    //
+    // Pinning the chunk was the whole of what kept an edit alive, and a pin is
+    // not the same thing as a memory: a chunk far enough behind the player is
+    // dropped whatever it holds, or the world grows with the distance walked
+    // rather than with the size of the view. So walking far enough from
+    // something built and coming back found it gone.
+    void Remember(Vector2 vertex, std::optional<Element> element);
+
+    // Replays every remembered edit that lands in a freshly generated chunk.
+    //
+    // Runs after the exclusion pass, which is where a live edit happens too: a
+    // brush writes over the finished field, not into the contest that produced
+    // it.
+    void ApplyEdits(Chunk &chunk, int cx, int cy) const;
 
     // Global lattice index range covering a region.
     void LatticeRange(Rectangle region, int &outI0, int &outJ0, int &outI1, int &outJ1) const;
@@ -290,7 +331,11 @@ private:
 
     // Empties a lattice position of everything that fills it, solid and liquid
     // alike, and adds what was there to `yield`.
-    void ClearVertex(Vector2 vertex, Yield &yield);
+    //
+    // Reports whether it removed anything a body could not walk through, which
+    // is the same question as whether it counted as an edit: a brush swept
+    // through open sky changes nothing and must not be remembered as having.
+    bool ClearVertex(Vector2 vertex, Yield &yield);
 
     // Both edits a brush can make. Placing clears the vertex first, so it is
     // the same edit as digging with a second half.
@@ -366,6 +411,20 @@ private:
     light::Field lightField_;
 
     weather::Sky sky_;
+
+    // Every vertex the player has changed, grouped by the chunk it is filed
+    // under. The whole of what this world cannot derive from its own noise.
+    //
+    // Grouped so that generating a chunk is four lookups rather than a walk of
+    // every edit ever made — four, because a vertex on a border belongs to four
+    // chunks and is filed under one of them, which is the same asymmetry
+    // WriteVertex has, read the other way round.
+    //
+    // It grows with what has been built and never shrinks, which is what makes
+    // the edits permanent. The cost is per *vertex touched*, not per chunk: a
+    // chunk somebody set one block down in used to hold nine full grids, some
+    // forty kilobytes, for the sake of one changed number.
+    std::unordered_map<std::int64_t, std::vector<Edit>> edits_;
 
     // One entry per lattice column, filled the first time that column is asked
     // about. Cleared with the world, since regenerating changes the ground.

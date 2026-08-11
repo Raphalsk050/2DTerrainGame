@@ -173,8 +173,9 @@ void Draw(const World &world, const Player &player, const Hotbar &hotbar, const 
                         debug.unlit ? "on" : "off", debug.fastWeather ? "on" : "off", lantern),
              10, 46, 14, GRAY);
 
-    DrawText(TextFormat("chunks: %d (%d pinned)   water in view: %.1f   light rays: %ld", world.ResidentChunks(),
-                        world.PinnedChunks(), world.TotalWater(view), world.Light().Rays()),
+    DrawText(TextFormat("chunks: %d (%d pinned)   edits kept: %d   water in view: %.1f   light rays: %ld",
+                        world.ResidentChunks(), world.PinnedChunks(), world.RememberedEdits(), world.TotalWater(view),
+                        world.Light().Rays()),
              10, 70, 14, GRAY);
 
     const Vector2 centre = player.Centre();

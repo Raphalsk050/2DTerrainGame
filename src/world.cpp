@@ -19,9 +19,16 @@ constexpr int kKeepMargin = 2;
 // world pins every chunk it contains, and memory grows with the distance
 // walked rather than with the size of the view.
 //
-// What comes back is the generated world, so only hand edits and liquid that
-// has moved are lost, and only far out of sight. The number bounds the memory
-// the world can ever hold: it is the radius, in chunks, of everything kept.
+// Nothing built is lost by this any more. A hand edit is remembered as the
+// vertex it changed and replayed when the chunk is rebuilt, so dropping an
+// edited chunk out here costs the work of generating it again and nothing else
+// — the pin is only there to spare a player standing near what they have built
+// from paying that over and over.
+//
+// Liquid that has moved is still lost, and deliberately: it is simulation
+// rather than intent, and where a pool has crept to is not something worth
+// remembering about a place nobody can see. What comes back is the pool the
+// generator describes.
 constexpr int kDropMargin = 12;
 
 // How sharply one field is held under another where the two must not overlap.
@@ -378,7 +385,90 @@ World::Chunk &World::Emplace(int cx, int cy) {
         }
     }
 
+    // And last, whatever was done to it by hand, which no amount of noise can
+    // produce. Last because a brush writes over the finished field rather than
+    // into the contest that produced it, and that is exactly what a live edit
+    // does — so a chunk rebuilt from these is the chunk that was thrown away.
+    ApplyEdits(chunk, cx, cy);
+
     return chunks_.emplace(Key(cx, cy), std::move(chunk)).first->second;
+}
+
+void World::Remember(Vector2 vertex, std::optional<Element> element) {
+    int cx = 0;
+    int cy = 0;
+    ToChunk(vertex, cx, cy);
+
+    const float step = static_cast<float>(spacing_);
+
+    const int i = static_cast<int>(std::lround(vertex.x / step));
+    const int j = static_cast<int>(std::lround(vertex.y / step));
+
+    std::vector<Edit> &bucket = edits_[Key(cx, cy)];
+
+    // Overwritten rather than appended. A vertex has one state, so digging out
+    // what was placed there leaves one record saying it is empty, and a stroke
+    // swept back and forth over the same spot costs what one stroke costs.
+    //
+    // A linear scan, and it can afford to be: a bucket holds at most the
+    // vertices of one chunk, and a brush of any usable radius covers a hundredth
+    // of them.
+    for (Edit &edit : bucket) {
+        if (edit.i != i || edit.j != j) continue;
+
+        edit.element = element;
+        return;
+    }
+
+    bucket.push_back({i, j, element});
+}
+
+void World::ApplyEdits(Chunk &chunk, int cx, int cy) const {
+    if (edits_.empty()) return;
+
+    const float step = static_cast<float>(spacing_);
+
+    for (int dx = 0; dx <= 1; dx++) {
+        for (int dy = 0; dy <= 1; dy++) {
+            const auto found = edits_.find(Key(cx + dx, cy + dy));
+            if (found == edits_.end()) continue;
+
+            for (const Edit &edit : found->second) {
+                const Vector2 vertex = {static_cast<float>(edit.i) * step, static_cast<float>(edit.j) * step};
+
+                int i = 0;
+                int j = 0;
+                chunk.fields[0].ToLocal(vertex, i, j);
+
+                // Filed under a neighbouring chunk and not reaching into this
+                // one. Only the vertices on a shared border do.
+                if (!chunk.fields[0].InBounds(i, j)) continue;
+
+                // Emptied and then refilled, because that is what the brush did:
+                // two materials never share a vertex, so placing one is a
+                // replacement and digging is the same edit without its second
+                // half.
+                //
+                // Solids only. Liquid is simulation rather than intent — it moves
+                // on its own, so where it was poured says nothing about where it
+                // is — and it has its own reason to keep a chunk resident.
+                for (std::size_t e = 0; e < kElementCount; e++) {
+                    if (!kElements[e].rules.occupies) continue;
+
+                    chunk.fields[e].SetValue(i, j, 0.0f);
+                }
+
+                if (edit.element.has_value()) {
+                    chunk.fields[ElementIndex(*edit.element)].SetValue(i, j, 1.0f);
+                }
+
+                // So the rebuilt chunk is pinned exactly as the original was, and
+                // so anything that looks only at hand-touched chunks — the rain's
+                // surface, for one — still finds it.
+                chunk.edited = true;
+            }
+        }
+    }
 }
 
 void World::Update(Rectangle view) {
@@ -426,6 +516,10 @@ void World::Update(Rectangle view) {
 void World::Reset() {
     chunks_.clear();
     skyline_.clear();
+
+    // The edits too, or the world would come back with everything ever built in
+    // it still standing. Regenerating means from the noise alone.
+    edits_.clear();
 }
 
 int World::PinnedChunks() const {
@@ -436,6 +530,13 @@ int World::PinnedChunks() const {
     }
 
     return pinned;
+}
+
+int World::RememberedEdits() const {
+    std::size_t total = 0;
+    for (const auto &[key, bucket] : edits_) total += bucket.size();
+
+    return static_cast<int>(total);
 }
 
 std::vector<World::ChunkView> World::ChunksIn(Rectangle view) const {
@@ -523,7 +624,19 @@ void World::MarkEdited(Vector2 vertex) {
     for (int dx = -1; dx <= 0; dx++) {
         for (int dy = -1; dy <= 0; dy++) {
             const auto it = chunks_.find(Key(cx + dx, cy + dy));
-            if (it != chunks_.end()) it->second.edited = true;
+            if (it == chunks_.end()) continue;
+
+            // Only the chunks that actually hold a copy of the vertex, which is
+            // four at a corner and one in the middle of a chunk. This used to
+            // mark all four regardless, so a single block set down anywhere
+            // pinned the three chunks around it as well — quadrupling the very
+            // memory the drop margin exists to bound, and disagreeing with the
+            // same walk in WriteVertex, which has always bounds-checked.
+            int i = 0;
+            int j = 0;
+            it->second.fields[0].ToLocal(vertex, i, j);
+
+            if (it->second.fields[0].InBounds(i, j)) it->second.edited = true;
         }
     }
 }
@@ -631,7 +744,9 @@ float World::SubmergedFraction(Rectangle rect) const {
     return (rows > 0) ? static_cast<float>(total / rows) : 0.0f;
 }
 
-void World::ClearVertex(Vector2 vertex, Yield &yield) {
+bool World::ClearVertex(Vector2 vertex, Yield &yield) {
+    bool removed = false;
+
     for (std::size_t e = 0; e < kElementCount; e++) {
         const ElementDef &def = kElements[e];
         if (!def.rules.occupies && !def.rules.flows) continue;
@@ -641,14 +756,21 @@ void World::ClearVertex(Vector2 vertex, Yield &yield) {
 
         // Already empty. Skipping it matters beyond the wasted write: marking
         // the chunk edited is what pins it in memory, and a brush swept through
-        // open sky would otherwise pin everything it passed over.
+        // open sky would otherwise pin everything it passed over — and now
+        // remember every vertex it passed over as well.
         if (value <= 0.0f) continue;
 
         if (value > def.threshold) yield[e]++;
 
         WriteVertex(element, vertex, 0.0f);
-        if (!def.rules.flows) MarkEdited(vertex);
+
+        if (!def.rules.flows) {
+            MarkEdited(vertex);
+            removed = true;
+        }
     }
+
+    return removed;
 }
 
 void World::ApplyBrush(Vector2 world, float radius, std::optional<Element> place, Yield &yield) {
@@ -677,15 +799,23 @@ void World::ApplyBrush(Vector2 world, float radius, std::optional<Element> place
             // Digging and placing a solid start the same way. Two materials
             // never share a vertex, so placing is a replacement, and digging is
             // this edit without its second half.
-            ClearVertex(vertex, yield);
+            const bool dug = ClearVertex(vertex, yield);
 
-            if (!place.has_value()) continue;
+            if (!place.has_value()) {
+                // Only where there was something to dig. A brush swung through
+                // open sky has not changed the world and must not be remembered
+                // as having: the memory is what makes an edit outlive its chunk,
+                // and it is the one thing here that never shrinks.
+                if (dug) Remember(vertex, std::nullopt);
+                continue;
+            }
 
             // Painted samples are pinned to the top of the range rather than
             // nudged, so a brush stroke reads as a definite edit and not as a
             // faint gradient.
             WriteVertex(*place, vertex, 1.0f);
             MarkEdited(vertex);
+            Remember(vertex, *place);
         }
     }
 }

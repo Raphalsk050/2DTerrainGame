@@ -370,6 +370,56 @@ part was never the noise:
 At 0.44 ms a 60 fps frame affords roughly 38 chunks, against the handful that
 stream in while walking.
 
+### 4.5 An edit outlives the chunk it was made in
+
+The generator is a pure function of position, so a chunk can be thrown away and
+rebuilt identically — **except for what was done to it by hand**, which by
+definition no function of position can produce. That was held by keeping the
+chunk resident: `edited` pinned it, and `kDropMargin` dropped it anyway at twelve
+chunks so that memory grew with the size of the world held rather than with the
+distance walked. So walking ~2300 px from something built and coming back found
+the noise had taken it back. **A pin is not a memory.**
+
+What is stored instead is the edit, not the chunk:
+
+- **A brush leaves a vertex in one of two states**: holding exactly one material
+  at full, or holding nothing. It never leaves a gradient — placing pins to 1.0
+  and digging clears — so the *last* stroke over a vertex is the whole truth
+  about it, and an edit is one `optional<Element>`. Editing the same vertex a
+  hundred times stores one record.
+- **Replayed at the end of `Emplace`**, after the exclusion pass, because that is
+  where a live edit lands too: a brush writes over the finished field, not into
+  the contest that produced it. So a rebuilt chunk *is* the chunk that was
+  dropped.
+- **Filed by chunk**, so generating one is four map lookups rather than a walk of
+  every edit ever made — four because a border vertex belongs to four chunks and
+  is filed under one, the same asymmetry `WriteVertex` has, read backwards.
+- **Only liquid is still lost past the drop margin**, and deliberately: where a
+  pool has crept to is simulation, not intent, and it is what made pinning grow
+  without bound in the first place.
+
+The cost moved from per *chunk touched* to per *vertex touched*. A chunk somebody
+set one block down in used to hold nine full grids — some 40 KB — for the sake of
+one changed number. Reported in the HUD as `edits kept`, since it is now the one
+structure that never shrinks.
+
+Two things fell out of it:
+
+- **`MarkEdited` was over-marking.** It set the flag on all four chunks around a
+  vertex without checking which actually hold a copy of it — unlike `WriteVertex`,
+  whose identical walk has always bounds-checked. One block set down pinned the
+  three chunks beside it as well, quadrupling the very memory `kDropMargin` exists
+  to bound. Caught because a rebuilt world reported 4 pinned chunks where the
+  original reported 10.
+- **The replay has to re-set `edited`.** Not for the pin, which is now only a
+  performance nicety, but because `SurfaceProfile` opens only hand-touched
+  chunks — a rebuilt roof that forgot the flag would stop stopping the rain.
+
+Verified: a wall of 84 solid vertices and a dug pit, walked 7680 px away until
+zero chunks remain pinned, walked back — 84 vertices and the same pit, the same
+4 pinned chunks, and the rain still landing on the wall at the same height. `R`
+still clears everything.
+
 ---
 
 ## 5. Ores
