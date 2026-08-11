@@ -73,6 +73,7 @@ void ReadToggles(Toggles &toggles) {
     if (IsKeyPressed(KEY_F4)) toggles.layers = !toggles.layers;
     if (IsKeyPressed(KEY_F5)) toggles.light = !toggles.light;
     if (IsKeyPressed(KEY_F6)) toggles.unlit = !toggles.unlit;
+    if (IsKeyPressed(KEY_F7)) toggles.fastWeather = !toggles.fastWeather;
 }
 
 void DrawLight(const World &world, Rectangle view) {

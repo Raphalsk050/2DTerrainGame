@@ -253,6 +253,36 @@ float Signed(Vector2 world, const NoiseShape &shape) {
     return Fbm(nx, ny, shape);
 }
 
+float Billow(Vector2 world, const NoiseShape &shape) {
+    const float aspect = std::max(shape.aspect, 1e-3f);
+
+    const float nx = (world.x + shape.offsetX) * shape.frequency / (kFeatureSpan * aspect);
+    const float ny = (world.y + shape.offsetY) * shape.frequency / kFeatureSpan;
+
+    float sum          = 0.0f;
+    float amplitude    = 1.0f;
+    float frequency    = 1.0f;
+    float maxAmplitude = 0.0f;
+
+    for (int o = 0; o < shape.octaves; o++) {
+        // The magnitude of the octave rather than its value. Everything that made
+        // this field smooth is in the sign it is throwing away.
+        const float value =
+            stb_perlin_noise3_seed(nx * frequency, ny * frequency, 0.0f, 0, 0, 0, shape.seed + o);
+
+        sum += std::abs(value) * amplitude;
+
+        maxAmplitude += amplitude;
+        frequency *= shape.lacunarity;
+        amplitude *= shape.gain;
+    }
+
+    // Normalised by the same peak the signed field uses, so a billow and a sample
+    // of the same shape cover comparable ranges and a cutoff measured against one
+    // means something against the other.
+    return (maxAmplitude > 0.0f) ? std::min(sum / (maxAmplitude * kFbmPeak), 1.0f) : 0.0f;
+}
+
 float Sample(Vector2 world, const NoiseShape &shape) {
     // Not clamped, deliberately. The rarest ore's cutoff is a quantile in the far
     // tail of this field, and clamping flattens the whole of that tail to one: the

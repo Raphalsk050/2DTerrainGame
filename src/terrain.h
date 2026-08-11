@@ -75,6 +75,16 @@ float Sample(Vector2 world, const NoiseShape &shape);
 // The same field before it is folded into [0,1], so its zero set is reachable.
 float Signed(Vector2 world, const NoiseShape &shape);
 
+// Folded noise, in [0,1]: each octave contributes its magnitude rather than its
+// value.
+//
+// Folding puts a crease wherever the field crosses zero and a rounded dome
+// wherever it peaks, so what comes out is a mass of bulges pressed together
+// instead of the smooth swells of Sample. That is the shape of a cauliflower, and
+// therefore of a cumulus cloud — it is what the octaves of a real one look like,
+// each puff carrying smaller puffs on its surface.
+float Billow(Vector2 world, const NoiseShape &shape);
+
 // The ground surface.
 //
 // A function of the horizontal position alone. That is the whole point: a

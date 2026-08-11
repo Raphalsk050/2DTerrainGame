@@ -114,12 +114,16 @@ void Draw(const World &world, const Player &player, const Hotbar &hotbar, const 
     const Rectangle view = ViewBounds(camera);
 
     BeginDrawing();
-    ClearBackground(RAYWHITE);
 
     BeginMode2D(camera);
 
-    // The sky first, so the ground is drawn over it. Underground the band is out of
-    // view and this returns having done nothing.
+    // The air first, filling the frame. It replaces clearing it rather than being
+    // drawn over a cleared one: there is no height at which the sky is not some
+    // colour, so there is nothing for a background to be.
+    world.Sky().DrawAtmosphere(view);
+
+    // Then the cloud standing in it, and then the ground over both. Underground the
+    // band is out of view and this returns having done nothing.
     world.Sky().DrawClouds(view, world.Spacing());
 
     world.DrawTerrain(view);
@@ -162,8 +166,8 @@ void Draw(const World &world, const Player &player, const Hotbar &hotbar, const 
     DrawText("left: apply brush  |  X: place/dig  |  1-9 or wheel: material  |  - / +: brush size  |  R: regenerate",
              10, 28, 14, GRAY);
     DrawText(TextFormat("V: vertices  |  F3: chunks  |  F4: height grid  |  F5: light probes  |  F6: unlit %s  |"
-                        "  , . : lantern %.1f",
-                        debug.unlit ? "on" : "off", lantern),
+                        "  F7: fast weather %s  |  , . : lantern %.1f",
+                        debug.unlit ? "on" : "off", debug.fastWeather ? "on" : "off", lantern),
              10, 46, 14, GRAY);
 
     DrawText(TextFormat("chunks: %d (%d pinned)   water in view: %.1f   light rays: %ld", world.ResidentChunks(),
@@ -355,22 +359,78 @@ int main() {
     // The sky. Cloud, and the two things cloud is: shade on the ground below it and
     // rain out of the bottom of it.
     const weather::Settings sky = {
+        // The air. Not a pair of colours to interpolate between: the two facts that
+        // produce the gradient, and the gradient follows. Air thins with height and
+        // blue scatters five times harder than red, which between them give the pale
+        // band at the horizon, the deep blue overhead and the fade towards black
+        // above that.
+        .air =
+            {
+                // About half a screen, so the sky visibly deepens within one view
+                // rather than only after climbing for a while.
+                .scaleHeight = 320.0f,
+                .thickness   = 3.5f,
+                .rayleigh    = {0.52f, 1.15f, 2.60f},
+
+                .overcast     = {150, 156, 168, 255},
+                .overcastWash = 0.55f,
+                .bandHeight   = 10.0f,
+            },
+
+        // How a cloud takes the light. Six nested layers, each covering less of the
+        // sky than the one under it and each shifted a little further towards the
+        // sun, so what shows of each is a band of shading crowded onto the side away
+        // from the light.
+        .shading =
+            {
+                .layers     = 6,
+                .coreShrink = 0.74f,
+                .sunOffset  = 8.0f,
+
+                // Up and well to the right. The horizontal share has to be the larger
+                // of the two or the shift reads as "lit from above" and the cloud has
+                // no side to it — which is the whole difference between a shaded
+                // shape and a lit one.
+                //
+                // Once there is a time of day, this is the one thing it has to move,
+                // and every cloud in the world relights itself.
+                .sun = {0.80f, -0.60f},
+
+                .absorption = 1.9f,
+
+                // The two lights a cloud is under. The shadowed side takes the blue
+                // of the sky rather than going towards black, which is the single
+                // most important thing about painting one.
+                .sunlight = {255, 250, 240, 255},
+                .ambient  = {124, 146, 188, 255},
+
+                // A storm's underside, and clearly darker than the sky it hangs in.
+                .rainAmbient = {68, 76, 96, 255},
+
+                .rainDarken = 0.62f,
+                .rainPack   = 0.55f,
+
+                // How far a laden column sinks down the layer stack. This is the
+                // per-cloud half of the darkening: the tints above are one set for
+                // the whole draw, and this is what decides which of them a given
+                // cloud actually lands in.
+                .weightSink = 0.75f,
+            },
+
         // Well above the highest ground, which the relief puts at about y 20, so
         // cloud is always sky and never something that can be walked into.
         .ceiling  = -640.0f,
         .base     = -320.0f,
         .rainDrop = 100.0f,
 
-        // Stretched a little over two to one, because a cloud is wider than it is
-        // tall. Frequency against aspect is what sets the size: this pair gives one
-        // about four hundred and forty pixels across and two hundred deep, so a
-        // couple of them are in view at once and each is comfortably shorter than the
-        // band it floats in. Stretched much further and one cloud is wider than the
-        // screen and taller than the band, and the sky comes out nearly empty however
-        // full it was asked to be.
-        // Two octaves rather than three: a third layer of detail breaks a cloud into
-        // wisps, and what is wanted is a shape with an edge.
-        .shape = {.frequency = 4.2f, .octaves = 2, .aspect = 2.2f, .seed = 5501},
+        // Billow noise, so the contour is a mass of rounded lobes rather than a
+        // smooth swell. Four octaves: each puff carries smaller puffs on it, which is
+        // what a cumulus does and what plain fbm cannot give at any octave count.
+        //
+        // Frequency against aspect sets the size. This pair gives a cloud about four
+        // hundred pixels across and a hundred and eighty deep, so a couple are in
+        // view at once and each is comfortably shorter than the band it floats in.
+        .shape = {.frequency = 5.4f, .octaves = 4, .gain = 0.46f, .aspect = 2.3f, .seed = 5501},
         .wind  = 18.0f,
 
         // A front spans four or five screens and takes a couple of minutes to pass,
@@ -379,21 +439,29 @@ int main() {
         .front     = {.frequency = 0.18f, .octaves = 2, .seed = 5502},
         .frontWind = 22.0f,
 
-        // A third of the sky on an average day, and the front pushes that further
-        // than the climate does: where you are should colour the weather, not
+        // Just over a quarter of the sky on an average day, and the front pushes that
+        // further than the climate does: where you are should colour the weather, not
         // decide it, or half the world would never see rain at all.
-        // Just over a quarter of the sky on an average day. A column counts as shaded
-        // if cloud stands anywhere in the band above it, so the share of ground in
-        // shadow comes out around half again this — a third of it, which is what a
-        // partly cloudy day looks like.
+        //
+        // A column counts as shaded if cloud stands anywhere in the band above it, so
+        // the share of ground in shadow comes out around half again this.
         .cover             = 0.28f,
         .frontInfluence    = 0.40f,
         .humidityInfluence = 0.22f,
         .softness          = 0.13f,
 
         // Rain is not rolled for. It is what a sky this full does.
-        .rainAt   = 0.52f,
-        .rainFull = 0.82f,
+        //
+        // The upper figure has to sit inside the cover the sky actually reaches —
+        // about two thirds — or the heaviest weather in the world still only drizzles
+        // and no cloud is ever dark.
+        // The threshold decides how much of the world is wet at any moment, and it is
+        // far more sensitive than it looks: at 0.52 only a twelfth of the world was
+        // raining, and nothing at all within three thousand pixels of the spawn for
+        // the first twelve minutes — which is why the rain could not be found rather
+        // than merely being hard to see.
+        .rainAt   = 0.44f,
+        .rainFull = 0.68f,
 
         // Chosen against the exposure curve rather than by the look of the number:
         // this is a quarter darker than open sky on screen, which reads as a shadow
@@ -401,12 +469,12 @@ int main() {
         // all, which is what it did.
         .shade = 0.78f,
 
-        // Grey enough to read against a bright sky, and much darker with rain in
-        // it. The light pass dims a cloud by its own shade on the way to the
-        // screen, which is not how a cloud is lit but is exactly how one looks.
-        .tint     = {222, 230, 245, 255},
-        .rainTint = {126, 136, 158, 255},
         .rainLine = {168, 190, 222, 255},
+
+        // Dense enough to read as rain. At ninety a heavy shower was a dozen ticks
+        // spread across the screen, which reads as a fault rather than as weather.
+        .rainLength  = 26.0f,
+        .rainDensity = 240.0f,
     };
 
     World world(settings, config::kResolution);
@@ -480,7 +548,7 @@ int main() {
         // read during the solve. Advancing it afterwards would light every frame by
         // the sky of the frame before it, which nothing would look wrong about and
         // which would be wrong.
-        world.StepWeather(dt);
+        world.StepWeather(dt * (debug.fastWeather ? debug_view::kFastWeather : 1.0f));
 
         // Solved after the world has finished moving, so the light matches the
         // frame it is about to be drawn over rather than the one before it.

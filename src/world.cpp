@@ -924,6 +924,11 @@ void World::StepLight(Rectangle region) {
         .radiance = skyLight_,
         .horizon  = settings_.surface.level,
         .fade     = kSkyFade,
+
+        // Where the cloud's underside is, so the shadow starts below the cloud rather
+        // than running the whole height of the column.
+        .coverBelow = sky_.ShadeBelow(),
+        .coverFade  = kSkyFade,
     };
 
     lightField_.Solve(medium_, lightSettings_);

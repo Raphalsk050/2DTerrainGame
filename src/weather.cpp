@@ -29,6 +29,26 @@ float Swing(float share) {
     return (share - 0.5f) * 2.0f;
 }
 
+unsigned char ToByte(float value) {
+    return static_cast<unsigned char>(std::clamp(value, 0.0f, 1.0f) * 255.0f + 0.5f);
+}
+
+Color Scale(Color c, float factor) {
+    auto channel = [factor](unsigned char v) {
+        return static_cast<unsigned char>(std::clamp(v * factor, 0.0f, 255.0f));
+    };
+
+    return {channel(c.r), channel(c.g), channel(c.b), c.a};
+}
+
+Color Mix(Color a, Color b, float t) {
+    const float s = std::clamp(t, 0.0f, 1.0f);
+
+    return {static_cast<unsigned char>(a.r + (b.r - a.r) * s),
+            static_cast<unsigned char>(a.g + (b.g - a.g) * s),
+            static_cast<unsigned char>(a.b + (b.b - a.b) * s), 255};
+}
+
 // Deterministic value in [0,1) from an integer. Rain has thousands of drops and no
 // two of them may sit in the same place, but nothing about a drop is worth
 // remembering between frames, so each one is hashed out of its own index instead
@@ -44,9 +64,21 @@ float Hash(int value) {
 
 } // namespace
 
+float Sky::Field(Vector2 world) const {
+    // Billow rather than plain fbm. Folding each octave puts a crease where the
+    // field crosses zero and a dome where it peaks, so the contour comes out as a
+    // mass of bulges pressed together — a cauliflower, which is the shape of a
+    // cumulus cloud at every scale it has.
+    return terrain::Billow({world.x - time_ * settings_.wind, world.y}, settings_.shape);
+}
+
 void Sky::Configure(const Settings &settings, const terrain::Settings &terrain) {
     settings_ = settings;
     terrain_  = terrain;
+
+    // The gradient is measured from the ground, so raising the land raises the
+    // horizon with it and nothing has to be re-picked.
+    settings_.air.horizon = terrain.surface.level;
 
     // Sampled a little over one feature apart, and by a different irrational
     // multiple on each axis. Perlin noise is exactly zero at every corner of its own
@@ -70,7 +102,8 @@ void Sky::Configure(const Settings &settings, const terrain::Settings &terrain) 
             const Vector2 at = {(i - kSamplesPerAxis / 2) * feature * aspect * kStrideX,
                                 (j - kSamplesPerAxis / 2) * feature * kStrideY};
 
-            values.push_back(Share(at, settings_.shape));
+            // Through Field, so what is measured is the field that will be drawn.
+            values.push_back(Field(at));
         }
     }
 
@@ -114,42 +147,65 @@ Column Sky::ColumnAt(float worldX) const {
                                   + Swing(climate.humidity) * settings_.humidityInfluence,
                               0.0f, 1.0f);
 
-    // Rain from the regional cover, not from the cloud directly overhead. Rain that
-    // switched off in the gap between two clouds would read as a fault, and what
-    // actually decides whether it rains is how much water the air over this stretch
-    // of world is carrying.
-    column.rain = SmoothStep(settings_.rainAt, settings_.rainFull, column.cover);
+    column.cutoff = Cutoff(column.cover);
+
+    // How much cloud actually stands here, measured rather than assumed.
+    //
+    // Everything above this line decides how much cloud the region gets; from here
+    // down it is the cloud itself being asked. Rain used to be read straight off
+    // `cover`, which meant a whole stretch of world rained at once whether or not
+    // there was anything overhead to rain out of.
+    constexpr int kSteps = 12;
+
+    const float span = (settings_.base + settings_.rainDrop) - settings_.ceiling;
+
+    if (span > 0.0f && column.cover > 0.0f) {
+        float thickness = 0.0f;
+
+        for (int step = 0; step < kSteps; step++) {
+            const float through = (static_cast<float>(step) + 0.5f) / static_cast<float>(kSteps);
+
+            thickness += DensityAt({worldX, settings_.ceiling + through * span}, column);
+        }
+
+        column.weight = std::clamp(thickness / static_cast<float>(kSteps) / std::max(settings_.weightFull, 0.01f),
+                                   0.0f, 1.0f);
+    }
+
+    // And rain out of that. A cloud heavy enough drops what it carries; the one
+    // beside it, in the same weather, does not.
+    column.rain = SmoothStep(settings_.rainAt, settings_.rainFull, column.weight);
 
     return column;
 }
 
-float Sky::DensityAt(Vector2 world, const Column &column) const {
-    if (column.cover <= 0.0f) return 0.0f;
+float Sky::MarginAt(Vector2 world, const Column &column) const {
+    if (column.cover <= 0.0f) return -1.0f;
 
-    // The underside hangs lower where it is raining, which is the visible half of a
+    // The underside hangs lower under heavy weather, which is the visible half of a
     // rain cloud sitting closer to the ground than a fair-weather one.
-    const float base = settings_.base + settings_.rainDrop * column.rain;
+    //
+    // Driven by the region's cover rather than by the rain, and it has to be: the
+    // rain is now measured by marching down this very band, so a band that moved
+    // with the rain would be defining the thing that defines it. The height of a
+    // cloud base is a property of the air mass anyway, which is regional.
+    const float base = settings_.base + settings_.rainDrop * column.cover;
     const float span = base - settings_.ceiling;
-    if (span <= 0.0f) return 0.0f;
+    if (span <= 0.0f) return -1.0f;
 
     const float through = (world.y - settings_.ceiling) / span;
-    if (through <= 0.0f || through >= 1.0f) return 0.0f;
+    if (through <= 0.0f || through >= 1.0f) return -1.0f;
 
     // Nothing at the top and bottom of the band, thickest through the middle. A
     // cloud with a flat top and a flat bottom reads as a slab of ceiling rather
     // than as weather.
-    const float profile = std::sin(through * kPi);
+    const float taper = (1.0f - std::sin(through * kPi)) * settings_.bandTaper;
 
-    // The shape itself, on the wind.
-    const float shape = Share({world.x - time_ * settings_.wind, world.y}, settings_.shape);
+    return Field(world) - column.cutoff - taper;
+}
 
-    // The measured cutoff for the share of sky this column is carrying, raised
-    // towards the edges of the band. Because the cutoff was measured from the field
-    // and the taper is zero through the middle, `cover` is the share of the sky that
-    // is cloud there — the number means what it says.
-    const float cutoff = Cutoff(column.cover) + (1.0f - profile) * settings_.bandTaper;
-
-    return std::clamp((shape - cutoff) / std::max(settings_.softness, 1e-3f), 0.0f, 1.0f);
+float Sky::DensityAt(Vector2 world, const Column &column) const {
+    return std::clamp(MarginAt(world, column) / std::max(settings_.softness, 1e-3f), 0.0f, 1.0f);
 }
 
 float Sky::CoverAt(float worldX) const {
@@ -190,6 +246,105 @@ float Sky::RainAt(float worldX) const {
     return ColumnAt(worldX).rain;
 }
 
+Color Sky::AirAt(float worldY, float cover) const {
+    const Atmosphere &air = settings_.air;
+
+    // Altitude above the horizon. Y grows downward, so the subtraction is this way
+    // round, and below the horizon there is no more air to add.
+    const float altitude = std::max(air.horizon - worldY, 0.0f);
+
+    // How much air stands in the line of sight from here. It thins exponentially
+    // with height, and this one number is the entire gradient.
+    const float airmass = air.thickness * std::exp(-altitude / std::max(air.scaleHeight, 1.0f));
+
+    // What that air scatters, channel by channel. Blue scatters some five times
+    // more strongly than red, so thin air passes blue alone and thick air scatters
+    // everything until it is white. The pale horizon, the blue overhead and the
+    // dark above it are all this expression — none of the three is written down
+    // anywhere.
+    const Color lit = {ToByte(1.0f - std::exp(-air.rayleigh.x * airmass)),
+                       ToByte(1.0f - std::exp(-air.rayleigh.y * airmass)),
+                       ToByte(1.0f - std::exp(-air.rayleigh.z * airmass)), 255};
+
+    // Then washed towards grey by the cloud standing over the column. What is being
+    // looked at under a full sky is the underside of the cloud, not the air.
+    return Mix(lit, air.overcast, cover);
+}
+
+void Sky::DrawAtmosphere(Rectangle view) const {
+    const float band = std::max(settings_.air.bandHeight, 1.0f);
+
+    // Snapped to the world, so the bands do not crawl up and down as the view
+    // scrolls.
+    const float top = std::floor(view.y / band) * band;
+
+    // How overcast the region is, not whether a cloud stands over this exact spot.
+    // Read once for the whole view, for two reasons: per column it would draw a comb
+    // of vertical stripes across the sky behind the clouds, and per cloud it would
+    // wash out the very background the cloud has to be seen against.
+    const float cover = ColumnAt(view.x + view.width * 0.5f).cover
+                      * std::clamp(settings_.air.overcastWash, 0.0f, 1.0f);
+
+    for (float y = top; y < view.y + view.height; y += band) {
+        DrawRectangleRec({view.x, y, view.width, band}, AirAt(y + band * 0.5f, cover));
+    }
+}
+
+float Sky::LayerMargin(const Column &column, int index, int count) const {
+    if (count <= 1 || index <= 0) return kCloudEdge;
+
+    const Shading &shading = settings_.shading;
+
+    // How far in this layer is, from the outer edge to the core.
+    const float into = static_cast<float>(index) / static_cast<float>(count - 1);
+
+    // Each layer covers a smaller share of the sky than the one under it, and the
+    // margin it needs is the difference between the two measured cutoffs. Taking it
+    // from the calibration rather than by stepping a fixed amount is what keeps the
+    // bands evenly weighted whatever the field is doing: every layer is a stated
+    // fraction of the cloud's area, not a stated distance up an unknown slope.
+    //
+    // A raining cloud packs them tighter, so more of its body falls in the dark
+    // bands. That is the other half of a rain cloud being darker — it is deeper, so
+    // less of it is near the light.
+    const float pack   = 1.0f - shading.rainPack * column.rain;
+    const float shrink = std::clamp(shading.coreShrink, 0.0f, 0.98f) * into * pack;
+
+    return Cutoff(column.cover * (1.0f - shrink)) - column.cutoff;
+}
+
+Vector2 Sky::LayerShift(int index) const {
+    const Shading &shading = settings_.shading;
+
+    const float length = std::sqrt(shading.sun.x * shading.sun.x + shading.sun.y * shading.sun.y);
+    if (length <= 0.0f) return {0.0f, 0.0f};
+
+    const float reach = static_cast<float>(index) * shading.sunOffset;
+
+    return {shading.sun.x / length * reach, shading.sun.y / length * reach};
+}
+
+Color Sky::LayerTint(const Column &column, int index, int count) const {
+    const Shading &shading = settings_.shading;
+
+    // Depth of this layer below the surface facing the sun, in layers. The core is
+    // shifted furthest towards the light, so it is the shallowest; the outermost
+    // ring is what is left showing on the far side, and is the deepest.
+    const float depth = (count > 1) ? (1.0f - static_cast<float>(index) / static_cast<float>(count - 1)) : 0.0f;
+
+    // Beer's law. This is the whole shading model, and it is why the bands crowd
+    // together near the light and spread out into the shadow — a linear ramp would
+    // space them evenly and read as a machined gradient rather than as a cloud.
+    const float lit = std::exp(-shading.absorption * depth) * (1.0f - shading.rainDarken * column.rain);
+
+    // Over the ambient the cloud is sitting in, never towards black. The shaded side
+    // of a cloud is lit by the whole hemisphere above it, which is why it is blue
+    // and not dark — and under a storm what changes is which ambient that is.
+    const Color ambient = Mix(shading.ambient, shading.rainAmbient, std::clamp(column.rain, 0.0f, 1.0f));
+
+    return Mix(ambient, shading.sunlight, lit);
+}
+
 void Sky::DrawClouds(Rectangle view, int spacing) const {
     // The band, clipped to the view. Underground there is no overlap at all and the
     // whole cost of the sky goes away without anything having to ask where the
@@ -200,44 +355,76 @@ void Sky::DrawClouds(Rectangle view, int spacing) const {
     const float bottom = std::min(view.y + view.height, deepest);
     if (bottom <= top) return;
 
+    const int layers = std::max(settings_.shading.layers, 1);
     const float step = static_cast<float>(std::max(spacing, 1));
 
-    // Snapped to the lattice, so the cloud's squares line up with the world's and
-    // do not crawl as the view scrolls.
-    const Vector2 origin = {std::floor(view.x / step) * step, std::floor(top / step) * step};
+    // Widened by the reach of the shift, so a layer moved towards the sun still has
+    // field under it rather than being clipped along the edge of the grid.
+    const float margin = std::abs(LayerShift(layers).x) + std::abs(LayerShift(layers).y) + step;
 
-    const int cols = static_cast<int>(std::ceil(view.width / step)) + 2;
-    const int rows = static_cast<int>(std::ceil((bottom - top) / step)) + 2;
+    const Vector2 origin = {std::floor((view.x - margin) / step) * step, std::floor((top - margin) / step) * step};
 
-    Grid cloud(origin, cols, rows, static_cast<int>(step));
-    Grid raining(origin, cols, rows, static_cast<int>(step));
+    const int cols = static_cast<int>(std::ceil((view.width + 2.0f * margin) / step)) + 2;
+    const int rows = static_cast<int>(std::ceil((bottom - top + 2.0f * margin) / step)) + 2;
+
+    Grid field(origin, cols, rows, static_cast<int>(step));
+
+    // The same field held back by however much water each column is carrying.
+    //
+    // Two grids rather than one because they answer different questions. The plain
+    // field draws the silhouette, which a heavy cloud must not lose any of; the
+    // held-back one draws the shading inside it, and holding it back is what sinks a
+    // laden column into the darker layers.
+    Grid shaded(origin, cols, rows, static_cast<int>(step));
+
+    // One pass over the field, and one column of weather per column of grid. The
+    // layers are drawn from these same grids at rising thresholds, so the shading
+    // costs rasterising and not sampling.
+    std::vector<Column> columns(static_cast<std::size_t>(cols));
 
     for (int i = 0; i < cols; i++) {
-        // Once per column, not once per sample. This is the expensive half.
-        const Column column = ColumnAt(origin.x + i * step);
+        columns[i] = ColumnAt(origin.x + i * step);
+
+        // How far down the stack this column's water pushes it, in the field's own
+        // units: a share of the whole depth the layers span.
+        const float sink = settings_.shading.weightSink * columns[i].weight
+                         * LayerMargin(columns[i], layers - 1, layers);
 
         for (int j = 0; j < rows; j++) {
-            const float density = DensityAt(cloud.PointAt(i, j), column);
+            const float margin = MarginAt(field.PointAt(i, j), columns[i]);
 
-            cloud.SetValue(i, j, density);
-
-            // The same field scaled by how hard it is raining, rather than masked
-            // where it is not. Scaling shrinks the dark core smoothly into the lit
-            // cloud around it; masking would end it on a ruled vertical line
-            // running down the middle of a cloud.
-            raining.SetValue(i, j, density * column.rain);
+            field.SetValue(i, j, margin);
+            shaded.SetValue(i, j, margin - sink);
         }
     }
 
-    // Two passes over the one field: every cloud in its lit colour, then the part of
-    // it carrying rain in a darker one over the top.
-    marching_squares::DrawPixelated(cloud, kCloudLevel, settings_.tint, BLANK, config::kPixelSize);
-    marching_squares::DrawPixelated(raining, kCloudLevel, settings_.rainTint, BLANK, config::kPixelSize);
+    // The weather in the middle of the view decides the layer margins and colours.
+    // They cannot be per-column: a layer is drawn as one shape across the whole
+    // grid, and a threshold that changed along it would tear the bands apart.
+    const Column middle = columns[static_cast<std::size_t>(cols / 2)];
+
+    // Outermost first, each nested inside the last and shifted a little further
+    // towards the sun, so what is left showing of each is a band of shading on the
+    // side away from the light.
+    for (int layer = 0; layer < layers; layer++) {
+        const Vector2 shift = LayerShift(layer);
+
+        Grid shifted(Vector2{origin.x + shift.x, origin.y + shift.y}, cols, rows, static_cast<int>(step));
+
+        // Layer zero is the silhouette and takes the field as it is. Everything above
+        // it is shading and takes the field held back by the column's own water.
+        const Grid &source = (layer == 0) ? field : shaded;
+
+        for (int i = 0; i < cols; i++) {
+            for (int j = 0; j < rows; j++) shifted.SetValue(i, j, source.ValueAt(i, j));
+        }
+
+        marching_squares::DrawPixelated(shifted, LayerMargin(middle, layer, layers),
+                                        LayerTint(middle, layer, layers), BLANK, config::kPixelSize);
+    }
 }
 
 void Sky::DrawRain(Rectangle view) const {
-    const float lowest = settings_.base + settings_.rainDrop;
-
     // Drops are placed by index across the view, so the same drop stays the same
     // drop as the camera moves and the rain does not reshuffle itself every frame.
     const float perDrop = terrain::kFeatureSpan / std::max(settings_.rainDensity, 1.0f);
@@ -277,7 +464,28 @@ void Sky::DrawRain(Rectangle view) const {
 
         if (head < view.y || tail > view.y + view.height) continue;
 
-        DrawLineEx({x, tail}, {x, head}, 1.0f, Fade(settings_.rainLine, 0.35f + 0.45f * column.rain));
+        // Coloured against the sky the drop is actually falling through, not against
+        // a colour written down here.
+        //
+        // A fixed pale blue was fine while the background was flat white and became
+        // invisible the moment the air behind it turned blue as well — the streak and
+        // the sky were within a few values of each other. Taking the air at the
+        // drop's own height and darkening it means the rain reads whatever the sky is
+        // doing, which is also what rain looks like: seen against daylight it is a
+        // darker streak, because what it does to the light behind it is get in the
+        // way of it.
+        const Color behind = AirAt(head, column.rain);
+        const float weight = 0.42f + 0.28f * column.rain;
+
+        const Color line = Mix(behind, settings_.rainLine, 0.35f);
+
+        // Drawn as a bar a pixel-square wide and snapped to the same grid the world
+        // is rasterised on, so the rain belongs to the picture instead of being a
+        // hairline ruled over it.
+        const float pixel = std::max(config::kPixelSize, 1.0f);
+        const float left  = std::floor(x / pixel) * pixel;
+
+        DrawRectangleRec({left, tail, pixel, head - tail}, Fade(Scale(line, 1.0f - weight), 0.85f));
     }
 }
 

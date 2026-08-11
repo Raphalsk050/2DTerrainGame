@@ -142,6 +142,19 @@ struct Sky {
     // Depth below the horizon over which it fades to nothing, so the sky does
     // not end along a ruled line drawn across the light.
     float fade = 1.0f;
+
+    // Height below which Medium::cover applies, and the distance over which it
+    // comes in. Y grows downward, so "below" is a larger number.
+    //
+    // A cloud shades what is under it. It does not shade what is beside it and it
+    // does not shade itself, but the cover is one figure for a whole column, so
+    // without a floor under it the shadow runs the entire height of that column:
+    // the open sky above the cloud is drawn in shadow, and so is the cloud.
+    //
+    // Defaults to reaching everywhere, which is the right answer for a medium that
+    // has no cover in it.
+    float coverBelow = -kUnreachable;
+    float coverFade  = 1.0f;
 };
 
 struct Settings {

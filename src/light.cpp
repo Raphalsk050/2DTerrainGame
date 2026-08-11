@@ -240,7 +240,11 @@ Radiance Field::SkyAt(Vector2 world) const {
     // outright. Applied here, at the end of a ray that reached the sky, so a cloud
     // shades the ground beneath itself and nothing else: the shadow lands where the
     // rays that would have been sunlight were going.
-    return sky.radiance * (share * (1.0f - CoverAt(world.x)));
+    // And only below the cloud that casts it. A ray ending in the open sky, or
+    // inside the cloud itself, has not passed under anything.
+    const float under = std::clamp((world.y - sky.coverBelow) / std::max(sky.coverFade, 1.0f), 0.0f, 1.0f);
+
+    return sky.radiance * (share * (1.0f - CoverAt(world.x) * under));
 }
 
 float Field::CoverAt(float worldX) const {

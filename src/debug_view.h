@@ -25,7 +25,18 @@ struct Toggles {
     // right answer for playing and the wrong one for looking at what was
     // generated, which is what this is for.
     bool unlit = false;
+
+    // Runs the weather far faster than real time.
+    //
+    // A front takes minutes to cross, which is right to play under and hopeless to
+    // work on: finding out what the rain looks like meant waiting for it, or walking
+    // several screens to meet it. This is the only toggle here that changes the world
+    // rather than how it is drawn, which is why it says so on screen.
+    bool fastWeather = false;
 };
+
+// How much faster the weather runs while that toggle is on.
+inline constexpr float kFastWeather = 40.0f;
 
 // Reads the function keys that switch the overlays.
 void ReadToggles(Toggles &toggles);
