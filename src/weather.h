@@ -1,32 +1,42 @@
 #pragma once
 
+#include "grid.h"
 #include "raylib.h"
 #include "terrain.h"
 
 // The sky over the world: the air itself, the cloud standing in it, the rain it
 // brings and the shade it casts.
 //
-// Clouds here are not scenery painted behind the world. They are one field with
-// three consequences, and all three are read from the same value:
+// There is one direction of dependency here and everything follows it downwards.
+// Nothing asks downwards.
 //
-//   what is drawn in the sky
-//   how much daylight reaches the ground beneath   (light::Medium::cover)
-//   whether it is raining, and how hard
+//   THE WEATHER   a state of the whole world, on a timer
+//   clear / fair / overcast / storm
+//        |
+//        +--> how much of the sky is filled
+//        +--> whether it is raining, and how hard
+//        +--> the palette the cloud is lit and shaded with
+//                |
+//   THE CLOUD FIELD   procedural, a pure function of position
+//        |
+//        +--> what is drawn in the sky
+//        +--> how much daylight reaches the ground   (light::Medium::cover)
+//        +--> where the drops fall from
 //
-// Which means the couplings are not wired up after the fact; they cannot come
-// apart, because there is only one thing there. What the sky is doing over a
-// stretch of world is decided by three inputs, and each is one term:
+// Rain belongs to the top of that list and not the bottom, and this is the one
+// structural decision in the module. It was the other way round and it was wrong:
+// rain read off each column's own cloud thickness, so a small cluster rained while
+// the cluster beside it, in the same weather, did not. Every game that has solved
+// this solved it the same way — Minecraft's sky is one sky for the whole dimension
+// and every biome turns overcast together, Terraria's rain covers all surface
+// biomes for its duration, Stardew picks one weather per day for the map. Weather
+// is a state of the world; a cloud is what that state looks like.
 //
-//   the front     a slow broad field drifting past, so weather arrives and passes
-//   the climate   wet ground is cloudier than dry ground        (terrain::Climate)
-//   the land      high ground is cloudier than low ground       (humidityLift)
+// The front survives, demoted. It ripples the cover from place to place so the sky
+// is not a flat sheet. It no longer decides whether it rains.
 //
-// And rain feeds back into the cloud that produced it: a raining column hangs
-// lower, packs its shading tighter and is drawn darker. Same field, so it costs
-// nothing and cannot disagree with itself.
-//
-// Nothing is simulated. The whole sky is a pure function of position and elapsed
-// time, exactly as the terrain is a pure function of position, so there is no
+// Nothing is simulated. The weather is a pure function of elapsed time and the
+// cloud a pure function of position, exactly as the terrain is, so there is no
 // state to keep and two views of the same world at the same moment agree.
 namespace weather {
 
@@ -38,6 +48,54 @@ namespace weather {
 // properly nested shapes; a clamped density saturates at one through the whole
 // interior and every threshold above zero would draw the same outline.
 inline constexpr float kCloudEdge = 0.0f;
+
+// A kind of weather, and everything that follows from having it.
+//
+// One row per mood, and the row is the whole definition: the sky's fill, the rain,
+// the palette and the shade all move together because they are the same fact about
+// the same afternoon. Crossing between two moods interpolates every field of the
+// row at once, so a storm gathers rather than switching on.
+enum class Mood { Clear, Fair, Overcast, Storm, Count };
+
+inline constexpr int kMoodCount = static_cast<int>(Mood::Count);
+
+struct MoodDef {
+    const char *name;
+
+    // Share of the sky this weather fills. The storm's figure is what makes cloud
+    // cover most of the sky when it rains, which is not a separate rule.
+    float cover;
+
+    // How hard it rains under it, in [0,1]. Uniform across the world, which is the
+    // entire point: it is the weather that is raining, not the cloud.
+    float rain;
+
+    // How likely this mood is to be the next one drawn. Relative, not a share.
+    float likelihood;
+
+    // The two lights a cloud is under in this weather: the sun on it, and the sky
+    // all around it. A shadowed part of a cloud is not black, it is sky-coloured,
+    // which is the most important thing about painting one — and under a storm what
+    // changes is not how much ambient reaches the cloud but what the ambient is.
+    Color sunlight;
+    Color ambient;
+
+    // Share of the daylight the thickest cloud holds back. Read against the
+    // exposure curve, not as a brightness: see Settings::shade below.
+    float shade;
+};
+
+// The weather at one moment, which is generally a blend of two moods.
+struct Weather {
+    const char *name = "clear";
+
+    float cover = 0.0f;
+    float rain  = 0.0f;
+    float shade = 0.0f;
+
+    Color sunlight = {255, 255, 255, 255};
+    Color ambient  = {255, 255, 255, 255};
+};
 
 // The air, as a scattering medium.
 //
@@ -98,87 +156,86 @@ struct Atmosphere {
 
 // How a cloud takes the light.
 //
-// The light at a point in a cloud is marched for, not inferred from the outline:
-// step from the point towards the sun, add up the cloud passed through, and apply
-// Beer's law to what is left. A lobe standing proud of the mass is bright because
-// the march out of it is short; the hollow beside it is dark because the march is
-// long; the underside is darkest because the whole cloud is above it.
+// One rule, applied per cell, from the cell's own depth into the cloud. Nothing
+// about it can depend on where the camera is, because the camera is not one of its
+// inputs — which is the fault this replaced, where a single column at the centre of
+// the screen decided the shading of every cloud in view.
 //
-// That one rule gives everything a hand-drawn cloud has — the lit crown, the
-// shaded belly, the rim where one lobe overlaps the next — without any of them
-// being drawn. It also means a heavy cloud is dark *because it is thick*, which is
-// a property of the cloud itself and not of where the player happens to stand.
+// The rule is the one the film and game industry settled on for volumetric cloud,
+// from Andrew Schneider's Nubis work on the Decima engine:
 //
-// The result is quantised into `layers` levels, so what reaches the screen is
-// flat bands of colour rather than a smooth ramp. That is the pixel-art half of
-// it, and it is a step at the end rather than the model itself.
+//     BeerPowder(d) = 2 · exp(-absorption·d) · (1 - exp(-2·absorption·d))
+//
+// The first factor is Beer-Lambert: light falls away exponentially with how much
+// cloud it has come through. On its own it is monotone, and a cloud shaded by it
+// alone reads as a smear with a gradient on it. The second is the powder term. It
+// models the light that scatters back out near a surface, and it turns the curve
+// around at the very edge, so a thin fringe is *darker* than the body just inside
+// it. That reversal is the whole difference between a shape with a gradient and
+// something the eye reads as cloud.
+//
+// `d` is how much cloud lies between the cell and the sun, read by sampling the
+// same grid at an offset — a lookup, not a new sample of the noise.
+//
+// The result is quantised into `layers` levels, so what reaches the screen is flat
+// bands of colour. That is the pixel-art step, and it happens at the very end
+// rather than being the model.
 struct Shading {
-    // How many layers a cloud is built from. Three is a flat sticker, eight is a
-    // smooth gradient with no pixel-art character left; five or six reads as a
-    // drawn cloud.
+    // How many bands the light is quantised into. Three is a flat sticker, ten is a
+    // smooth ramp with no pixel-art character left; five or six reads as drawn.
     int layers = 6;
 
-    // Share of its outermost extent the innermost layer covers. Small values give
-    // a tight bright core and a broad shaded body.
-    float coreShrink = 0.74f;
-
-    // Pixels each successive layer is shifted towards the sun.
-    float sunOffset = 7.0f;
-
-    // Direction the sun lies in. Y grows downward, so a negative Y is overhead.
-    // Need not be normalised.
-    Vector2 sun = {0.55f, -0.84f};
-
-    // How much of the light is lost per layer of cloud it passes through.
+    // Direction the sun lies in. Y grows downward, so a negative Y is overhead. The
+    // horizontal share should be the larger, or the shading reads as "lit from
+    // above" and the cloud has no side to it.
     //
-    // Beer's law: what reaches a layer is exp(-absorption * depth), with depth
-    // counted from the sun-facing surface. This is the whole of the shading model
-    // and it is why the bands are close together near the light and spread out in
-    // the shadow, which is how a real cloud shades and not how a linear ramp does.
-    float absorption = 1.9f;
+    // Once there is a time of day this is the one thing it has to move, and every
+    // cloud in the world relights itself.
+    Vector2 sun = {0.80f, -0.60f};
 
-    // The two lights a cloud is under: the sun on it, and the sky all around it.
-    // A shadowed part of a cloud is not black, it is sky-coloured, which is the
-    // single most important thing about painting one.
-    Color sunlight = {255, 250, 240, 255};
-    Color ambient  = {132, 152, 190, 255};
+    // How far towards the sun the depth is read, in pixels.
+    float sunReach = 120.0f;
 
-    // The ambient a fully raining cloud sits in instead.
-    //
-    // Needed as its own colour rather than as a darkening of the one above, because
-    // the shaded side of a cloud can never be darker than the light falling on it,
-    // and a rain cloud's underside plainly is darker than the sky beside it. What
-    // changes under a storm is not how much of the ambient reaches the cloud — it is
-    // what the ambient is.
-    Color rainAmbient = {72, 80, 99, 255};
+    // How much light is lost per unit of cloud between a point and the sun.
+    float absorption = 2.2f;
 
-    // How much of the light a fully raining cloud keeps, and how much tighter its
-    // layers pack.
+    // How strongly the powder term bites, and over what depth of local cloud it
+    // comes in. Powder at zero leaves plain Beer-Lambert.
     //
-    // Both, because a rain cloud is not merely a grey cloud: it is deeper, so more
-    // of it is far from the light, and the shading crowds towards its underside.
-    // Packing the layers is what carries that second half.
-    float rainDarken = 0.52f;
-    float rainPack   = 0.45f;
+    // These two are measured on *different* things and that is the whole subtlety:
+    // Beer is the path to the sun, powder is the density here. Applying powder to
+    // the path is wrong in a way that is easy to miss and obvious once drawn —
+    // powder is zero at zero depth, so a point with a clear line to the sun, which
+    // is the brightest thing in the sky, comes out in the darkest band.
+    float powder      = 1.0f;
+    float powderScale = 9.0f;
 
-    // How far a fully laden column is pushed down the layer stack, as a share of
-    // the whole stack.
-    //
-    // This is what makes a cloud's darkness its own rather than the region's. The
-    // layers are drawn one shape at a time and take one colour each, so the colour
-    // cannot vary along a layer — but the *field* can, and holding a heavy column's
-    // field back means fewer of the bright inner layers reach it and more of the
-    // dark outer ones show. Per cell, so the heavy cloud goes dark while the wisp
-    // beside it does not, whatever the weather is doing to the pair of them.
-    //
-    // Applied to the shading layers only, never to the outermost. That one draws the
-    // silhouette, and a heavy cloud has to be larger than a light one, not smaller.
-    float weightSink = 0.75f;
+    // Lightest and darkest the quantised bands may run, as a share of the range
+    // between the mood's ambient and its sunlight. Keeping the top short of one
+    // leaves the brightest band below pure sunlight, which stops a cloud edge from
+    // blowing out to white.
+    float darkest  = 0.06f;
+    float lightest = 0.94f;
 };
 
 struct Settings {
     Atmosphere air{};
     Shading shading{};
+
+    // The weather this world can have, and how long a spell of it lasts.
+    //
+    // The clock is not a state machine with a current mood in it. Time is cut into
+    // spells of `spellMinutes`, each spell's mood drawn from a hash of its index and
+    // the world seed, and the last `crossMinutes` of a spell blended into the next.
+    // So the weather is a pure function of the clock: nothing to store, nothing to
+    // save, and two views of the same world at the same moment agree.
+    MoodDef moods[kMoodCount]{};
+
+    float spellMinutes = 6.0f;
+    float crossMinutes = 1.5f;
+
+    // Reseeds the sequence of spells without touching anything else.
+    int seed = 7717;
 
     // The band of sky cloud fills. Y grows downward, so `ceiling` is the top of it
     // and `base` the underside. Both are absolute heights, well above
@@ -187,93 +244,157 @@ struct Settings {
     float ceiling = -620.0f;
     float base    = -300.0f;
 
-    // How much lower the underside hangs where it is raining at full strength. A
-    // rain cloud sits closer to the ground than a fair-weather one, and this is
-    // the visible half of that.
+    // How much lower the underside hangs in the heaviest weather. A rain cloud sits
+    // closer to the ground than a fair-weather one, and this is the visible half of
+    // that.
     float rainDrop = 90.0f;
 
-    // The cloud shape itself, sampled as billow noise rather than as plain fbm.
-    // Stretched sideways, because a cloud is wider than it is tall.
+    // The cloud shape itself. Stretched sideways, because a cloud is wider than it
+    // is tall.
     terrain::NoiseShape shape{};
 
     // Pixels per second the cloud field drifts. Weather that does not move reads
     // as wallpaper.
     float wind = 16.0f;
 
-    // A second field, far broader and far slower, deciding whether this stretch of
-    // world is clear or overcast at all.
+    // Pixels per second the base shape travels through the third axis of its own
+    // noise, which is what makes a cloud build and come apart rather than only
+    // arrive.
     //
-    // Without it the sky holds the same amount of cloud everywhere for ever, and
-    // rain stops being an event that arrives and becomes a property of the map.
+    // Drift alone was not enough, and it is worth saying why: a field that only
+    // slides is a stencil, and the eye tracks the shape through it and sees a
+    // cutout on a conveyor. Nothing about the silhouette ever changed. Depth is the
+    // one axis that changes it, since the world has no third dimension for the
+    // field to be scrolled along — see terrain::NoiseShape::offsetZ.
+    //
+    // One feature of the base shape is a couple of hundred pixels, so this wants to
+    // be a few pixels a second: enough that a cloud is a different cloud by the time
+    // it has crossed the screen, and no more. Above ten the sky churns.
+    float evolve = 6.0f;
+
+    // A broad slow field that ripples the cover from place to place, so the sky is
+    // not one flat sheet at whatever level the weather set.
+    //
+    // Demoted on purpose. This used to decide whether it rained, which is what made
+    // rain a property of the map instead of an event.
     terrain::NoiseShape front{};
     float frontWind = 6.0f;
 
-    // Share of the sky filled where the front is neutral and the ground below is
-    // of average humidity: the weather this world has by default.
-    float cover = 0.28f;
+    // How far the front and the climate may push the weather's own cover, either
+    // way. Both small: they texture the sky, they do not overrule the weather. A
+    // storm has to stay overcast everywhere in it.
+    float frontInfluence    = 0.14f;
+    float humidityInfluence = 0.10f;
 
-    // How far the front and the climate can push that share either way. The front
-    // is the larger of the two on purpose — where you are should colour the
-    // weather, not decide it, or half the world would never see rain.
-    float frontInfluence    = 0.40f;
-    float humidityInfluence = 0.22f;
+    // The lobes: a Worley at several times the base frequency, inverted so its cells
+    // read as bumps rather than as walls, and added to the Perlin.
+    //
+    // It has to be a *finer* field than the base or there are no lobes to speak of —
+    // cells the size of the cloud only move the outline about. This is what turns a
+    // swell into a cauliflower.
+    terrain::NoiseShape lobes{};
+    float worleyMix = 0.35f;
+
+    // How the lobes travel relative to the deck carrying them, in pixels per
+    // second. Added to the wind rather than replacing it, so the churn stays put
+    // when the wind is retuned.
+    //
+    // Worley is two-dimensional and has no depth to be moved through, so this is
+    // its share of what `evolve` does for the base shape: bumps that crawl over the
+    // swell instead of being painted on it. Mostly vertical, and deliberately.
+    // Sideways is the direction the eye has already been told means wind, so a
+    // large horizontal difference reads as texture sliding under a stencil —
+    // whereas nothing else in the sky moves up, so the eye reads that as the cloud
+    // convecting, which is what a cumulus does. Y grows downward, so a negative
+    // second term climbs.
+    Vector2 lobeCrawl = {-3.0f, -5.0f};
+
+    // The finer Worley that eats into the silhouette, and how deep it bites.
+    //
+    // This is the erosion pass, and it is what turns a smooth outline into a rim of
+    // small lobes. Sampled only within `erosionBand` of the cutoff, since deep inside
+    // a cloud it cannot change the outcome and outside it there is no outline to
+    // erode — which is most of the cost of the field, skipped.
+    terrain::NoiseShape detail{};
+    float erosion     = 0.0f;
+    float erosionBand = 0.16f;
+
+    // The same for the erosion, and about twice as fast. Small features change
+    // faster than large ones, so the rim should boil while the lobes only roll.
+    Vector2 detailCrawl = {4.0f, -11.0f};
+
+    // How much coarser than the world's lattice the cloud field is sampled, as a
+    // multiple of it.
+    //
+    // A cloud is some four hundred pixels across, so at two this is still thirty-odd
+    // samples over one of them, and the rasteriser interpolates between them anyway.
+    // The shape does not coarsen; only the sampling of it does, and the field is by
+    // far the most expensive thing in the sky.
+    float fieldStep = 2.0f;
 
     // Margin over which the outermost edge of a cloud softens, in field units.
     float softness = 0.13f;
 
-    // How much harder it is to be cloud at the very top and bottom of the band than
-    // through the middle of it, in field units.
+    // How sharply the band thins towards its top and bottom, as an exponent on the
+    // profile across it. Zero is a slab; one is a clean sine; above one the deck
+    // pulls in to a thinner ribbon through the middle.
     //
-    // Applied as a penalty on the cutoff rather than as a scale on the field. The
-    // difference matters: scaling thins the cloud everywhere at once, so a sky asked
-    // for a third full comes out nearly empty, while raising the bar leaves the
-    // middle of the band exactly as full as it was asked to be and tapers only the
-    // edges — which is the shape a cloud has.
-    float bandTaper = 0.14f;
+    // Applied to the *cover* rather than as a penalty on the cutoff, and that is not
+    // a detail. A fixed penalty is a fixed number of field units, so a heavily
+    // covered sky — where the cutoff is already low — simply overwhelms it: the deck
+    // fills the band to its boundary and ends on a ruled horizontal line at the top
+    // and bottom. Thinning the cover instead means the edge always runs out to
+    // nothing, however full the sky is, because a cover of zero has no cloud in it
+    // by definition.
+    float bandTaper = 0.85f;
 
-    // Share of the cloud band a column has to be filled with to count as fully
-    // laden. Weight is measured against this, so it is the number that decides what
-    // "a heavy cloud" means here.
-    float weightFull = 0.55f;
-
-    // Weight a cloud needs before it rains, and the weight at which it rains as
-    // hard as it can.
+    // Share of the daylight the thickest cloud holds back, in [0,1]. Scaled by the
+    // mood's own `shade`.
     //
-    // This is the "cloud favours rain" rule, and it is the only rule there is:
-    // rain is not rolled for separately, it is what a thick enough sky does.
-    float rainAt   = 0.52f;
-    float rainFull = 0.82f;
-
-    // Share of the daylight a fully covered column holds back, in [0,1]. Anything
-    // above one is the same as one, which is a sky the daylight does not get through
-    // at all.
-    //
-    // The one number that decides what a cloudy day costs the world below, and it has
-    // to be read against the exposure curve rather than as a brightness. Light
-    // reaches the screen through 1 - exp(-value * exposure), and daylight sits so far
-    // up that curve that most of a reduction in radiance is compressed away: holding
-    // back half of it leaves the ground 4% darker on screen, three quarters of it
-    // 22% darker. A figure that looks drastic written here is a moderate shadow to
-    // look at, which is why the useful range is so close to the top.
+    // It has to be read against the exposure curve rather than as a brightness.
+    // Light reaches the screen through 1 - exp(-value * exposure), and daylight sits
+    // so far up that curve that most of a reduction in radiance is compressed away:
+    // holding back half of it leaves the ground 4% darker on screen, three quarters
+    // of it 22% darker. A figure that looks drastic written here is a moderate
+    // shadow to look at, which is why the useful range is so close to the top.
     float shade = 0.78f;
 
-    // Rain, as it falls. Speed in pixels per second, length of one streak, and how
-    // many streaks per thousand pixels of width at full rain.
-    Color rainLine    = {168, 190, 222, 255};
-    float rainSpeed   = 620.0f;
-    float rainLength  = 22.0f;
-    float rainDensity = 90.0f;
+    // Rain, as it falls.
+    //
+    // The colour is the pale end the drop is mixed towards; the drop is always
+    // *lighter* than the air behind it, which is how rain reads against a sky of any
+    // brightness and is what keeps it working once there is a night to fall through.
+    Color rainLine  = {216, 234, 255, 255};
+    float rainSpeed = 620.0f;
+
+    // How much harder the wind blows on a drop than on a cloud.
+    //
+    // A cloud drifts at `wind`; a falling drop is in faster air and is much lighter,
+    // so it is carried far more. Without this the slant is a degree and a half and
+    // invisible. The slant follows the wind's own sign and size, so when there is a
+    // gale the rain leans into it without anything being told to.
+    float rainDrift = 11.0f;
+
+    // Length of the middle-sized drop, and how far either side of it the gauges
+    // spread. Varied per drop, because rain of one gauge is a comb.
+    //
+    // Length, speed and opacity only. Every drop is one square of the world's
+    // lattice wide, and that is not a gauge worth varying: at this size one step
+    // wider is twice as wide, and a drop as broad as a third of its own length
+    // stops reading as rain.
+    float rainLength = 24.0f;
+    float rainSpread = 0.55f;
+
+    // Streaks per thousand pixels of width at full rain.
+    float rainDensity = 240.0f;
 
     // Distance a drop falls before it starts again at the cloud, in pixels.
     //
     // A fixed distance, and deliberately not the gap between the cloud and the
     // ground beneath it. That gap depends on how low the cloud is hanging, which
-    // depends on how hard it is raining, so a drop's cycle would stretch as a shower
-    // passed and its speed would fall away with the rain. A drop should fall at the
-    // speed a drop falls at whatever the weather is doing.
-    //
-    // Set well past the deepest valley, so a drop is never seen starting again in
-    // mid-air; one that reaches the ground before then simply stops being drawn.
+    // depends on the weather, so a drop's cycle would stretch as a shower passed and
+    // its speed would fall away with the rain. A drop should fall at the speed a
+    // drop falls at whatever the weather is doing.
     float rainSpan = 1400.0f;
 };
 
@@ -286,25 +407,36 @@ struct Settings {
 // once per column instead of once per sample is the difference between the sky
 // being free and it being the most expensive thing in the frame.
 struct Column {
-    // Share of this stretch of sky that is filled, in [0,1]. Front, climate and
-    // elevation, added together.
+    // Share of this stretch of sky that is filled, in [0,1]: the weather's own
+    // cover, rippled by the front and the climate beneath.
     float cover = 0.0f;
 
     // The cloud field has to stand above this to be cloud at all here.
     float cutoff = 1.0f;
 
-    // How much cloud actually stands in this column, in [0,1]: its thickness down
-    // the band, which is the water it is carrying.
+    // How hard it is raining, in [0,1].
     //
-    // This is the line between the weather and the cloud. `cover` is a property of
-    // the region and says how much cloud it gets; this is a property of the cloud
-    // and answers differently one lobe to the next.
-    float weight = 0.0f;
-
-    // How hard it is raining, in [0,1] — from the weight, so rain falls out of the
-    // bottom of a cloud heavy enough to drop it rather than out of a stretch of map
-    // that has been declared wet.
+    // The weather's, not the column's. It used to be measured from this column's own
+    // cloud thickness, which is what made one cluster rain while its neighbour in the
+    // same weather stayed dry.
     float rain = 0.0f;
+};
+
+// The ground the rain lands on: the world Y of the first solid surface in each of
+// a run of columns, one entry per column of the world's own lattice.
+//
+// A view over what the caller already holds, not a copy of it. Passed in rather
+// than asked for, because the world knows about the weather and the weather must
+// not have to know about the world — and because "the first solid surface" is the
+// world as it actually is, edits and all, which is a question only the world can
+// answer. The shape of the land alone is not enough: a roof is not a function of
+// the column it stands over.
+struct Ground {
+    const float *top = nullptr;
+    int count        = 0;
+
+    float originX = 0.0f; // World X of `top[0]`.
+    float spacing = 1.0f;
 };
 
 // The sky, configured against the world it stands over.
@@ -314,12 +446,21 @@ public:
     // so that `Settings::cover` means the share of sky it says it does.
     void Configure(const Settings &settings, const terrain::Settings &terrain);
 
-    // Drifts the fields. The only mutable state in the whole module is this one
-    // number.
-    void Advance(float dt) { time_ += dt; }
+    // Drifts the fields and the clock. The only mutable state in the whole module
+    // is the one number; the weather below is derived from it and cached because
+    // every column would otherwise ask for the same answer.
+    void Advance(float dt);
     float Time() const { return time_; }
 
     const Settings &Config() const { return settings_; }
+
+    // The weather right now, blended across a change of mood. This is the top of the
+    // dependency chain: everything else in the sky reads it.
+    const Weather &Now() const { return now_; }
+
+    // The weather at any moment, without moving the clock. Pure, so a forecast and a
+    // replay agree with what is drawn.
+    Weather WeatherAt(float seconds) const;
 
     Column ColumnAt(float worldX) const;
 
@@ -336,6 +477,16 @@ public:
     // Share of the sky a column's cloud fills, which is what casts the shadow.
     float CoverAt(float worldX) const;
 
+    // World Y the lowest cloud over a column stops at: where a drop of rain leaves
+    // the sky. The bottom of the band when the column is clear, so the answer is
+    // always a height and no caller has to carry a second case.
+    //
+    // Neither this nor CoverAt can be had from the other, though both march the
+    // same band. CoverAt wants the thickest cloud anywhere in the column and so has
+    // to read all of it; this wants the first edge going up and stops there, which
+    // over an overcast sky is a third of the march.
+    float UndersideAt(float worldX) const;
+
     // Share of the daylight a column's cloud holds back. This is what the light
     // solver is given.
     float ShadeAt(float worldX) const;
@@ -351,15 +502,24 @@ public:
     // Colour of the air at a height, cloud cover included.
     Color AirAt(float worldY, float cover) const;
 
-    // How a cloud is built out of layers. Public because this is the model of what a
-    // cloud looks like, not a detail of one way of drawing it: DrawClouds is one
-    // renderer over these three, and anything else that wants to draw a cloud should
-    // read the same description rather than inventing a second one that drifts.
+    // Colour a cloud takes at a light level, from the mood's own two lights.
     //
-    // Layer zero is the whole cloud; the last is the core facing the sun.
-    float LayerMargin(const Column &column, int index, int count) const;
-    Vector2 LayerShift(int index) const;
-    Color LayerTint(const Column &column, int index, int count) const;
+    // Public because it is the model of what a cloud looks like rather than a detail
+    // of one way of drawing it: anything else that draws a cloud should read this
+    // instead of inventing a second palette that drifts from it.
+    Color CloudTint(float lit) const;
+
+    // Light level band `index` of `count` starts at. Bands are spaced by the light
+    // they carry rather than evenly, which is what keeps the steps even to look at:
+    // the eye reads brightness closer to logarithmically than linearly.
+    float BandLight(int index, int count) const;
+
+    // Light reaching a point in the cloud, in [0,1].
+    //
+    // `depthToSun` is how much cloud lies between the point and the sun; `here` is
+    // how much cloud is at the point itself. Beer-Lambert takes the first, the
+    // powder term takes the second, and they are not interchangeable.
+    float Lighting(float depthToSun, float here) const;
 
     // The gradient, drawn as flat bands across the view. Replaces clearing the
     // frame rather than being drawn over it.
@@ -370,10 +530,22 @@ public:
     // of view, which underground it always is.
     void DrawClouds(Rectangle view, int spacing) const;
 
-    // Rain, as streaks between the cloud base and the ground.
-    void DrawRain(Rectangle view) const;
+    // How far past the edge of a view the rain has to be prepared for, in pixels.
+    //
+    // A slanted drop starting off the side of the screen still crosses it further
+    // down, so the stretch of ground the rain can land on is wider than the view.
+    // Exposed so a caller assembling that ground covers exactly what will be drawn
+    // over rather than guessing at a margin.
+    float RainReach() const;
+
+    // Rain, as streaks from the cloud base down to whatever stops them.
+    void DrawRain(Rectangle view, const Ground &ground) const;
 
 private:
+    // Which way a drop falls: down at its own speed, pushed sideways by the wind.
+    // One place, because the reach and the drawing have to agree about the slant.
+    Vector2 RainFall() const;
+
     // Cutoffs the cloud field has to clear, one per step of `cover` from empty sky
     // to full.
     //
@@ -393,12 +565,35 @@ private:
     // disagree about what is being measured.
     float Field(Vector2 world) const;
 
+    // One pass over the cloud grid, shading each cell from its own depth and from
+    // the cloud between it and the sun.
+    //
+    // Its own rasteriser rather than marching_squares::DrawPixelated, because that
+    // one takes a single colour for a whole call and the entire point here is that
+    // the colour is decided per cell. It follows the same world anchoring and the
+    // same run batching, and it has to: a cloud drawn on a grid of its own would not
+    // line up with the ground.
+    void DrawShaded(const Grid &field, Vector2 towards, int bands) const;
+
+    // The mood a spell of weather has, drawn from the spell's index. A pure function
+    // of it, so the sequence is the same every run of the same world.
+    Mood MoodOfSpell(long spell) const;
+
     Settings settings_{};
     terrain::Settings terrain_{};
 
     float cutoff_[kCutoffSteps]{};
 
+    // Field value the erosion pass is centred on: the cutoff for ordinary weather.
+    // Measured in Configure, because the erosion has to know which band counts as
+    // near the edge before it can be applied at all.
+    float erosionAt_ = 0.5f;
+
     float time_ = 0.0f;
+
+    // Derived from time_ by Advance. Held rather than recomputed because every
+    // column asks for it and the answer is the same for all of them.
+    Weather now_{};
 };
 
 } // namespace weather

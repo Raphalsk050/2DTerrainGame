@@ -31,6 +31,11 @@ constexpr float kFar = 1.0e9f;
 // bounded is clamped where it is used.
 constexpr float kFbmPeak = 0.45f;
 
+// How much faster than its own frequency each octave travels through the third
+// axis of the noise. See Fbm: it only has to be a ratio that is not a whole
+// number, and small enough that an octave stays at roughly its own scale.
+constexpr float kOctaveDepth = 0.31f;
+
 // Step in pixels used to read the slope of a field by difference.
 //
 // Small against the finest octave in use, so it measures the slope at the point
@@ -46,7 +51,7 @@ constexpr float kProbe = 4.0f;
 // independent of the octave count so that a cutoff measured at one octave count
 // stays meaningful at another, and then by kFbmPeak so that the range it
 // practically covers is [-1,1] rather than a fraction of it.
-float Fbm(float x, float y, const NoiseShape &s) {
+float Fbm(float x, float y, float z, const NoiseShape &s) {
     float sum          = 0.0f;
     float amplitude    = 1.0f;
     float frequency    = 1.0f;
@@ -55,7 +60,20 @@ float Fbm(float x, float y, const NoiseShape &s) {
     for (int o = 0; o < s.octaves; o++) {
         // Perturbing the seed per octave decorrelates the layers. Sharing one
         // seed would repeat the same pattern at every scale.
-        sum += stb_perlin_noise3_seed(x * frequency, y * frequency, 0.0f, 0, 0, 0, s.seed + o) * amplitude;
+        //
+        // The depth is scaled by a little over the frequency each octave rather
+        // than by the frequency alone. Perlin noise gives up a little of its
+        // variance on the integer planes of its own lattice, and at a plain
+        // frequency the octaves sit at one, two and four times the same depth —
+        // so their flat spots line up and the field's contrast dips on a fixed
+        // period. A ratio that is not a whole number spreads them out.
+        //
+        // Multiplied, never added. A field with no depth to it has to stay
+        // exactly the two-dimensional field it always was, and every layer of
+        // the terrain is one.
+        const float depth = z * frequency * (1.0f + kOctaveDepth * static_cast<float>(o));
+
+        sum += stb_perlin_noise3_seed(x * frequency, y * frequency, depth, 0, 0, 0, s.seed + o) * amplitude;
 
         maxAmplitude += amplitude;
         frequency *= s.lacunarity;
@@ -250,7 +268,71 @@ float Signed(Vector2 world, const NoiseShape &shape) {
     const float nx = (world.x + shape.offsetX) * shape.frequency / (kFeatureSpan * Aspect(shape));
     const float ny = (world.y + shape.offsetY) * shape.frequency / kFeatureSpan;
 
-    return Fbm(nx, ny, shape);
+    // Scaled the same way, so a depth written in world pixels covers as much of
+    // the field as the same number of pixels travelled across it.
+    const float nz = shape.offsetZ * shape.frequency / kFeatureSpan;
+
+    return Fbm(nx, ny, nz, shape);
+}
+
+float Worley(Vector2 world, const NoiseShape &shape) {
+    const float aspect = std::max(shape.aspect, 1e-3f);
+
+    const float nx = (world.x + shape.offsetX) * shape.frequency / (kFeatureSpan * aspect);
+    const float ny = (world.y + shape.offsetY) * shape.frequency / kFeatureSpan;
+
+    float sum          = 0.0f;
+    float amplitude    = 1.0f;
+    float frequency    = 1.0f;
+    float maxAmplitude = 0.0f;
+
+    for (int o = 0; o < shape.octaves; o++) {
+        const float x = nx * frequency;
+        const float y = ny * frequency;
+
+        const float cx = std::floor(x);
+        const float cy = std::floor(y);
+
+        // One feature point per cell, placed inside it by a hash of the cell. The
+        // nearest one is always in this cell or one of the eight around it, so nine
+        // is the whole search.
+        float nearest = 2.0f;
+
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dy = -1; dy <= 1; dy++) {
+                const float gx = cx + static_cast<float>(dx);
+                const float gy = cy + static_cast<float>(dy);
+
+                const auto cell = static_cast<unsigned>(static_cast<int>(gx) * 738295859
+                                                        ^ static_cast<int>(gy) * 1103515245
+                                                        ^ (shape.seed + o) * 2654435761u);
+
+                // Two independent values out of the one hash, for the point's place
+                // in its cell.
+                unsigned bits = cell;
+                bits ^= bits >> 15;
+                bits *= 2246822519u;
+                bits ^= bits >> 13;
+
+                const float px = gx + static_cast<float>(bits & 0xffffu) / 65536.0f;
+                const float py = gy + static_cast<float>((bits >> 16) & 0xffffu) / 65536.0f;
+
+                const float ox = px - x;
+                const float oy = py - y;
+
+                nearest = std::min(nearest, ox * ox + oy * oy);
+            }
+        }
+
+        // Squared until here, because comparing squares avoids a root per cell.
+        sum += std::min(std::sqrt(nearest), 1.0f) * amplitude;
+
+        maxAmplitude += amplitude;
+        frequency *= shape.lacunarity;
+        amplitude *= shape.gain;
+    }
+
+    return (maxAmplitude > 0.0f) ? std::clamp(sum / maxAmplitude, 0.0f, 1.0f) : 0.0f;
 }
 
 float Billow(Vector2 world, const NoiseShape &shape) {

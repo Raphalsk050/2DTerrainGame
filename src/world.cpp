@@ -796,6 +796,68 @@ float World::Skyline(int column) const {
     return ground;
 }
 
+bool World::SolidVertex(const Chunk &chunk, int i, int j) const {
+    for (std::size_t e = 0; e < kElementCount; e++) {
+        if (!kElements[e].rules.blocksBodies) continue;
+        if (chunk.fields[e].ValueAt(i, j) > kElements[e].threshold) return true;
+    }
+
+    return false;
+}
+
+void World::SurfaceProfile(int firstColumn, int count, std::vector<float> &out) const {
+    out.assign(static_cast<std::size_t>(std::max(count, 0)), 0.0f);
+    if (out.empty()) return;
+
+    const float step = static_cast<float>(spacing_);
+
+    // The land first. A pure function of the column and remembered between frames,
+    // so after one pass over a stretch of world this is a lookup each.
+    for (int i = 0; i < count; i++) out[static_cast<std::size_t>(i)] = Skyline(firstColumn + i);
+
+    // Then what has been built on it, which the noise cannot know about and which
+    // is the whole reason this is not simply the skyline.
+    //
+    // Only chunks that have been painted are opened. An untouched one holds exactly
+    // the field the skyline already read, vertex for vertex, so a world nobody has
+    // built in pays one walk of the chunk map and nothing else — and one that has
+    // been built in pays a scan of the few chunks it was built in.
+    //
+    // Lowered only. A column dug out below the surface still answers with the
+    // surface the noise describes, which is what the light solve does with the same
+    // skyline and for the same reason: the noise is the only thing that can be asked
+    // about a column whose chunks are not resident. Rain stopping a few pixels above
+    // the floor of a fresh pit is a smaller wrong than rain falling through a roof.
+    for (const auto &entry : chunks_) {
+        const Chunk &chunk = entry.second;
+        if (!chunk.edited) continue;
+
+        const Grid &any = chunk.fields[0];
+
+        const int base  = static_cast<int>(std::lround(any.Origin().x / step));
+        const int first = std::max(firstColumn, base);
+        const int last  = std::min(firstColumn + count, base + any.Cols());
+
+        for (int column = first; column < last; column++) {
+            float &surface = out[static_cast<std::size_t>(column - firstColumn)];
+
+            for (int j = 0; j < any.Rows(); j++) {
+                const float y = any.Origin().y + static_cast<float>(j) * step;
+
+                // Below the answer already held, so nothing further down this column
+                // can better it. The topmost solid is what is wanted, and the rows
+                // are walked from the top.
+                if (y >= surface) break;
+
+                if (SolidVertex(chunk, column - base, j)) {
+                    surface = y;
+                    break;
+                }
+            }
+        }
+    }
+}
+
 void World::AddLight(Vector2 world, light::Radiance radiance, float radius) {
     sparks_.push_back({world, radiance, radius});
 }
@@ -878,9 +940,20 @@ void World::StepLight(Rectangle region) {
     medium_.skyline.assign(cols, 0.0f);
     medium_.cover.assign(cols, 0.0f);
 
+    // Where the region's top edge sits. A column whose ground is above it has no
+    // part of the region open to the sky.
+    const float ceiling = j0 * step;
+
     for (int i = 0; i < cols; i++) {
-        medium_.skyline[i] = Skyline(i0 + i);
-        medium_.cover[i]   = sky_.ShadeAt((i0 + i) * step);
+        const float ground = Skyline(i0 + i);
+
+        medium_.skyline[i] = ground;
+
+        // Cloud shade is only ever read at the end of a ray that reached the sky, so
+        // a column with no sky in it never reads its own. Finding it anyway is the
+        // entire cost of the weather while the player is underground, which is most
+        // of the time.
+        medium_.cover[i] = (ceiling < ground) ? sky_.ShadeAt((i0 + i) * step) : 0.0f;
     }
 
     for (const Spark &spark : sparks_) {
@@ -1180,6 +1253,27 @@ void World::DrawLiquids(Rectangle view) const {
             }
         }
     }
+}
+
+void World::DrawRain(Rectangle view) const {
+    const float step = static_cast<float>(spacing_);
+
+    // The same stretch the sky will draw over, asked for rather than guessed at: the
+    // rain leans, so drops landing inside the view start well outside it.
+    const float margin = sky_.RainReach();
+
+    const int firstColumn = static_cast<int>(std::floor((view.x - margin) / step));
+    const int columns     = static_cast<int>(std::ceil((view.width + 2.0f * margin) / step)) + 2;
+
+    // Built here, in the draw, rather than beside the light solve, because it has to
+    // see this frame's edits: the brush runs before the frame is drawn, and a block
+    // placed on this frame should stop this frame's rain.
+    SurfaceProfile(firstColumn, columns, surface_);
+
+    sky_.DrawRain(view, {.top     = surface_.data(),
+                         .count   = static_cast<int>(surface_.size()),
+                         .originX = static_cast<float>(firstColumn) * step,
+                         .spacing = step});
 }
 
 void World::DrawVertexOverlay(Rectangle view, float vertexSize, Color filledColor, Color emptyColor) const {

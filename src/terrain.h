@@ -66,7 +66,19 @@ struct NoiseShape {
 
     float offsetX = 0.0f; // Sampling offset. Scrolls the field without
     float offsetY = 0.0f; // changing its shape.
-    int seed      = 0;    // Equal seeds yield identical fields.
+
+    // Depth into the field, on the third axis of the noise underneath.
+    //
+    // The world is flat, so nothing generated in it has a third dimension and
+    // this stays at zero for every layer of the terrain. What it buys is the
+    // one thing the other two offsets cannot: moving along it does not scroll
+    // the field, it *changes* it, the same field seen at another depth. That is
+    // the difference between a cloud that arrives and a cloud that forms, and
+    // it costs nothing — the noise interpolates the corners of a cube whether
+    // this is zero or not.
+    float offsetZ = 0.0f;
+
+    int seed = 0; // Equal seeds yield identical fields.
 };
 
 // Continuous noise value in [0,1] at a world position.
@@ -74,6 +86,18 @@ float Sample(Vector2 world, const NoiseShape &shape);
 
 // The same field before it is folded into [0,1], so its zero set is reachable.
 float Signed(Vector2 world, const NoiseShape &shape);
+
+// Cellular noise, in [0,1]: the distance from the position to the nearest of a
+// scattered set of feature points, one per cell of the lattice.
+//
+// Zero at a feature point and rising towards the walls between them, so where fbm
+// swells and sags this bulges — a field of packed rounded cells. Inverted, it is
+// the other half of the standard recipe for cloud: Perlin gives the drift and the
+// large shape, Worley gives the bulge, and the two mixed give a cauliflower. At a
+// high frequency it is also what erodes a smooth outline into a rim of small lobes.
+//
+// Costs a look at nine cells, which is about what one octave of Perlin costs.
+float Worley(Vector2 world, const NoiseShape &shape);
 
 // Folded noise, in [0,1]: each octave contributes its magnitude rather than its
 // value.

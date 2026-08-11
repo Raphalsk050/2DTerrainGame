@@ -161,6 +161,19 @@ public:
     // a torch that will not stay lit in it, a surface that turns slick.
     float RainAt(Vector2 world) const { return sky_.RainAt(world.x); }
 
+    // World Y the first solid surface sits at, for a run of lattice columns
+    // starting at `firstColumn`. Written into `out`, which is resized to `count`.
+    //
+    // What anything falling from the sky lands on, and the answer the terrain
+    // function cannot give: terrain::Height describes the shape of the land, and a
+    // roof is not a function of the column it stands over. This begins with that
+    // shape and then lets what has been built overrule it.
+    //
+    // A run rather than a single column, because finding what has been built means
+    // one walk of the chunk map however many columns are asked about, and asking
+    // one at a time would pay for that walk each time.
+    void SurfaceProfile(int firstColumn, int count, std::vector<float> &out) const;
+
     // Total liquid held by the vertices inside a region. Reported so that
     // volume can be checked from outside the simulation.
     float TotalWater(Rectangle region) const;
@@ -169,6 +182,14 @@ public:
     // composited in a single blend.
     void DrawTerrain(Rectangle view) const;
     void DrawLiquids(Rectangle view) const;
+
+    // Rain, over the ground it lands on.
+    //
+    // Drawn from here rather than from the sky directly because the sky is a
+    // function of position and time and knows nothing of what has been built. Only
+    // the world can say where a drop stops, so it is the world that hands the sky
+    // the surface to stop it against.
+    void DrawRain(Rectangle view) const;
 
     // Field a liquid is drawn from, derived from its mass and clamped against
     // the solids around it. Exposed so the clamp can be checked directly.
@@ -304,6 +325,12 @@ private:
     // each frame cost more than solving the light did.
     float Skyline(int column) const;
 
+    // Whether one of a chunk's own vertices is filled by something a body cannot
+    // pass through. The test IsSolidAt makes, read straight off the chunk's grids:
+    // no snapping, no map lookup and no falling back to the noise, which is what
+    // makes it cheap enough to walk a whole chunk with.
+    bool SolidVertex(const Chunk &chunk, int i, int j) const;
+
     terrain::Settings settings_;
     int spacing_;
 
@@ -343,4 +370,8 @@ private:
     // One entry per lattice column, filled the first time that column is asked
     // about. Cleared with the world, since regenerating changes the ground.
     mutable std::unordered_map<int, float> skyline_;
+
+    // The ground under one frame's rain. Kept between frames only so that drawing
+    // does not allocate; nothing in it survives the call that fills it.
+    mutable std::vector<float> surface_;
 };

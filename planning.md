@@ -480,130 +480,292 @@ other ore persists past its band on its scarcity floor alone.
 
 ## 6. Weather
 
-Lives in `src/weather.h` / `src/weather.cpp`, with the climate half of it in
-`terrain::ClimateAt`.
+Lives in `src/weather.h` / `src/weather.cpp`, with the climate half in
+`terrain::ClimateAt` and the noise in `terrain::Worley` / `terrain::Sample`.
 
-### 6.1 One field, three consequences
-
-Clouds are not scenery painted behind the world. There is one cloud field, and
-everything else is read off it:
+### 6.1 One direction of dependency
 
 ```
-                  ┌──────────────────────┐
-  front (drifts) ─┤                      ├─→ what is drawn in the sky
-  climate  ───────┤   cloud field        ├─→ light::Medium::cover  → shadow on the ground
-  elevation ──────┤                      ├─→ rain, and how hard
-                  └──────────────────────┘
-                             ↑                        │
-                             └────────────────────────┘
-                          a raining column hangs lower and darker
+  THE WEATHER      a state of the whole world, on a timer
+  clear / fair / overcast / storm
+        |
+        +--> how much of the sky is filled
+        +--> whether it is raining, and how hard
+        +--> the palette the cloud is lit and shaded with
+                |
+  THE CLOUD FIELD  procedural, a pure function of position
+        |
+        +--> what is drawn in the sky
+        +--> how much daylight reaches the ground   (light::Medium::cover)
+        +--> where the drops fall from
 ```
 
-Because it is one field, the couplings cannot come apart. There is no cloud
-appearance to keep in step with a separate rain flag and a separate shadow map;
-there is one value and three readings of it.
+Nothing asks downwards. That single rule is what the whole rework was for.
 
-**The three inputs are one term each.**
+### 6.2 Rain is a state of the world, not of a cloud
 
-| Input | Term | Why |
-| --- | --- | --- |
-| The front | `frontInfluence` | A broad slow field drifting past, so weather arrives, sits, and passes. Without it the sky holds the same cloud for ever and rain is a property of the map instead of an event. |
-| The climate | `humidityInfluence` | Wet ground is cloudier than dry ground. This is the biome half. |
-| The land | `terrain::ClimateSettings::humidityLift` | Air pushed up over a rise cools, cool air holds less water, so it condenses. High ground stands in cloud on a day the plains are clear. |
+This is the one structural decision. It was the other way round and it was wrong:
+rain read off each column's own cloud thickness, so a small cluster rained while
+the cluster beside it, in the same weather, stayed dry.
 
-They are **added, not multiplied**. Multiplying would let a dry region hold the sky
-clear through any front that crossed it, and a wet one keep cloud through every
-clear spell; adding lets each shift the answer without being able to overrule it.
+Every game that has solved this solved it the same way, and it is worth writing
+down because it stops the question being reopened:
 
-**Rain is not rolled for.** `rain = smoothstep(rainAt, rainFull, cover)` — it is
-what a thick enough sky does, which is the "cloud formation favours rain" rule
-stated once and in one place. And it is read from the *regional* cover rather than
-from the cloud directly overhead: rain that switched off in the gap between two
-clouds would read as a fault.
+- **Minecraft** — "weather is always global: one sky for the entire dimension. When
+  rain arrives, every loaded biome transitions to overcast." States with duration
+  counters; on expiry the next is drawn at random.
+- **Terraria** — rain affects all surface biomes for its duration; 24-minute events,
+  17.4% chance, timer-driven.
+- **Stardew Valley** — one weather per day for the whole map, probabilistic by
+  season.
 
-### 6.2 The shadow
+So `MoodDef` is a table with one row per kind of weather, and the row is the whole
+definition: cover, rain, likelihood, palette and shade move together because they
+are one fact about one afternoon. The storm's `cover = 0.94` is *why* a rainy sky is
+overcast — not a second rule written somewhere else.
 
-`light::Medium` gained a `cover` array beside its `skyline`, and it is the same
-kind of fact: both are properties of what stands over a column, found once and read
-by every ray that asks for the sky. The skyline says whether the sky can be seen at
-all; the cover says how much of it is getting through. `Field::SkyAt` applies it at
-the end of a ray that reached the sky, so a cloud shades the ground beneath itself
-and nothing else.
+The clock is not a state machine. Time is cut into spells of `spellMinutes`, each
+spell's mood drawn from a hash of its index and the seed, and the last
+`crossMinutes` blended into the next. So the weather is a pure function of the
+clock: nothing to store, nothing to save, and two views of the same world at the
+same moment agree — the property the rest of the module already had.
 
-It could not have gone in `Sky::radiance`: that is one number for the whole world,
-and the whole point of a cloud is that it shades the ground under itself and not
-the field beside it.
+The front survives, demoted to rippling the cover from place to place so the sky is
+not a flat sheet. `frontInfluence` and `humidityInfluence` are deliberately small
+(0.14 and 0.10): they texture the weather, they do not overrule it, or a storm
+would have clear patches in it.
 
-Two things were wrong on the first attempt, and both were only visible once the
-shadow was drawn next to the cloud casting it:
+Measured over 60 000 px: in a storm **100% of columns are raining** and cover runs
+0.85–1.00; in fair weather 0% and 0.22–0.48. Never in between.
 
-- **Cover was read at one height.** Whether a cloud happened to cross that exact
-  line had nothing to do with whether it was there, so the ground had shadows under
-  clear sky and clouds with no shadow beneath them. It now takes the thickest cloud
-  anywhere down the column. The maximum rather than a sum, because the band is thin
-  enough that any cloud in it is opaque — a second layer behind the first does not
-  darken the ground further.
-- **The band profile scaled the field down.** A sky asked for a third full came out
-  at 8%. The profile is now a penalty on the *cutoff* instead, so the middle of the
-  band is exactly as full as it was asked to be and only the edges taper.
+### 6.3 Shape: Perlin-Worley with edge erosion
 
-### 6.3 The knobs, and what they cost
+The recipe is Nubis's (Andrew Schneider / Guerrilla, Horizon Zero Dawn), and it is
+three fields:
 
-`cover` is a genuine share of sky, on the same measured basis as ore probability and
-cave region coverage: `Sky::Configure` samples the cloud field and stores a table of
-quantiles, so the number means what it says. Perlin noise crowds hard around its
-midpoint, and a cutoff of `1 - cover` leaves a sky asked for a third full reading as
-very nearly empty — the same trap the ores fell into, and the samples have to be an
-irrational multiple of one feature apart for the same reason.
-
-Note that the share of *ground in shadow* runs about half again the `cover` figure,
-because a column counts as shaded if cloud stands anywhere in the band above it.
-
-Measured over 60 000 px of world at one instant, with the settings as authored:
-
-| Coupling | Correlation |
+| Field | Job |
 | --- | --- |
-| humidity → overcast | +0.48 |
-| elevation → humidity | +0.42 |
-| elevation → overcast | +0.31 |
-| overcast → rain | +0.43 |
-| overcast → shade | +0.42 |
+| `shape` — Perlin | The drift and the large shape: where there is cloud at all. |
+| `lobes` — Worley, ~3× the frequency, inverted | The bumps. Inverting turns cell walls into cell centres, so adding it puts a rounded bulge on the outline. This is the cauliflower. |
+| `detail` — Worley, ~3× again | The erosion, eating the silhouette into a rim of small lobes. |
 
-At `cover = 0.28`: 29% of the sky is cloud, 48% of columns have cloud somewhere
-above them, and 8% of the world is raining at any moment. Over one spot the front
-carries the sky from 13% to 58% overcast in ten minutes, so rain arrives and passes.
+The lobes field **has to be finer than the base** — cells the size of the cloud only
+move the outline about. That was the first attempt and it produced flat blobs.
 
-Cost is about 25 000 noise samples a frame — the cloud grid over the view plus the
-shade for each lit column. `Column` exists to make that affordable: everything that
-depends on the horizontal position alone is computed once per column rather than
-once per sample, which for a grid of tens of thousands of samples is the difference
-between the sky being free and it being the most expensive thing in the frame.
+The erosion is sampled **only within `erosionBand` of the cutoff**. Deep inside a
+cloud it cannot change the outcome and outside it there is no outline to erode, so
+the band that matters is narrow and skipping the rest is most of the cost of the
+field. Nubis's own optimisation.
 
-### 6.4 Rain, as it falls
+**The three fields do not travel together, and that is what makes them weather.**
+They used to: one sample position, `x - t·wind`, shared by all three. Every layer
+moved at exactly the wind, so nothing about the silhouette ever changed and the sky
+read as a cutout on a conveyor. What each one does on top of the drift now:
 
-Drops are hashed out of their own index rather than stored, so nothing survives
-between frames and two views of the same world at the same moment agree.
+| Field | On top of the drift | Why |
+| --- | --- | --- |
+| `shape` | `evolve` px/s along the noise's **third axis** | `stb_perlin` is 3D and `Fbm` was passing `z = 0`. There is no depth in a side-scroller, so travelling along it does not *scroll* the field, it *changes* it — the difference between a cloud that arrives and a cloud that forms. Free: the noise interpolates the corners of a cube either way. |
+| `lobes` | `lobeCrawl`, mostly vertical | Worley is 2D and has no depth to move through, so a relative velocity is its share of the same job. |
+| `detail` | `detailCrawl`, about twice as fast | Small features change faster than large ones: the rim boils while the body only rolls. |
 
-One bug worth remembering: the fall was originally measured from the cloud base to
-the ground. The cloud base hangs lower the harder it rains, so a drop's cycle
-stretched as a shower passed and its speed fell away with the rain. It now falls a
-fixed `rainSpan` at a fixed `rainSpeed`, and a drop that reaches the ground simply
-stops being drawn — which also means the number of drops in the air over a column
-follows how far they have to fall, so a deep valley in the rain is full of them.
+Two things worth keeping:
 
-### 6.5 What weather does not do yet
+- **Vertical, deliberately.** Sideways is the direction the eye has already been told
+  means wind, so a large horizontal difference between layers reads as texture
+  sliding under a stencil. Nothing else in the sky moves up, so the eye reads that as
+  convection instead — which is what a cumulus does.
+- **None of it can upset the calibration.** The three fields carry different seeds
+  and are independent, so their joint distribution is the product of their own
+  whatever the offsets are, and every plane through a Perlin field is distributed
+  like every other. `cutoff_` measures the same field at any moment. Worth knowing
+  before touching the numbers.
 
-- **Rain does not feed the water table.** The obvious next coupling, and the one to
-  be careful with: the liquid automaton is mass-based, so rain that added mass
-  without a sink would eventually flood the world. It needs evaporation, or a cap
-  per surface cell, before it is turned on.
-- **Nothing gets wet.** Rain is a number `World::RainAt` already answers; what is
-  missing is anything reading it. Torches that gutter, ground that turns slick,
-  crops that grow.
+Measured over 20 s **in the wind's own frame**, so pure drift reads as zero and what
+is left is the shape itself re-forming:
+
+| | drift alone | with `evolve` + crawl |
+| --- | ---: | ---: |
+| mean change in density, cover 0.35 | 0.017 | **0.208** |
+| silhouette flipped, cover 0.35 | 1.5% | **21.1%** |
+| mean change in density, cover 0.94 | 0.020 | **0.270** |
+| silhouette flipped, cover 0.94 | 2.0% | **27.3%** |
+
+`NoiseShape::offsetZ` is on the shared noise type, so **every terrain layer had to
+stay untouched**: the per-octave depth is `z · frequency · (1 + 0.31·o)`, a
+*multiply*, which is exactly zero at `z = 0`. Verified against 32 800 samples of
+`Height` and `Density` — bit for bit identical. (The non-integer ratio between
+octaves is not decoration: Perlin loses a little variance on the integer planes of
+its own lattice, and at a plain frequency the octaves sit at 1z, 2z, 4z, so their
+flat spots coincide and the sky's contrast would dip on a fixed period.)
+
+### 6.4 Light: Beer-Lambert and the powder term
+
+```
+beer   = exp(-absorption · depthToSun)      the path to the sun
+powder = 1 - exp(-2 · powderScale · here)   the density at this point
+lit    = beer · powder
+```
+
+Beer alone is monotone, and a cloud shaded by it reads as a smear with a gradient
+on it. Powder models the light that scatters back out of a thin edge and runs the
+other way — zero where there is almost no cloud, rising as it thickens. So the very
+fringe is dark, the body just inside it bright, and the far side dark again because
+Beer has taken the light. **That double curve is what the eye reads as cloud.**
+
+Two traps, both hit and both worth recording:
+
+- **They are measured on different things.** Powder applied to the path is zero at
+  zero depth, so a point with a clear line to the sun — the brightest thing in the
+  sky — came out in the darkest band.
+- **`absorption` is against a field margin, not a distance.** Margins run to about a
+  third, so at 2.0 the darkest Beer term was 0.5 and every cloud sat in the top of
+  the bands, uniformly bright. It wants ~7.
+
+The result is quantised into `layers` bands at the very end. The model is
+continuous; the flat bands are the pixel-art step over it.
+
+**And it is computed per cell.** Nothing in the chain takes the camera as an input,
+which is the fault it replaced: a single column at the centre of the screen used to
+decide the shading of every cloud in view, so walking six pixels re-tinted the sky.
+
+### 6.5 The band has to thin by cover, not by a penalty
+
+`bandTaper` scales the *cover* across the band, not the cutoff. A fixed penalty is a
+fixed number of field units, so a heavily covered sky — where the cutoff is already
+low — walks straight through it: the deck fills the band to its boundary and ends on
+a ruled horizontal line at the top and bottom. Thinning the cover means the edge
+always runs out to nothing, because a cover of zero has no cloud in it by
+definition.
+
+### 6.6 Rain, as it falls
+
+- **Lighter than the air behind it, always.** The drop takes `AirAt` at its own
+  height and is lifted towards `rainLine`, so it reads against noon and against a
+  storm alike — and against a night, once there is one, with nothing here touched.
+  Measured: luma 199–225 against a sky of 157–174. It was a fixed colour multiplied
+  down to 30%, which came out very nearly black.
+- **Slanted by the wind.** The fall direction is `(wind · rainDrift, rainSpeed)`
+  normalised, so it leans into a gale and stands up in still air. `rainDrift` is
+  there because a drop is far lighter than a cloud and is in faster air; without it
+  the slant is a degree and a half. Currently 17.7° off vertical.
+- **Three gauges.** Length, opacity and fall speed from one hash of the drop's index.
+  Rain of a single gauge is a comb. **Not width** — that was the fourth gauge and it
+  was the wrong axis to spend weight on: at the size of a square, one step wider is
+  *twice* as wide, and the heavy drop came out 10 px across against a length of 15.
+  A brick, not a drop.
+- **Drawn as squares on the world's lattice, not as a line.** Everything else in the
+  scene is, and an unantialiased 5 px quad covers four to six screen pixels depending
+  on where between two squares it falls — which is most of why some drops looked
+  thicker than their neighbours even at one width. Rounding the *ends* of the line
+  instead would fix the width and wreck the slant: a drop is 2–7 squares long, so
+  moving an end half a square swings the angle by tens of degrees, and the swing
+  changes every frame. Quantising where each square is *drawn* leaves the direction
+  exactly as it was. Same row-centre idiom as `DrawShaded`; at 17.7° the streak
+  advances a third of a square per row, so the staircase is always joined.
+- **A drop leaves the cloud, not the band.** `from` was `base + rainDrop · rain` —
+  one height for the whole world. The band's underside is ~100 px below where the
+  cloud actually stops, so rain began in open sky on a ruled horizontal line, under
+  clouds that plainly were not producing it. `Sky::UndersideAt` marches *up* from the
+  bottom of the band and stops at the first edge — the **lowest** cloud, not the
+  thickest, because a drop leaves the first underside there is — and root-finds the
+  margin between the two straddling samples, exactly as the terrain contour is drawn.
+  Without the root-find every drop in the world starts at one of nine heights and the
+  top of the rain is a staircase. Measured over 600 columns in a storm: **−433 to
+  −220, mean −294**, against the old flat −220 everywhere — 74 px higher on average,
+  and varying instead of ruled. Under 2% of columns have no cloud and fall back to the
+  band; that share rises through the minute a shower is arriving, when `cover` is
+  still climbing towards the storm's 0.94.
+- **Sampled every 50 px and interpolated, and floored to that step.** Per drop is the
+  12-step march that came out of `ColumnAt` for costing four fifths of it. Anchored
+  to the *view* instead of the world, every sample point would move as the player
+  walks and the base would ripple in step with their footsteps — the same failure
+  `StepLight` records, and the reason `DrawAtmosphere` and `DrawClouds` floor theirs.
+- **A drop stops at what is actually there.** It was culled against `terrain::Height`,
+  which is a function of the column alone and cannot see a chunk, so rain fell
+  straight through anything built. `World::SurfaceProfile` starts from the skyline and
+  lets the edits overrule it, and only opens chunks marked `edited` — an untouched one
+  holds the field the skyline already read, vertex for vertex, so a world nobody has
+  built in pays one walk of the chunk map. The streak is **cut off** at the surface
+  rather than dropped whole, so it ends *on* what it hits; testing only the head made
+  the rain stop a whole streak-length above the ground. Verified: a slab placed at
+  y −76 moves the surface from 146 to −84 while `terrain::Height` stays at 144.
+  Lowered only — a column *dug* below the surface still answers with the noise, which
+  is what the light solve does with the same skyline and for the same reason.
+- **Fixed span.** A drop falls `rainSpan` at `rainSpeed` and is skipped once it passes
+  the ground. Tying the cycle to the cloud-to-ground gap tied it to the cloud height,
+  which is tied to the weather, so a shower's drops slowed as it passed. The *span* is
+  still fixed; only the *start* now follows the cloud.
+
+### 6.7 Cost
+
+| | before | after |
+| --- | ---: | ---: |
+| noise evaluations, surface, fair | ~75 000 | **17 976** |
+| noise evaluations, surface, storm | ~75 000 | **20 688** |
+| whole cloud band in view | up to 127 000 | **20 349** |
+| **underground, nothing visible** | **39 560** | **~0** |
+| grid allocations per frame | 8 | 1 |
+| grid copies per frame | 6 (265–452 KB) | **0** |
+| rasteriser passes | 6 | **1** |
+
+Where it went:
+
+- **The 12-step weight march is gone from `ColumnAt`** — 62 noise calls back to 14.
+  It existed only to decide rain, and rain is the weather's now. Much the largest
+  single win, and it came from getting the model right rather than from optimising.
+- **One pass instead of six.** `Sky::DrawShaded` walks the grid once and shades each
+  cell, which is also what makes the lighting per-cloud. The six nested passes each
+  needed their own shifted copy of the same numbers.
+- **The field is sampled at `fieldStep` × the world lattice.** A cloud is ~400 px
+  across, so 12 px still gives ~33 samples over one, and the rasteriser interpolates
+  between them: the shape does not coarsen, only the sampling of it.
+- **`StepLight` skips a column whose ground stands above the lit region.** Cloud
+  shade is only read at the end of a ray that reached the sky, so a column with no
+  sky in it never reads its own. This is the whole cost of the weather while
+  underground, which is most of the time.
+
+`DrawRain` returns immediately when it is not raining, and `DrawClouds` when the
+band is out of view.
+
+Tying the rain to the cloud paid for itself, and then some:
+
+- **The ground test ran before the view test.** `DrawRain` walks a stretch half again
+  as wide as the screen, because a slanted drop starting off the side still crosses it
+  further down — so most drops in the loop are off-screen, and `terrain::Height` under
+  one costs 8 noise calls. About **4 200 calls a frame** on drops nobody could see,
+  against a storm budget of 20 688. Both are plain tests on the same position, so
+  which goes first changes nothing but the bill.
+- **What it bought instead**: ~46 cloud-underside marches (one per 50 px) at 9 field
+  reads each, ~2 000 calls, and a surface profile that is a memoised lookup per column
+  plus a scan of whatever chunks have been built in — nothing, in a world nobody has
+  built in. Net, the rain is cheaper than it was and lands on the right things.
+
+### 6.8 What weather still does not do
+
+- **Rain does not feed the water table.** The obvious next coupling and the one to be
+  careful with: the liquid automaton is mass-based, so rain adding mass without a
+  sink floods the world. It needs evaporation, or a cap per surface cell.
+- **Nothing gets wet.** `World::RainAt` answers; nothing reads it. Torches that
+  gutter, ground that turns slick, crops that grow.
+- **No day and night.** Everything is built for it: the atmosphere, the cloud
+  palette and the rain colour all derive from one daylight, and `Shading::sun` is the
+  one thing a clock would have to move. Add it and every cloud in the world relights
+  itself.
 - **No snow.** `Climate::temperature` exists and falls with elevation; rain above a
-  snow line should fall as snow and lie on the ground.
-- **One sky.** No day and night, so `SkyLight` is constant and the shade is the only
-  thing that changes. A time of day would multiply into the same place.
+  snow line should fall as snow and lie.
+- **Rain does not splash.** A drop's fall ends exactly on the surface it hits, and
+  nothing is drawn at the contact. A couple of squares thrown up from the impact point
+  is the cheapest thing left that would make the landing read as a landing.
+- **A dug column still reports the surface the noise describes.** `SurfaceProfile`
+  only lets edits *lower* it, so rain stops a few pixels above the floor of a fresh
+  pit. Fixing it properly means fixing `Skyline`, which the light solve shares — so it
+  is one change that would straighten both.
+- **The cloud shape is not domain-warped.** The best-looking thing left undone, and
+  rejected on cost: displacing the sample position by a second slowly-drifting field
+  is two extra fbm evaluations per sample, ~+40% on a field the light path reads
+  through `ShadeAt`. It also cannot be applied in `DrawClouds` alone — there is one
+  `Field` so the calibration and the drawing cannot disagree, and a warped cloud with
+  an unwarped shadow is worse than a still one.
 
 ---
 
