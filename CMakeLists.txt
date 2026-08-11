@@ -59,6 +59,7 @@ add_executable(${PROJECT_NAME}
     src/liquid_layer.cpp
     src/player.cpp
     src/water.cpp
+    src/weather.cpp
     src/world.cpp
     src/terrain.cpp
 )

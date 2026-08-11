@@ -14,7 +14,9 @@ Rectangle Hotbar::BarBounds() const {
     const float width  = kSlots * Hotbar::kSlotSize + (kSlots + 1) * Hotbar::kPadding;
     const float height = Hotbar::kSlotSize + 2.0f * Hotbar::kPadding;
 
-    return {(config::kScreenWidth - width) / 2.0f, config::kScreenHeight - height - Hotbar::kMargin, width, height};
+    // Centred on the frame as it is now, so the bar stays under the middle of a
+    // window that has been resized.
+    return {(GetScreenWidth() - width) / 2.0f, GetScreenHeight() - height - Hotbar::kMargin, width, height};
 }
 
 Rectangle Hotbar::SlotBounds(int slot) const {

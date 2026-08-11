@@ -5,16 +5,21 @@
 // Project-wide configuration constants.
 namespace config {
 
+// Size the window opens at. The window is resizable, so this is a starting point
+// and not a bound: anything that needs to know how large the frame is now asks
+// raylib rather than reading these.
 inline constexpr int kScreenWidth  = 1000;
 inline constexpr int kScreenHeight = 600;
-inline constexpr int kTargetFps    = 60;
+
+// Smallest the window may be dragged to. Below this the hotbar is wider than the
+// frame and the head-up display runs off the side of it.
+inline constexpr int kMinScreenWidth  = 640;
+inline constexpr int kMinScreenHeight = 400;
+
+inline constexpr int kTargetFps = 60;
 
 // Spacing in pixels between neighbouring grid vertices.
 inline constexpr int kResolution = 6;
-
-// A grid spanning N cells in one direction is delimited by N+1 vertices.
-inline constexpr int kCols = kScreenWidth / kResolution + 1;
-inline constexpr int kRows = kScreenHeight / kResolution + 1;
 
 // Side length of the debug square drawn on each vertex.
 inline constexpr float kVertexSize = 2.0f;

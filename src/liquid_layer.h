@@ -14,7 +14,11 @@
 // rather than any particular instance of it.
 class LiquidLayer {
 public:
-    void Load(int width, int height);
+    // Sizes the buffer to the frame, reallocating only when the frame has actually
+    // changed size. Safe to call every frame, which is what makes it the right shape
+    // for a resizable window: nothing has to notice the resize and react to it.
+    void Fit(int width, int height);
+
     void Unload();
 
     // Draws the liquids of `world` into the buffer, in world space.

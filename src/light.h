@@ -99,6 +99,21 @@ struct Medium {
     // Left empty, nothing blocks the sky and every clear ray reaches it.
     std::vector<float> skyline;
 
+    // Share of the daylight held back by whatever stands between the column and
+    // the sky without stopping it outright — cloud — in [0,1], one per column.
+    //
+    // Sits beside the skyline and for the same reason: both are properties of what
+    // is above a column, found once and read by every ray that asks for the sky.
+    // The skyline says whether the sky can be seen at all; this says how much of it
+    // is getting through.
+    //
+    // It belongs here rather than in the sky's own radiance because a single
+    // radiance is one number for the whole world, and the whole point of a cloud is
+    // that it shades the ground under itself and not the field next to it.
+    //
+    // Left empty, nothing shades the sky.
+    std::vector<float> cover;
+
     void Resize(int cols, int rows);
     void Clear();
 
@@ -305,6 +320,9 @@ private:
     // Height of the ground in the column a world position stands in.
     float SkylineAt(float worldX) const;
 
+    // Share of the daylight held back over that column.
+    float CoverAt(float worldX) const;
+
     // Whether a ray that was never stopped inside the region reaches the sky.
     //
     // Sampled against the skyline along its whole length, which is what makes
@@ -335,8 +353,9 @@ private:
     // pass through. Only these take light from their neighbours.
     std::vector<float> solid_;
 
-    // The medium's skyline, kept for the length of the solve.
+    // The medium's skyline and sky cover, kept for the length of the solve.
     std::vector<float> skyline_;
+    std::vector<float> cover_;
 
     // The light each solid probe is drawing from, and how far away it is. Also
     // stands in for the state before the smoothing pass, so that it averages

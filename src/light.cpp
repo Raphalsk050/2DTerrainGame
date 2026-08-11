@@ -80,6 +80,7 @@ void Medium::Resize(int newCols, int newRows) {
     extinction.assign(static_cast<std::size_t>(cols) * rows, 0.0f);
     emission.assign(static_cast<std::size_t>(cols) * rows, Radiance{});
     skyline.assign(static_cast<std::size_t>(cols), 0.0f);
+    cover.assign(static_cast<std::size_t>(cols), 0.0f);
 }
 
 void Medium::Clear() {
@@ -235,7 +236,20 @@ Radiance Field::SkyAt(Vector2 world) const {
     // two differing by everything.
     const float share = std::clamp((sky.horizon + sky.fade - world.y) / std::max(sky.fade, 1.0f), 0.0f, 1.0f);
 
-    return sky.radiance * share;
+    // Then dimmed by whatever stands over the column without stopping the sky
+    // outright. Applied here, at the end of a ray that reached the sky, so a cloud
+    // shades the ground beneath itself and nothing else: the shadow lands where the
+    // rays that would have been sunlight were going.
+    return sky.radiance * (share * (1.0f - CoverAt(world.x)));
+}
+
+float Field::CoverAt(float worldX) const {
+    if (cover_.empty()) return 0.0f;
+
+    const int column = std::clamp(static_cast<int>(std::floor((worldX - pyramid_.origin.x) / pyramid_.spacing + 0.5f)),
+                                  0, static_cast<int>(cover_.size()) - 1);
+
+    return cover_[column];
 }
 
 float Field::SkylineAt(float worldX) const {
@@ -631,6 +645,7 @@ void Field::Solve(const Medium &medium, const Settings &settings) {
     BuildPyramid(medium);
 
     skyline_ = medium.skyline;
+    cover_   = medium.cover;
 
     const Rectangle bounds = medium.Bounds();
     const int count        = std::max(1, settings.cascades);

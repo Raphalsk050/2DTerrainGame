@@ -72,6 +72,7 @@ void ReadToggles(Toggles &toggles) {
     if (IsKeyPressed(KEY_F3)) toggles.chunks = !toggles.chunks;
     if (IsKeyPressed(KEY_F4)) toggles.layers = !toggles.layers;
     if (IsKeyPressed(KEY_F5)) toggles.light = !toggles.light;
+    if (IsKeyPressed(KEY_F6)) toggles.unlit = !toggles.unlit;
 }
 
 void DrawLight(const World &world, Rectangle view) {
@@ -160,8 +161,8 @@ void DrawLayers(const World &world, Rectangle view) {
     // relative to when the table is written.
     const terrain::Settings &settings = world.Settings();
 
-    DrawLineV({view.x, settings.skyDepth}, {view.x + view.width, settings.skyDepth}, {120, 200, 120, 200});
-    DrawLabel("sky floor", {view.x + view.width - 70.0f, settings.skyDepth + 2.0f}, {160, 220, 160, 255});
+    DrawLineV({view.x, settings.surface.level}, {view.x + view.width, settings.surface.level}, {120, 200, 120, 200});
+    DrawLabel("surface level", {view.x + view.width - 90.0f, settings.surface.level + 2.0f}, {160, 220, 160, 255});
 
     // Then one marker column per generated material, each measured against that
     // scale. Shallowest first, so the column of bars reads top to bottom in the
@@ -199,7 +200,16 @@ void DrawLayers(const World &world, Rectangle view) {
         const float bottom = std::min(def->spawn.band.bottom, view.y + view.height);
 
         if (bottom > top) {
-            DrawRectangleRec({gutter, top, kGutterBar, bottom - top}, Fade(def->fill, 0.75f));
+            // Filled by abundance rather than flat, so the bar shows where the
+            // material is actually dense instead of merely where it is allowed.
+            // The old flat bar was the overlay agreeing with a rule the generator
+            // no longer follows.
+            for (float y = top; y < bottom; y += 2.0f) {
+                const float share = BandAbundance(def->spawn, {view.x + kGutterInset, y});
+
+                DrawRectangleRec({gutter, y, kGutterBar, 2.0f}, Fade(def->fill, 0.15f + 0.7f * share));
+            }
+
             DrawRectangleLinesEx({gutter, top, kGutterBar, bottom - top}, 1.0f, color);
 
             const float at = std::max(top + 2.0f, taken);
@@ -211,9 +221,14 @@ void DrawLayers(const World &world, Rectangle view) {
             // Brightened rather than taken as it is. Half the materials here
             // are dark by nature, and a label in coal's own colour is unreadable
             // against the slab it is written on.
-            DrawLabel(TextFormat("%s  %s..%s", def->name, from, to), {labels, at},
-                      ColorBrightness(def->fill, 0.55f));
+            DrawLabel(TextFormat("%s  %s..%s  peak %d", def->name, from, to,
+                                 static_cast<int>(def->spawn.band.peak)),
+                      {labels, at}, ColorBrightness(def->fill, 0.55f));
         }
+
+        // The peak, drawn brighter than the edges, since it is the height that
+        // now decides where the material is worth digging for.
+        DrawBandEdge(def->spawn, def->spawn.band.peak, view, ColorBrightness(def->fill, 0.5f));
 
         gutter += kGutterStep;
     }

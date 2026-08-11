@@ -6,6 +6,7 @@
 #include "raylib.h"
 #include "terrain.h"
 #include "water.h"
+#include "weather.h"
 
 #include <array>
 #include <cstdint>
@@ -138,6 +139,28 @@ public:
     void SetSkyLight(light::Radiance radiance) { skyLight_ = radiance; }
     light::Radiance SkyLight() const { return skyLight_; }
 
+    // The weather over the world.
+    //
+    // Owned here rather than by the caller because the light solve reads it: cloud
+    // shade is filled into the medium one column at a time, the same way the
+    // skyline is. Keeping it outside would mean handing the world a callback, or
+    // handing the light a copy of the sky, and either one lets the two disagree
+    // about which frame's weather is being lit.
+    void SetWeather(const weather::Settings &settings) { sky_.Configure(settings, settings_); }
+
+    // Drifts the weather. Separate from StepLight because the sky has to have
+    // finished moving before the frame is lit, and callers already own that order
+    // for the water.
+    void StepWeather(float dt) { sky_.Advance(dt); }
+
+    const weather::Sky &Sky() const { return sky_; }
+
+    // How hard it is raining over a world position, in [0,1].
+    //
+    // Exposed because rain is a game rule as much as a picture: crops that need it,
+    // a torch that will not stay lit in it, a surface that turns slick.
+    float RainAt(Vector2 world) const { return sky_.RainAt(world.x); }
+
     // Total liquid held by the vertices inside a region. Reported so that
     // volume can be checked from outside the simulation.
     float TotalWater(Rectangle region) const;
@@ -224,7 +247,12 @@ private:
     // has had a say. Exclusion is applied on top of this, and is expressed in
     // terms of it rather than of the finished value, so a material never
     // depends on the outcome of the contest it is itself part of.
-    float GeneratedValue(Element element, Vector2 world) const;
+    //
+    // `ground` is the base terrain's density at the same position. Passed in
+    // rather than sampled here because several materials are bounded against it
+    // and it is the most expensive field the generator produces: asking for it
+    // once per material per vertex was five times the work of asking once.
+    float GeneratedValue(Element element, Vector2 world, float ground) const;
 
     // Ceiling a material's field is held under by everything that outranks it,
     // expressed so that it equals the material's own threshold exactly where
@@ -233,11 +261,11 @@ private:
     // That single identity is what aligns the two contours: both cross their
     // thresholds on the same line, so the ore ends precisely where the rock
     // around it begins and neither leaves a seam.
-    float ExclusionHeadroom(Element element, Vector2 world) const;
+    float ExclusionHeadroom(Element element, Vector2 world, float ground) const;
 
     // True where a material's generator is allowed to place it at all: inside
     // its band, and on the side of the ground its `space` names.
-    bool SpawnEligible(const ElementSpawn &spawn, Vector2 world) const;
+    bool SpawnEligible(const ElementSpawn &spawn, Vector2 world, float ground) const;
 
     // Empties a lattice position of everything that fills it, solid and liquid
     // alike, and adds what was there to `yield`.
@@ -264,7 +292,7 @@ private:
                         bool groundOnly = false) const;
 
     // Cutoff each generated material's noise has to clear, measured from the
-    // noise itself so that `coverage` in the element table means what it says.
+    // noise itself so that `probability` in the element table means what it says.
     void CalibrateSpawn();
 
     // World Y at which the ground begins in a lattice column, looking down from
@@ -309,6 +337,8 @@ private:
 
     light::Medium medium_;
     light::Field lightField_;
+
+    weather::Sky sky_;
 
     // One entry per lattice column, filled the first time that column is asked
     // about. Cleared with the world, since regenerating changes the ground.

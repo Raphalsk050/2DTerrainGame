@@ -17,6 +17,14 @@ struct Toggles {
     bool chunks   = false; // Chunk borders, coordinates and what pins them.
     bool layers   = false; // The world height grid and the spawn bands on it.
     bool light    = false; // The probes the light was solved on.
+
+    // Skips the light entirely and draws the world at full brightness.
+    //
+    // The light is a multiply over the finished frame, so unlit ground is
+    // genuinely black and there is nothing to be made out in it. That is the
+    // right answer for playing and the wrong one for looking at what was
+    // generated, which is what this is for.
+    bool unlit = false;
 };
 
 // Reads the function keys that switch the overlays.

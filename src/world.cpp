@@ -34,6 +34,21 @@ constexpr float kClampGain = 6.0f;
 // change nothing.
 constexpr float kSkylineScan = 1400.0f;
 
+// Depth below the terrain's surface level over which daylight dims to nothing.
+//
+// A property of the light rather than of the ground: the generator now describes
+// a surface at a definite height, and how far past it the sky still reaches is a
+// separate question from where the rock is.
+constexpr float kSkyFade = 96.0f;
+
+// How far above the generator's own surface the skyline scan starts.
+//
+// The scan has to begin in open air, and the generator answers where the surface
+// is directly, so this only has to cover the one thing that answer omits: the
+// fold, which can lift the real surface a little above the height the column
+// reports.
+constexpr float kSkylineHeadroom = 64.0f;
+
 int FloorDiv(int value, int divisor) {
     const int quotient = value / divisor;
     return (value % divisor != 0 && (value < 0) != (divisor < 0)) ? quotient - 1 : quotient;
@@ -67,24 +82,71 @@ World::World(const terrain::Settings &settings, int spacing) : settings_(setting
     std::sort(exclusionOrder_.begin(), exclusionOrder_.end(),
               [](Element a, Element b) { return Def(a).rules.precedence < Def(b).rules.precedence; });
 
+    // The generator's own cutoffs first, since everything below asks it where
+    // the ground is and an uncalibrated one answers with no caves at all.
+    terrain::Calibrate(settings_);
+
     CalibrateSpawn();
+
+    // Default weather, so the sky is never standing over a world it was not told
+    // about. SetWeather replaces the settings and keeps the same terrain.
+    sky_.Configure(weather::Settings{}, settings_);
 }
 
 void World::CalibrateSpawn() {
-    // Each generated material's cutoff is measured rather than guessed: sample
-    // its noise over a wide area, keep the samples that land where the material
-    // is allowed, and take the quantile that leaves `coverage` of them above
-    // it.
+    // Each generated material's cutoff is measured rather than guessed: sample its
+    // own noise where the material is allowed to be, and take the quantile that
+    // leaves `probability` of the samples above it.
     //
     // Declaring the cutoff directly instead would tie it to the shape of the
     // noise, and every change to frequency or octaves would quietly change how
     // much ore the world holds.
-    constexpr int kSamplesPerAxis = 96;
-    constexpr float kSampledWidth = 4000.0f;
-    constexpr float kSampledDepth = 4000.0f;
+    //
+    // Two things decide whether the measurement means anything, and getting either
+    // wrong is silent — the ore simply is not there.
+    //
+    // The samples have to be at least one noise feature apart. Two samples inside
+    // one hump of the field are one sample, and a quantile taken over correlated
+    // samples is really the maximum of a much smaller set. For a rare ore that
+    // maximum is the top of its own field, so the cutoff comes out at a value
+    // nothing can clear.
+    //
+    // And the tail has to be populated, since the quantile for a probability of one
+    // in a thousand rests entirely on the samples above it. The grid is therefore
+    // sized from that probability: a rarer material is measured over a
+    // proportionally larger stretch of world.
+    //
+    // Where that stretch sits does not matter. A material's noise is decorrelated
+    // from the terrain's, so its distribution is the same at any depth, and
+    // `probability` is the share it reaches where nothing is held against it — its
+    // peak. The band's thinning is applied on top of this cutoff by BandPenalty
+    // rather than folded into it.
+    //
+    // The ceiling is what bounds the cost of all this, and it is reached only by
+    // the rarest ores: a fifth of a second at startup, once, against an ore that
+    // silently does not generate.
+    constexpr int kAboveCutoff = 60;
+    constexpr int kMinPerAxis  = 48;
+    constexpr int kMaxPerAxis  = 384;
+
+    // Multiples of one feature the grid steps by, one per axis.
+    //
+    // Irrational, and this is not a detail. Perlin noise is built on a lattice and
+    // is exactly zero at every corner of it, so a grid stepping a whole number of
+    // features reads the same corner over and over: every sample comes back at the
+    // midpoint of the field, the cutoff lands in the middle of the distribution
+    // instead of its tail, and the world fills with ore. Stepping by an irrational
+    // multiple lands each sample at a different phase, and using a different one
+    // per axis stops the two from lining up with each other either.
+    constexpr float kStrideX = 1.618f;
+    constexpr float kStrideY = 1.303f;
+
+    // Depth the grid starts at, far enough down to be in rock rather than straddling
+    // the surface, where half the samples would be sky.
+    constexpr float kSampledTop = 600.0f;
 
     std::vector<float> values;
-    values.reserve(kSamplesPerAxis * kSamplesPerAxis);
+    values.reserve(static_cast<std::size_t>(kMaxPerAxis) * kMaxPerAxis);
 
     for (std::size_t e = 0; e < kElementCount; e++) {
         const ElementSpawn &spawn = kElements[e].spawn;
@@ -94,76 +156,79 @@ void World::CalibrateSpawn() {
         spawnCutoff_[e] = 1.0f;
         if (spawn.generator != Generator::Vein && spawn.generator != Generator::Pool) continue;
 
-        // Sampled across the band rather than across the world, so a narrow
-        // band is measured from points that actually fall inside it. Measuring
-        // over the whole world instead would count the depths the material
-        // never reaches as merely unlucky, and a deep ore would come out far
-        // rarer than its coverage asks for.
-        const float top    = std::max(spawn.band.top, 0.0f);
-        const float bottom = std::min(spawn.band.bottom, top + kSampledDepth);
-        const float depth  = (bottom > top) ? (bottom - top) : kSampledDepth;
+        const float probability = std::clamp(spawn.probability, 0.0f, 1.0f);
+        if (probability <= 0.0f) continue;
+
+        // Enough samples that `kAboveCutoff` of them land above the cutoff, before
+        // the eligibility test throws any away.
+        const int perAxis = std::clamp(static_cast<int>(std::ceil(std::sqrt(kAboveCutoff / probability))), kMinPerAxis,
+                                       kMaxPerAxis);
+
+        // More than one feature apart, so no two samples read the same hump.
+        const float feature = terrain::kFeatureSpan / std::max(SpawnNoise(spawn).frequency, 0.01f);
 
         values.clear();
 
-        for (int i = 0; i < kSamplesPerAxis; i++) {
-            for (int j = 0; j < kSamplesPerAxis; j++) {
-                const Vector2 p = {(i / static_cast<float>(kSamplesPerAxis) - 0.5f) * kSampledWidth,
-                                   top + (j / static_cast<float>(kSamplesPerAxis)) * depth};
+        for (int i = 0; i < perAxis; i++) {
+            for (int j = 0; j < perAxis; j++) {
+                const Vector2 p = {(i - perAxis / 2) * feature * kStrideX, kSampledTop + j * feature * kStrideY};
 
-                if (!SpawnEligible(spawn, p)) continue;
+                if (!SpawnEligible(spawn, p, terrain::Density(p, settings_))) continue;
 
-                values.push_back(terrain::Sample(p, spawn.shape));
+                values.push_back(terrain::Sample(p, SpawnNoise(spawn)));
             }
         }
 
         if (values.empty()) continue;
 
-        const float coverage = std::clamp(spawn.coverage, 0.0f, 1.0f);
-        const auto index     = static_cast<std::size_t>((1.0f - coverage) * (values.size() - 1));
+        const auto index = static_cast<std::size_t>((1.0f - probability) * (values.size() - 1));
 
         std::nth_element(values.begin(), values.begin() + index, values.end());
         spawnCutoff_[e] = values[index];
     }
 }
 
-bool World::SpawnEligible(const ElementSpawn &spawn, Vector2 world) const {
-    if (BandDepth(spawn, world) < 0.0f) return false;
-
+bool World::SpawnEligible(const ElementSpawn &spawn, Vector2 world, float ground) const {
+    // The space test alone. Whether a material's own level reaches a given depth
+    // is now a question of how much of it there is rather than of whether it is
+    // allowed there at all, and that is answered by BandPenalty. The exception is
+    // a liquid, whose band is a real boundary, and which tests it for itself.
     switch (spawn.space) {
     case SpawnSpace::Anywhere: return true;
-    case SpawnSpace::InsideGround: return terrain::Density(world, settings_) > RockThreshold();
-    case SpawnSpace::OpenSpace: return terrain::Density(world, settings_) <= RockThreshold();
+    case SpawnSpace::InsideGround: return ground > RockThreshold();
+    case SpawnSpace::OpenSpace: return ground <= RockThreshold();
     }
 
     return true;
 }
 
-float World::GeneratedValue(Element element, Vector2 world) const {
+float World::GeneratedValue(Element element, Vector2 world, float ground) const {
     const ElementDef &def     = Def(element);
     const ElementSpawn &spawn = def.spawn;
 
     switch (spawn.generator) {
     case Generator::None: break;
 
-    case Generator::Terrain: return terrain::Density(world, settings_);
+    case Generator::Terrain: return ground;
 
     case Generator::Vein: {
         // Shifted so the element's own threshold is the deciding line: the
         // measured cutoff lands exactly on it, and the field stays continuous
         // either side of it so the contour can still interpolate.
-        float value = terrain::Sample(world, spawn.shape) - spawnCutoff_[ElementIndex(element)] + def.threshold;
-
-        // Held under the band the same way, so the field reaches the threshold
-        // exactly on the band's edge and a vein tapers out over `fade` instead
-        // of being sliced along one height.
-        value = std::min(value, def.threshold + BandDepth(spawn, world) / std::max(spawn.band.fade, 1.0f));
+        //
+        // The band raises that line away from the material's own level rather
+        // than cutting the field off at it. An ore therefore thins out with
+        // distance from its peak and survives outside its band only where its
+        // noise happened to run high, which arrives as the occasional small
+        // pocket a long way from home — the thing a hard edge made impossible.
+        float value = terrain::Sample(world, SpawnNoise(spawn)) - spawnCutoff_[ElementIndex(element)]
+                    - BandPenalty(spawn, world) + def.threshold;
 
         // Bounded against the ground, so a vein ends on the terrain's own
         // contour rather than a fraction of a cell past it, hanging in the air
         // of a cave it happened to cross.
         if (spawn.space == SpawnSpace::InsideGround) {
-            const float ground = terrain::Density(world, settings_);
-            value              = std::min(value, def.threshold + (ground - RockThreshold()) * kClampGain);
+            value = std::min(value, def.threshold + (ground - RockThreshold()) * kClampGain);
         }
 
         return value;
@@ -175,15 +240,20 @@ float World::GeneratedValue(Element element, Vector2 world) const {
         // it across the band edge would lay down a sheet of half-filled cells
         // that drains the moment the world starts, which is not what a still
         // water table looks like.
-        if (!SpawnEligible(spawn, world)) return 0.0f;
+        //
+        // Its band is tested outright for the same reason: unlike an ore, a water
+        // table has a real top and bottom, and one that merely became less likely
+        // with depth would be a mist rather than a surface.
+        if (BandAbundance(spawn, world) <= 0.0f) return 0.0f;
+        if (!SpawnEligible(spawn, world, ground)) return 0.0f;
 
-        return (terrain::Sample(world, spawn.shape) > spawnCutoff_[ElementIndex(element)]) ? water::kMaxMass : 0.0f;
+        return (terrain::Sample(world, SpawnNoise(spawn)) > spawnCutoff_[ElementIndex(element)]) ? water::kMaxMass : 0.0f;
     }
 
     return 0.0f;
 }
 
-float World::ExclusionHeadroom(Element element, Vector2 world) const {
+float World::ExclusionHeadroom(Element element, Vector2 world, float ground) const {
     const ElementDef &def = Def(element);
     if (!def.rules.occupies) return kUnboundedDepth;
 
@@ -193,7 +263,7 @@ float World::ExclusionHeadroom(Element element, Vector2 world) const {
         const ElementDef &other = kElements[e];
         if (!other.rules.occupies || other.rules.precedence <= def.rules.precedence) continue;
 
-        const float claim = GeneratedValue(static_cast<Element>(e), world);
+        const float claim = GeneratedValue(static_cast<Element>(e), world, ground);
         headroom          = std::min(headroom, def.threshold + (other.threshold - claim) * kClampGain);
     }
 
@@ -201,7 +271,12 @@ float World::ExclusionHeadroom(Element element, Vector2 world) const {
 }
 
 float World::SpawnValue(Element element, Vector2 world) const {
-    return std::min(GeneratedValue(element, world), ExclusionHeadroom(element, world));
+    // Sampled once here and handed to everything below. It is much the most
+    // expensive field in the generator, and every material bounded against the
+    // ground wants the same answer at the same position.
+    const float ground = terrain::Density(world, settings_);
+
+    return std::min(GeneratedValue(element, world, ground), ExclusionHeadroom(element, world, ground));
 }
 
 std::int64_t World::Key(int cx, int cy) {
@@ -248,8 +323,23 @@ World::Chunk &World::Emplace(int cx, int cy) {
         chunk.fields.emplace_back(origin, kChunkVertices, kChunkVertices, spacing_);
     }
 
-    // Each material is first laid down exactly as its own generator describes
-    // it, with no regard for what else wants the same space.
+    // The base terrain first, and once per vertex. It is by far the most
+    // expensive field the generator produces, and every material bounded against
+    // the ground asks it the same question at the same position, so sampling it
+    // per material per vertex cost five times what it had to.
+    std::vector<float> ground(static_cast<std::size_t>(kChunkVertices) * kChunkVertices);
+
+    for (int i = 0; i < kChunkVertices; i++) {
+        for (int j = 0; j < kChunkVertices; j++) {
+            const Vector2 vertex = {origin.x + static_cast<float>(i * spacing_),
+                                    origin.y + static_cast<float>(j * spacing_)};
+
+            ground[static_cast<std::size_t>(i) * kChunkVertices + j] = terrain::Density(vertex, settings_);
+        }
+    }
+
+    // Then each material is laid down exactly as its own generator describes it,
+    // with no regard for what else wants the same space.
     for (std::size_t e = 0; e < kElementCount; e++) {
         if (kElements[e].spawn.generator == Generator::None) continue;
 
@@ -257,7 +347,9 @@ World::Chunk &World::Emplace(int cx, int cy) {
 
         for (int i = 0; i < field.Cols(); i++) {
             for (int j = 0; j < field.Rows(); j++) {
-                field.SetValue(i, j, GeneratedValue(static_cast<Element>(e), field.PointAt(i, j)));
+                const float here = ground[static_cast<std::size_t>(i) * kChunkVertices + j];
+
+                field.SetValue(i, j, GeneratedValue(static_cast<Element>(e), field.PointAt(i, j), here));
             }
         }
     }
@@ -680,17 +772,23 @@ float World::Skyline(int column) const {
     const float step = static_cast<float>(spacing_);
     const float x    = column * step;
 
-    // Scanned from the open sky down to the first ground it meets. Read from
-    // the terrain function alone, not from the world: it is the shape of the
-    // land that decides what the sky can see, and asking the world would mean
-    // asking chunks far above the one being lit, which are not resident and
+    // Started just above the surface the generator reports for this column,
+    // rather than at a fixed height. The surface is a function of the column
+    // alone, so there is nothing to search for above it.
+    float ground = terrain::Height(x, settings_) - kSkylineHeadroom;
+
+    // Then followed down to the first ground it meets, since the surface is not
+    // the whole answer: where an entrance has opened the ground up, the sky
+    // reaches past it into the shaft.
+    //
+    // Read from the terrain function alone, not from the world: it is the shape
+    // of the land that decides what the sky can see, and asking the world would
+    // mean asking chunks far above the one being lit, which are not resident and
     // would be answered from this same noise anyway.
     //
     // Bounded, because a column open a long way down is a shaft, and past the
     // bound the answer stops mattering: nothing that deep is lit by the sky.
-    float ground = settings_.skyDepth;
-
-    const float bottom = settings_.skyDepth + kSkylineScan;
+    const float bottom = ground + kSkylineScan;
     while (ground < bottom && !terrain::IsSolid({x, ground}, settings_, RockThreshold())) ground += step;
 
     skyline_.emplace(column, ground);
@@ -770,10 +868,20 @@ void World::StepLight(Rectangle region) {
         }
     }
 
-    // Where the ground starts in each column, looking down from the open sky.
+    // Where the ground starts in each column, looking down from the open sky, and
+    // how much of that sky the cloud over it is holding back.
+    //
+    // The two are filled together because they are the same kind of fact and the
+    // solver reads them the same way. The skyline is remembered once per column
+    // since the ground does not move; the shade is not, since the whole point of
+    // weather is that it does.
     medium_.skyline.assign(cols, 0.0f);
+    medium_.cover.assign(cols, 0.0f);
 
-    for (int i = 0; i < cols; i++) medium_.skyline[i] = Skyline(i0 + i);
+    for (int i = 0; i < cols; i++) {
+        medium_.skyline[i] = Skyline(i0 + i);
+        medium_.cover[i]   = sky_.ShadeAt((i0 + i) * step);
+    }
 
     for (const Spark &spark : sparks_) {
         // Spread over a small disc rather than pressed into one cell. A single
@@ -814,8 +922,8 @@ void World::StepLight(Rectangle region) {
     // ground above it darkens without the light having to be retuned.
     lightSettings_.sky = {
         .radiance = skyLight_,
-        .horizon  = settings_.skyDepth,
-        .fade     = std::max(settings_.skyFade, 1.0f),
+        .horizon  = settings_.surface.level,
+        .fade     = kSkyFade,
     };
 
     lightField_.Solve(medium_, lightSettings_);

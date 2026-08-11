@@ -145,7 +145,98 @@ void Player::TryJump(const PlayerInput &input) {
     }
 }
 
+void Player::Fly(const PlayerInput &input, float dt) {
+    const float topSpeed = input.boostHeld ? player_config::kFlyBoostSpeed : player_config::kFlySpeed;
+
+    // Normalised, so travelling diagonally is not faster than travelling along
+    // an axis.
+    const float length = std::sqrt(input.moveX * input.moveX + input.moveY * input.moveY);
+    const float scale  = (length > 1.0f) ? (1.0f / length) : 1.0f;
+
+    velocity_.x = MoveTowards(velocity_.x, input.moveX * scale * topSpeed, player_config::kFlyAccel * dt);
+    velocity_.y = MoveTowards(velocity_.y, input.moveY * scale * topSpeed, player_config::kFlyAccel * dt);
+
+    // Moved outright, with no collision test and no sub-stepping. Passing through
+    // the rock is the point: a flight that stopped at a wall could not be used to
+    // look at what is behind it.
+    position_.x += velocity_.x * dt;
+    position_.y += velocity_.y * dt;
+
+    // Neither of these can be true in flight, and leaving the last ground reading
+    // standing would have the character land the instant flight is switched off.
+    grounded_ = false;
+    crouched_ = false;
+    state_    = State::Flying;
+}
+
+bool Player::StepOver(const World &terrain) {
+    // Only from the ground, and only while not rising. A body in mid-air allowed
+    // to lift itself out of a collision would climb every wall it brushed against.
+    if (!grounded_ || velocity_.y < 0.0f || IsSwimming()) return false;
+
+    // Probed at whole pixels rather than at lattice spacing. The ground is drawn
+    // by interpolating between vertices, so its true height is not a multiple of
+    // anything, and probing coarsely lifts the body a visible amount higher than
+    // the ledge it is stepping onto.
+    for (float lift = 1.0f; lift <= player_config::kStepHeight; lift += 1.0f) {
+        const Vector2 raised = {position_.x, position_.y - lift};
+        if (terrain.OverlapsSolid(BodyRect(raised, crouched_))) continue;
+
+        // The first height that clears is taken, which is the lowest one, so the
+        // body ends up on the ledge rather than above it.
+        position_ = raised;
+        return true;
+    }
+
+    return false;
+}
+
+void Player::SnapToGround(const World &terrain) {
+    for (float drop = 1.0f; drop <= player_config::kSnapDistance; drop += 1.0f) {
+        const Vector2 lowered = {position_.x, position_.y + drop};
+
+        // Stopped at rock rather than pushed into it. Reaching solid ground on the
+        // way down means the descent has gone one pixel too far, and the position
+        // before it was already the answer.
+        if (terrain.OverlapsSolid(BodyRect(lowered, crouched_))) return;
+
+        if (terrain.OverlapsSolid(BodyRect({lowered.x, lowered.y + 1.0f}, crouched_))) {
+            position_ = lowered;
+            return;
+        }
+    }
+}
+
+bool Player::Sidestep(const World &terrain) {
+    // Only while rising, and only into a corner. Falling onto a ledge should land
+    // on it, not be shunted off the side of it.
+    if (velocity_.y >= 0.0f) return false;
+
+    // The direction of travel is tried first at each distance, so a character
+    // moving right is carried around the corner rather than back off it. A body
+    // going straight up has no preference and takes either.
+    const float toward = (velocity_.x >= 0.0f) ? 1.0f : -1.0f;
+
+    for (float nudge = 1.0f; nudge <= player_config::kCornerNudge; nudge += 1.0f) {
+        for (const float side : {toward, -toward}) {
+            const Vector2 shifted = {position_.x + side * nudge, position_.y};
+            if (terrain.OverlapsSolid(BodyRect(shifted, crouched_))) continue;
+
+            position_ = shifted;
+            return true;
+        }
+    }
+
+    return false;
+}
+
 void Player::MoveAndCollide(const World &terrain, float dt) {
+    // Remembered before the move, because whether the body should be held against
+    // the ground is a question about where it started, not where it ended up.
+    // Walking off a step leaves it airborne by the time the move is over, which is
+    // exactly the case the snap exists for.
+    const bool wasGrounded = grounded_;
+
     const Vector2 delta = {velocity_.x * dt, velocity_.y * dt};
 
     const float maxStep  = terrain.Spacing() / 2.0f;
@@ -157,15 +248,23 @@ void Player::MoveAndCollide(const World &terrain, float dt) {
     for (int s = 0; s < steps; s++) {
         position_.x += step.x;
         if (terrain.OverlapsSolid(Bounds())) {
-            position_.x -= step.x;
-            velocity_.x = 0.0f;
+            // Blocked sideways, which on this terrain is usually a step rather
+            // than a wall. Stopping the body outright is what made running across
+            // open ground catch, so the ledge is tried first and only a genuine
+            // wall takes the speed away.
+            if (!StepOver(terrain)) {
+                position_.x -= step.x;
+                velocity_.x = 0.0f;
+            }
         }
 
         position_.y += step.y;
         if (terrain.OverlapsSolid(Bounds())) {
-            position_.y -= step.y;
-            velocity_.y = 0.0f;
-            break;
+            if (!Sidestep(terrain)) {
+                position_.y -= step.y;
+                velocity_.y = 0.0f;
+                break;
+            }
         }
     }
 
@@ -173,6 +272,18 @@ void Player::MoveAndCollide(const World &terrain, float dt) {
     // over a single frame may not close the sub-pixel gap to the ground, and a
     // character standing still would flicker between grounded and airborne.
     grounded_ = terrain.OverlapsSolid(BodyRect({position_.x, position_.y + 1.0f}, crouched_));
+
+    // Held against the ground it was walking on a moment ago, whether it left it
+    // by cresting a step or by running down one. Both cases are the same to the
+    // character and neither should be a fall.
+    if (!grounded_ && wasGrounded && velocity_.y >= 0.0f) {
+        SnapToGround(terrain);
+        grounded_ = terrain.OverlapsSolid(BodyRect({position_.x, position_.y + 1.0f}, crouched_));
+
+        // The drop was walked down rather than fallen, so the speed gravity had
+        // begun to build up over it is not owed to anybody.
+        if (grounded_) velocity_.y = 0.0f;
+    }
 
     if (grounded_) coyoteTimer_ = player_config::kCoyoteTime;
 }
@@ -194,9 +305,30 @@ void Player::UpdateState() {
 }
 
 void Player::Update(const PlayerInput &input, const World &terrain, float dt) {
+    if (input.flyToggled) {
+        flying_ = !flying_;
+
+        // Dropped rather than carried across, in both directions: entering flight
+        // with a fall already in progress would sink the body, and leaving it at
+        // boost speed would fling it across the world.
+        velocity_ = {};
+    }
+
     // Measured before anything moves, so buoyancy, drag and the choice between
     // walking and swimming all act on the same reading.
-    submerged_ = terrain.SubmergedFraction(Bounds());
+    //
+    // Left at zero in flight: the body passes through water as it does through
+    // rock, and reading it would put the character into a swimming stroke inside
+    // a flooded cavern it is only passing over.
+    submerged_ = flying_ ? 0.0f : terrain.SubmergedFraction(Bounds());
+
+    if (flying_) {
+        UpdateTimers(input, dt);
+        UpdateAim(input);
+        UpdateAttack(input);
+        Fly(input, dt);
+        return;
+    }
 
     UpdateTimers(input, dt);
     UpdateAim(input);
@@ -210,7 +342,16 @@ void Player::Update(const PlayerInput &input, const World &terrain, float dt) {
 
 void Player::Draw() const {
     const Rectangle body = Bounds();
-    DrawRectangleRec(body, IsSwimming() ? DARKBLUE : DARKGREEN);
+
+    DrawRectangleRec(body, flying_ ? Color{150, 110, 200, 255} : IsSwimming() ? DARKBLUE : DARKGREEN);
+
+    // Outlined while flying, so the body stays findable inside the rock it is
+    // passing through instead of reading as a patch of odd-coloured stone.
+    if (flying_) {
+        const Rectangle halo = {body.x - 2.0f, body.y - 2.0f, body.width + 4.0f, body.height + 4.0f};
+
+        DrawRectangleLinesEx(halo, 2.0f, {235, 220, 255, 255});
+    }
 
     // Aim indicator, readable while there is no sprite to carry the pose.
     const Vector2 centre = Centre();

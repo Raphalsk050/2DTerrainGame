@@ -1,7 +1,11 @@
 #include "liquid_layer.h"
 
-void LiquidLayer::Load(int width, int height) {
-    target_ = LoadRenderTexture(width, height);
+void LiquidLayer::Fit(int width, int height) {
+    if (target_.id != 0 && target_.texture.width == width && target_.texture.height == height) return;
+
+    Unload();
+
+    if (width > 0 && height > 0) target_ = LoadRenderTexture(width, height);
 }
 
 void LiquidLayer::Unload() {
