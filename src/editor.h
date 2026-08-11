@@ -46,6 +46,9 @@ public:
     // one answer rather than each asking the world separately.
     std::optional<Element> Under() const { return under_; }
 
+    // Where the cursor is pointing, in world space.
+    Vector2 Aim() const { return aim_; }
+
 private:
     // Brush sizes in pixels. Bounded at the small end by the lattice, since a
     // brush narrower than the spacing between vertices covers none of them and
@@ -59,4 +62,5 @@ private:
     World::Yield collected_{};
 
     std::optional<Element> under_;
+    Vector2 aim_{};
 };

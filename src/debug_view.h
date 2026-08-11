@@ -16,6 +16,7 @@ struct Toggles {
     bool vertices = false; // One mark per lattice sample.
     bool chunks   = false; // Chunk borders, coordinates and what pins them.
     bool layers   = false; // The world height grid and the spawn bands on it.
+    bool light    = false; // The probes the light was solved on.
 };
 
 // Reads the function keys that switch the overlays.
@@ -33,5 +34,13 @@ void DrawChunks(const World &world, Rectangle view);
 // vein actually stops where the edge runs, and an overlay that disagreed with
 // the world by exactly the amount of the wobble would be worse than none.
 void DrawLayers(const World &world, Rectangle view);
+
+// The light, as the solver actually holds it: one mark per probe of cascade
+// zero, at full brightness.
+//
+// The lit world shows what the light does; this shows where it is and how
+// coarsely it is known, which is what a rule reading a light level is really
+// asking about.
+void DrawLight(const World &world, Rectangle view);
 
 } // namespace debug_view

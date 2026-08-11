@@ -13,7 +13,7 @@
 // squares routine and simulated by the same rules. Everything that used to be
 // decided by naming a particular element somewhere in the code is declared here
 // instead, so a new material is one row in the table below and nothing else.
-enum class Element { Rock, Coal, Iron, Gold, Water, Count };
+enum class Element { Rock, Coal, Iron, Gold, Water, Torch, Count };
 
 inline constexpr std::size_t kElementCount = static_cast<std::size_t>(Element::Count);
 
@@ -121,6 +121,25 @@ struct ElementSpawn {
     DepthBand band{};
 };
 
+// How a material takes part in lighting.
+//
+// Kept apart from the rules above because light does not follow from any of
+// them. Water stops a body and lets light through; a torch stops nothing and is
+// the brightest thing in the world. Deriving one from the other would make
+// every new material an argument about which existing one it resembles.
+struct ElementLight {
+    // Share of the light stopped by one cell of the material, in [0,1]. One is
+    // a wall. Below one the material tints and dims what passes through it,
+    // which is what deep water should do and what a gas will want later.
+    float opacity = 1.0f;
+
+    // Colour of the light the material gives off, and how much of it. Strength
+    // is in the same unit the sky is measured in, so a torch can be set against
+    // daylight and read as a fraction of it rather than as an arbitrary number.
+    Color glow     = {0, 0, 0, 0};
+    float strength = 0.0f;
+};
+
 struct ElementDef {
     const char *name;
 
@@ -133,6 +152,7 @@ struct ElementDef {
 
     ElementRules rules;
     ElementSpawn spawn;
+    ElementLight light;
 };
 
 inline constexpr ElementDef kElements[] = {
@@ -143,6 +163,7 @@ inline constexpr ElementDef kElements[] = {
         .contour   = {0, 82, 172, 255},
         .rules     = {.blocksBodies = true, .blocksLiquid = true, .occupies = true, .precedence = 0},
         .spawn     = {.generator = Generator::Terrain},
+        .light     = {.opacity = 1.0f},
     },
     {
         .name      = "coal",
@@ -165,8 +186,9 @@ inline constexpr ElementDef kElements[] = {
 
                 // Shallow and wide: the first thing dug up, and still there
                 // well past the depth the other ores start at.
-                .band = {.top = 260.0f, .bottom = 1500.0f, .fade = 64.0f, .jitter = 48.0f},
+                .band = {.top = 400.0f, .bottom = 1500.0f, .fade = 64.0f, .jitter = 48.0f},
             },
+        .light = {.opacity = 1.0f},
     },
     {
         .name      = "iron",
@@ -182,6 +204,7 @@ inline constexpr ElementDef kElements[] = {
                 .space     = SpawnSpace::InsideGround,
                 .band      = {.top = 520.0f, .bottom = 2400.0f, .fade = 80.0f, .jitter = 56.0f},
             },
+        .light = {.opacity = 1.0f},
     },
     {
         .name      = "gold",
@@ -200,6 +223,7 @@ inline constexpr ElementDef kElements[] = {
                 .space    = SpawnSpace::InsideGround,
                 .band     = {.top = 1600.0f, .bottom = kUnboundedDepth, .fade = 120.0f, .jitter = 64.0f},
             },
+        .light = {.opacity = 1.0f},
     },
     {
         .name = "water",
@@ -233,6 +257,30 @@ inline constexpr ElementDef kElements[] = {
                 // its own top at the surface.
                 .band = {.top = 340.0f, .bottom = 2600.0f, .fade = 32.0f, .jitter = 40.0f},
             },
+
+        // Dims light rather than stopping it, so a pool reads as deep by
+        // getting darker towards the bottom instead of turning into a wall the
+        // moment it is thick enough to swim in.
+        .light = {.opacity = 0.10f},
+    },
+    {
+        .name      = "torch",
+        .threshold = 0.45f,
+        .fill      = {255, 216, 150, 255},
+        .contour   = {196, 128, 44, 255},
+
+        // Claims its vertex, so it replaces what it is put on and can be mined
+        // back out, but stops nothing: a body walks through it and so does
+        // water. A torch that cast its own shadow would sit in a dark spot of
+        // its own making.
+        .rules = {.occupies = true, .precedence = 4},
+        .spawn = {.generator = Generator::None},
+
+        // Brighter than the sky, because it has to carry a room on its own
+        // while daylight arrives from every direction at once. Not by much,
+        // though: this is the light given off by every cell the brush covers,
+        // and a wide brush lays down a great many of them.
+        .light = {.opacity = 0.0f, .glow = {255, 198, 130, 255}, .strength = 2.5f},
     },
 };
 

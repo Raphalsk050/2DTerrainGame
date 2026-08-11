@@ -39,6 +39,7 @@ void Editor::Update(World &world, const Hotbar &hotbar, const Camera2D &camera) 
 
     const Vector2 target = GetScreenToWorld2D(mouse, camera);
 
+    aim_   = target;
     under_ = world.OccupantAt(target);
 
     if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) return;

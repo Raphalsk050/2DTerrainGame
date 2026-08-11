@@ -71,6 +71,56 @@ void ReadToggles(Toggles &toggles) {
     if (IsKeyPressed(KEY_V)) toggles.vertices = !toggles.vertices;
     if (IsKeyPressed(KEY_F3)) toggles.chunks = !toggles.chunks;
     if (IsKeyPressed(KEY_F4)) toggles.layers = !toggles.layers;
+    if (IsKeyPressed(KEY_F5)) toggles.light = !toggles.light;
+}
+
+void DrawLight(const World &world, Rectangle view) {
+    const light::Field &field = world.Light();
+
+    const float spacing = field.Spacing();
+
+    // Each probe fills its own patch, rather than being marked with a dot in
+    // the middle of it. At one probe per cell the dots are smaller than the gaps
+    // between them, and the overlay reads as a halftone screen laid over the
+    // world instead of as the light.
+    //
+    // Filling shows the field for what it is: the blocks are the resolution the
+    // light is actually known at, which is the thing worth looking at here.
+    for (int i = 0; i < field.Cols(); i++) {
+        for (int j = 0; j < field.Rows(); j++) {
+            const Vector2 at = field.ProbePosition(i, j);
+
+            if (at.x < view.x - spacing || at.x > view.x + view.width + spacing) continue;
+            if (at.y < view.y - spacing || at.y > view.y + view.height + spacing) continue;
+
+            const light::Radiance value = field.ProbeAt(i, j);
+            const float exposure        = field.Exposure();
+
+            const Color colour = {
+                static_cast<unsigned char>(std::clamp(light::Expose(value.r, exposure), 0.0f, 1.0f) * 255.0f),
+                static_cast<unsigned char>(std::clamp(light::Expose(value.g, exposure), 0.0f, 1.0f) * 255.0f),
+                static_cast<unsigned char>(std::clamp(light::Expose(value.b, exposure), 0.0f, 1.0f) * 255.0f),
+                255,
+            };
+
+            DrawRectangleV({at.x - spacing * 0.5f, at.y - spacing * 0.5f}, {spacing, spacing}, colour);
+        }
+    }
+
+    // A sparse rule over the top, so the grid has a scale to be read against
+    // and the view does not become an unbroken field of black where the light
+    // runs out.
+    constexpr int kRule = 16;
+
+    for (int i = 0; i < field.Cols(); i += kRule) {
+        const float x = field.ProbePosition(i, 0).x - spacing * 0.5f;
+        DrawLineV({x, view.y}, {x, view.y + view.height}, {90, 96, 110, 110});
+    }
+
+    for (int j = 0; j < field.Rows(); j += kRule) {
+        const float y = field.ProbePosition(0, j).y - spacing * 0.5f;
+        DrawLineV({view.x, y}, {view.x + view.width, y}, {90, 96, 110, 110});
+    }
 }
 
 void DrawChunks(const World &world, Rectangle view) {

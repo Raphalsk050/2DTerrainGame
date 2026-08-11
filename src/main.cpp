@@ -2,6 +2,7 @@
 #include "debug_view.h"
 #include "editor.h"
 #include "hotbar.h"
+#include "light_layer.h"
 #include "liquid_layer.h"
 #include "player.h"
 #include "raylib.h"
@@ -30,6 +31,14 @@ constexpr float kMaxAccumulated = 0.25f;
 // Liquid is simulated over a band wider than the view, so that what happens
 // just off screen has already settled by the time it scrolls in.
 constexpr float kSimulationMargin = 128.0f;
+
+// The lantern as linear light, at a given strength.
+light::Radiance Lantern(float strength) {
+    constexpr float kByte = 1.0f / 255.0f;
+
+    return {config::kLanternGlow.r * kByte * strength, config::kLanternGlow.g * kByte * strength,
+            config::kLanternGlow.b * kByte * strength};
+}
 
 Rectangle ViewBounds(const Camera2D &camera) {
     return {camera.target.x - camera.offset.x, camera.target.y - camera.offset.y,
@@ -87,46 +96,58 @@ void DrawBrushMode(const Editor &editor) {
 }
 
 void Draw(const World &world, const Player &player, const Hotbar &hotbar, const Editor &editor,
-          const LiquidLayer &liquids, const Camera2D &camera, const debug_view::Toggles &debug) {
+          const LiquidLayer &liquids, const LightLayer &lights, const Camera2D &camera,
+          const debug_view::Toggles &debug, float lantern) {
     const Rectangle view = ViewBounds(camera);
 
     BeginDrawing();
     ClearBackground(RAYWHITE);
 
     BeginMode2D(camera);
-
     world.DrawTerrain(view);
+    player.Draw();
+    EndMode2D();
 
-    // Drawn over the world rather than under it: the point of the overlay is to
-    // check the fill against the samples that produced it, which is impossible
-    // while the fill covers it.
+    // Composited over the character, so a submerged body is tinted by the
+    // liquid it is standing in.
+    liquids.Compose(config::kLiquidAlpha);
+
+    BeginMode2D(camera);
+
+    // Then the whole scene is multiplied by the light at once. Everything drawn
+    // before this line is lit; everything after it is not, which is exactly the
+    // right side of the line for anything meant to be read rather than seen.
+    lights.Compose();
+
+    // Drawn over the world rather than under it: the point of an overlay is to
+    // check the world against what produced it, which is impossible while the
+    // world covers it.
     if (debug.vertices) world.DrawVertexOverlay(view, config::kVertexSize, RED, LIGHTGRAY);
     if (debug.layers) debug_view::DrawLayers(world, view);
     if (debug.chunks) debug_view::DrawChunks(world, view);
+    if (debug.light) debug_view::DrawLight(world, view);
 
-    player.Draw();
     editor.DrawCursor(hotbar, camera);
 
     EndMode2D();
 
-    // Composited last and over the character, so a submerged body is tinted by
-    // the liquid it is standing in.
-    liquids.Compose(config::kLiquidAlpha);
-
     DrawText("A/D: move  |  space: jump  |  S: crouch  |  J: attack  |  mouse: aim", 10, 10, 14, GRAY);
-    DrawText("left: apply brush  |  X: place/dig  |  1-5 or wheel: material  |  - / +: brush size  |  R: regenerate",
+    DrawText("left: apply brush  |  X: place/dig  |  1-6 or wheel: material  |  - / +: brush size  |  R: regenerate",
              10, 28, 14, GRAY);
-    DrawText("V: vertices  |  F3: chunks  |  F4: height grid", 10, 46, 14, GRAY);
+    DrawText(TextFormat("V: vertices  |  F3: chunks  |  F4: height grid  |  F5: light probes  |  , . : lantern %.1f",
+                        lantern),
+             10, 46, 14, GRAY);
 
-    DrawText(TextFormat("chunks: %d (%d pinned)   water in view: %.1f", world.ResidentChunks(), world.PinnedChunks(),
-                        world.TotalWater(view)),
+    DrawText(TextFormat("chunks: %d (%d pinned)   water in view: %.1f   light rays: %ld", world.ResidentChunks(),
+                        world.PinnedChunks(), world.TotalWater(view), world.Light().Rays()),
              10, 70, 14, GRAY);
 
     const Vector2 centre = player.Centre();
     const auto under     = editor.Under();
 
-    DrawText(TextFormat("y: %d   under cursor: %s", static_cast<int>(centre.y),
-                        under.has_value() ? Def(*under).name : "open"),
+    DrawText(TextFormat("y: %d   under cursor: %s   light here: %.2f   light at cursor: %.2f",
+                        static_cast<int>(centre.y), under.has_value() ? Def(*under).name : "open",
+                        world.LightLevelAt(centre), world.LightLevelAt(editor.Aim())),
              10, 88, 14, GRAY);
 
     DrawBrushMode(editor);
@@ -164,12 +185,16 @@ int main() {
     LiquidLayer liquids;
     liquids.Load(config::kScreenWidth, config::kScreenHeight);
 
+    LightLayer lights;
+
     Camera2D camera = {};
     camera.offset   = {config::kScreenWidth / 2.0f, config::kScreenHeight / 2.0f};
     camera.target   = player.Centre();
     camera.zoom     = 1.0f;
 
     float accumulated = 0.0f;
+    float lantern     = config::kLanternStrength;
+
     debug_view::Toggles debug;
 
     while (!WindowShouldClose()) {
@@ -188,6 +213,13 @@ int main() {
         debug_view::ReadToggles(debug);
         if (IsKeyPressed(KEY_R)) world.Reset();
 
+        // Turned up and down while walking, since how much light the player
+        // carries is a balance question and the only way to settle it is to be
+        // underground at each setting. Zero is a valid answer: it leaves the
+        // dark to torches alone.
+        if (IsKeyPressed(KEY_COMMA)) lantern = std::max(lantern - config::kLanternStep, 0.0f);
+        if (IsKeyPressed(KEY_PERIOD)) lantern = std::min(lantern + config::kLanternStep, config::kLanternMax);
+
         accumulated = std::min(accumulated + dt, kMaxAccumulated);
         while (accumulated >= kWaterStep) {
             world.StepWater(active);
@@ -197,12 +229,23 @@ int main() {
         player.Update(ReadPlayerInput(camera), world, dt);
         FollowPlayer(camera, player, dt);
 
+        // Re-offered every frame rather than registered once. A light that has
+        // to be renewed to keep burning needs nothing told to it when the thing
+        // carrying it moves, and nothing told to it when that thing is gone.
+        world.AddLight(player.Centre(), Lantern(lantern), config::kLanternRadius);
+
+        // Solved after the world has finished moving, so the light matches the
+        // frame it is about to be drawn over rather than the one before it.
+        world.StepLight(active);
+        lights.Update(world.Light());
+
         // Captured before the frame opens, since it renders to its own target.
         liquids.Capture(world, ViewBounds(camera), camera);
 
-        Draw(world, player, hotbar, editor, liquids, camera, debug);
+        Draw(world, player, hotbar, editor, liquids, lights, camera, debug, lantern);
     }
 
+    lights.Unload();
     liquids.Unload();
     CloseWindow();
 

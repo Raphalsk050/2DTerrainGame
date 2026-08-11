@@ -54,6 +54,8 @@ add_executable(${PROJECT_NAME}
     src/debug_view.cpp
     src/editor.cpp
     src/hotbar.cpp
+    src/light.cpp
+    src/light_layer.cpp
     src/liquid_layer.cpp
     src/player.cpp
     src/water.cpp

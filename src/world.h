@@ -2,6 +2,7 @@
 
 #include "element.h"
 #include "grid.h"
+#include "light.h"
 #include "raylib.h"
 #include "terrain.h"
 #include "water.h"
@@ -62,6 +63,11 @@ public:
 
     // True where any material stops liquids.
     bool BlocksLiquidAt(Vector2 world) const;
+
+    // True where any material stops light outright. Distinct from the liquid
+    // and body tests: a torch stops neither light nor anything else, and water
+    // stops liquid movement in no sense but dims what passes through it.
+    bool BlocksLightAt(Vector2 world) const;
     bool OverlapsSolid(Rectangle rect) const;
 
     // The single material filling a world position, or nothing where the space
@@ -97,6 +103,40 @@ public:
 
     void SetWaterSettings(const water::Settings &settings) { waterSettings_ = settings; }
     const water::Settings &WaterSettings() const { return waterSettings_; }
+
+    // Solves the light over `region`, from the materials standing in it and
+    // from whatever was handed to AddLight since the last call.
+    //
+    // Light is state that follows entirely from the world, so it is rebuilt
+    // rather than stored: nothing about it has to survive a chunk being
+    // released, and a torch placed this frame is alight the same frame.
+    void StepLight(Rectangle region);
+
+    // A light that exists for the next solve only.
+    //
+    // Anything that moves is lit this way rather than by standing a material in
+    // the world: a creature, a thrown lantern, the player. The caller re-adds
+    // it each frame, which means nothing has to be told when a light moves or
+    // goes out.
+    void AddLight(Vector2 world, light::Radiance radiance, float radius);
+
+    // Light reaching a world position, and the same as a single level in [0,1].
+    //
+    // The level is the number game rules should be written against: crops that
+    // need light, creatures that will not stand in it, a torch bright enough to
+    // hold them off. Positions outside the region last solved read as dark.
+    light::Radiance LightAt(Vector2 world) const { return lightField_.At(world); }
+    float LightLevelAt(Vector2 world) const { return lightField_.LevelAt(world); }
+
+    const light::Field &Light() const { return lightField_; }
+
+    void SetLightSettings(const light::Settings &settings) { lightSettings_ = settings; }
+    const light::Settings &LightSettings() const { return lightSettings_; }
+
+    // Light the open sky gives off. Its horizon follows the terrain's own sky
+    // depth, so raising the ground raises what counts as being under it.
+    void SetSkyLight(light::Radiance radiance) { skyLight_ = radiance; }
+    light::Radiance SkyLight() const { return skyLight_; }
 
     // Total liquid held by the vertices inside a region. Reported so that
     // volume can be checked from outside the simulation.
@@ -221,6 +261,15 @@ private:
     // noise itself so that `coverage` in the element table means what it says.
     void CalibrateSpawn();
 
+    // World Y at which the ground begins in a lattice column, looking down from
+    // the open sky.
+    //
+    // Read from the terrain function rather than from the world, and remembered
+    // once found. It is a pure function of the column, so a column answered on
+    // one frame has the same answer on every other, and scanning them all again
+    // each frame cost more than solving the light did.
+    float Skyline(int column) const;
+
     terrain::Settings settings_;
     int spacing_;
 
@@ -238,4 +287,24 @@ private:
     // Kept between steps so that a 9000-cell region is not reallocated sixty
     // times a second.
     water::Buffer scratch_;
+
+    // A light that lasts one solve. Cleared by StepLight, so a caller that
+    // stops adding one has stopped emitting it.
+    struct Spark {
+        Vector2 at{};
+        light::Radiance radiance{};
+        float radius = 0.0f;
+    };
+
+    std::vector<Spark> sparks_;
+
+    light::Settings lightSettings_{};
+    light::Radiance skyLight_{2.6f, 2.8f, 3.1f};
+
+    light::Medium medium_;
+    light::Field lightField_;
+
+    // One entry per lattice column, filled the first time that column is asked
+    // about. Cleared with the world, since regenerating changes the ground.
+    mutable std::unordered_map<int, float> skyline_;
 };

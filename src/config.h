@@ -1,5 +1,7 @@
 #pragma once
 
+#include "raylib.h"
+
 // Project-wide configuration constants.
 namespace config {
 
@@ -8,7 +10,7 @@ inline constexpr int kScreenHeight = 600;
 inline constexpr int kTargetFps    = 60;
 
 // Spacing in pixels between neighbouring grid vertices.
-inline constexpr int kResolution = 8;
+inline constexpr int kResolution = 6;
 
 // A grid spanning N cells in one direction is delimited by N+1 vertices.
 inline constexpr int kCols = kScreenWidth / kResolution + 1;
@@ -33,6 +35,33 @@ inline constexpr float kPickRadius = kResolution / 2.0f;
 // Transparency of the liquid layer, applied once to the whole layer instead of
 // to each piece drawn into it.
 inline constexpr unsigned char kLiquidAlpha = 170;
+
+// Draws the light as one flat block per probe rather than blending between
+// them.
+//
+// It is a look, and it is also the more honest of the two: a probe knows the
+// light over its own patch and nothing about the patch next door, and blending
+// between them carries the brightness of a lit wall a full probe into the cave
+// beside it, and the darkness of the cave back into the wall. Blocks keep each
+// answer inside the square it was solved for.
+inline constexpr bool kBlockyLight = true;
+
+// The lantern the player carries.
+//
+// Strength is in the same unit the sky and a torch are measured in, so it can
+// be read as a fraction of either. Deliberately low: enough to place a foot,
+// not enough to survey a cavern, which is what keeps an ore seam something to
+// be found rather than something visible from the mouth of the tunnel.
+//
+// Adjustable while the game runs, with the keys below, so the balance can be
+// settled by walking around at each setting rather than by argument.
+inline constexpr float kLanternStrength = 2.0f;
+inline constexpr float kLanternRadius   = 10.0f;
+inline constexpr Color kLanternGlow     = {255, 206, 150, 255};
+
+// How much one press changes it, and how far it can be pushed either way.
+inline constexpr float kLanternStep = 0.01f;
+inline constexpr float kLanternMax  = 8.0f;
 
 // Shader path, relative to the executable. The working directory is switched to
 // the binary's own directory at startup, and the build copies assets there.

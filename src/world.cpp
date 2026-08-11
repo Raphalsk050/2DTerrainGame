@@ -28,9 +28,25 @@ constexpr int kDropMargin = 12;
 // leaves the free surface everywhere else to the material itself.
 constexpr float kClampGain = 6.0f;
 
+// How far down a column is followed looking for the ground before it is called
+// a shaft. Past this the sky can no longer reach anyway, so the answer would
+// change nothing.
+constexpr float kSkylineScan = 1400.0f;
+
 int FloorDiv(int value, int divisor) {
     const int quotient = value / divisor;
     return (value % divisor != 0 && (value < 0) != (divisor < 0)) ? quotient - 1 : quotient;
+}
+
+// A colour out of the element table as linear light.
+//
+// Channels are taken as they are written rather than lifted out of the screen's
+// own curve first. The table is authored by eye against what the world looks
+// like, so agreeing with it is worth more here than being right about gamma.
+light::Radiance Glow(Color color, float strength) {
+    constexpr float kByte = 1.0f / 255.0f;
+
+    return {color.r * kByte * strength, color.g * kByte * strength, color.b * kByte * strength};
 }
 
 } // namespace
@@ -266,11 +282,25 @@ World::Chunk &World::Emplace(int cx, int cy) {
 }
 
 void World::Update(Rectangle view) {
+    // Widened by the margin the light will snap its own region out to.
+    //
+    // A cell the light asks about outside a resident chunk is answered from the
+    // noise, and answering one that way costs as much as generating a hundred:
+    // every material has to be evaluated and then contested against every other.
+    // A few hundred of them along the edge of the region cost more than the
+    // whole solve, and nothing about it looked wrong, which is the worst kind
+    // of slow.
+    const float reserve = static_cast<float>(spacing_ * lightSettings_.probeCells)
+                        * static_cast<float>(1 << std::max(0, lightSettings_.cascades - 1));
+
+    const Rectangle covered = {view.x - reserve, view.y - reserve, view.width + 2.0f * reserve,
+                               view.height + 2.0f * reserve};
+
     int minCx = 0;
     int minCy = 0;
     int maxCx = 0;
     int maxCy = 0;
-    ChunkRange(view, minCx, minCy, maxCx, maxCy);
+    ChunkRange(covered, minCx, minCy, maxCx, maxCy);
 
     for (int cx = minCx; cx <= maxCx; cx++) {
         for (int cy = minCy; cy <= maxCy; cy++) {
@@ -295,6 +325,7 @@ void World::Update(Rectangle view) {
 
 void World::Reset() {
     chunks_.clear();
+    skyline_.clear();
 }
 
 int World::PinnedChunks() const {
@@ -632,6 +663,163 @@ void World::StepWater(Rectangle active) {
             }
         }
     }
+}
+
+float World::Skyline(int column) const {
+    const auto found = skyline_.find(column);
+    if (found != skyline_.end()) return found->second;
+
+    const float step = static_cast<float>(spacing_);
+    const float x    = column * step;
+
+    // Scanned from the open sky down to the first ground it meets. Read from
+    // the terrain function alone, not from the world: it is the shape of the
+    // land that decides what the sky can see, and asking the world would mean
+    // asking chunks far above the one being lit, which are not resident and
+    // would be answered from this same noise anyway.
+    //
+    // Bounded, because a column open a long way down is a shaft, and past the
+    // bound the answer stops mattering: nothing that deep is lit by the sky.
+    float ground = settings_.skyDepth;
+
+    const float bottom = settings_.skyDepth + kSkylineScan;
+    while (ground < bottom && !terrain::IsSolid({x, ground}, settings_, RockThreshold())) ground += step;
+
+    skyline_.emplace(column, ground);
+
+    return ground;
+}
+
+void World::AddLight(Vector2 world, light::Radiance radiance, float radius) {
+    sparks_.push_back({world, radiance, radius});
+}
+
+void World::StepLight(Rectangle region) {
+    int i0 = 0;
+    int j0 = 0;
+    int i1 = 0;
+    int j1 = 0;
+    LatticeRange(region, i0, j0, i1, j1);
+
+    // Every cascade lays its probes out from the corner of the region, so the
+    // corner has to land on the same world positions from one solve to the
+    // next, and it has to do so for the coarsest of them as well as the finest.
+    //
+    // That is the whole of it: the top cascade's probes stand eight cells
+    // apart, and a corner snapped only to single cells slides them across the
+    // world one cell at a time. Most of the light in a scene comes from those
+    // few coarse probes, so the entire world flickers in step with the walking.
+    // Snapping to the coarsest spacing pins every grid at once, since each
+    // finer one divides it.
+    const int stride = std::max(1, lightSettings_.probeCells) << std::max(0, lightSettings_.cascades - 1);
+
+    i0 = FloorDiv(i0, stride) * stride;
+    j0 = FloorDiv(j0, stride) * stride;
+
+    // Rounded up to whole strides as well, so that the number of probes in each
+    // cascade is fixed too. A region whose width wandered by one cell would
+    // change how many coarse probes fit across it, and move them all again.
+    const int cols = ((i1 - i0 + stride) / stride) * stride;
+    const int rows = ((j1 - j0 + stride) / stride) * stride;
+    if (cols <= 0 || rows <= 0) return;
+
+    const float step = static_cast<float>(spacing_);
+
+    medium_.spacing = step;
+    medium_.origin  = {i0 * step, j0 * step};
+
+    if (medium_.cols != cols || medium_.rows != rows) {
+        medium_.Resize(cols, rows);
+    } else {
+        medium_.Clear();
+    }
+
+    for (int i = 0; i < cols; i++) {
+        for (int j = 0; j < rows; j++) {
+            const Vector2 vertex = {(i0 + i) * step, (j0 + j) * step};
+
+            // Taken from whichever materials are actually present. Opacity is
+            // the strongest of them rather than their sum, since a cell filled
+            // twice over is still one cell of wall; light adds, since two
+            // things glowing in one place are brighter than either.
+            float stopped = 0.0f;
+            light::Radiance given;
+
+            for (std::size_t e = 0; e < kElementCount; e++) {
+                const ElementDef &def = kElements[e];
+                if (def.light.opacity <= 0.0f && def.light.strength <= 0.0f) continue;
+
+                if (ValueAt(static_cast<Element>(e), vertex) <= def.threshold) continue;
+
+                stopped = std::max(stopped, def.light.opacity);
+                given   = given + Glow(def.light.glow, def.light.strength);
+            }
+
+            const int cell = medium_.Index(i, j);
+
+            medium_.extinction[cell] = std::clamp(stopped, 0.0f, 1.0f);
+            medium_.emission[cell]   = given;
+        }
+    }
+
+    // Where the ground starts in each column, looking down from the open sky.
+    medium_.skyline.assign(cols, 0.0f);
+
+    for (int i = 0; i < cols; i++) medium_.skyline[i] = Skyline(i0 + i);
+
+    for (const Spark &spark : sparks_) {
+        // Spread over a small disc rather than pressed into one cell. A single
+        // cell is narrower than the step the nearest cascade takes, so most
+        // rays would pass beside it, and a light that moved would blink as it
+        // crossed from one cell to the next.
+        const float radius = std::max(spark.radius, step);
+        const int reach    = static_cast<int>(std::ceil(radius / step));
+
+        const int ci = static_cast<int>(std::round((spark.at.x - medium_.origin.x) / step));
+        const int cj = static_cast<int>(std::round((spark.at.y - medium_.origin.y) / step));
+
+        for (int di = -reach; di <= reach; di++) {
+            for (int dj = -reach; dj <= reach; dj++) {
+                const int i = ci + di;
+                const int j = cj + dj;
+
+                if (!medium_.InBounds(i, j)) continue;
+
+                const Vector2 vertex = {(i0 + i) * step, (j0 + j) * step};
+                const float dx       = vertex.x - spark.at.x;
+                const float dy       = vertex.y - spark.at.y;
+
+                const float distance = std::sqrt(dx * dx + dy * dy);
+                if (distance >= radius) continue;
+
+                const float share = 1.0f - distance / radius;
+                const int cell    = medium_.Index(i, j);
+
+                medium_.emission[cell] = medium_.emission[cell] + spark.radiance * (share * share);
+            }
+        }
+    }
+
+    sparks_.clear();
+
+    // The sky's horizon is the terrain's own, so a world generated with more
+    // ground above it darkens without the light having to be retuned.
+    lightSettings_.sky = {
+        .radiance = skyLight_,
+        .horizon  = settings_.skyDepth,
+        .fade     = std::max(settings_.skyFade, 1.0f),
+    };
+
+    lightField_.Solve(medium_, lightSettings_);
+}
+
+bool World::BlocksLightAt(Vector2 world) const {
+    for (std::size_t e = 0; e < kElementCount; e++) {
+        if (kElements[e].light.opacity < 1.0f) continue;
+        if (ValueAt(static_cast<Element>(e), world) > kElements[e].threshold) return true;
+    }
+
+    return false;
 }
 
 bool World::BlocksLiquidAt(Vector2 world) const {
