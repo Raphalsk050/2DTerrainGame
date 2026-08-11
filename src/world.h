@@ -255,7 +255,13 @@ private:
     // group of them that can be compared against a single number. The default
     // takes them all, which is what the liquid clamp and the vertex overlay
     // need; drawing asks for one rank and above.
-    Grid OccupancyField(const Chunk &chunk, int minPrecedence = std::numeric_limits<int>::min()) const;
+    // `groundOnly` keeps to the materials a body cannot walk through, which is
+    // what the terrain's own silhouette is made of. A torch occupies its vertex
+    // and can be mined back out, but it is a fixture standing in the ground
+    // rather than a part of it, and drawing it into the rock's outline gives it
+    // a rock-coloured halo.
+    Grid OccupancyField(const Chunk &chunk, int minPrecedence = std::numeric_limits<int>::min(),
+                        bool groundOnly = false) const;
 
     // Cutoff each generated material's noise has to clear, measured from the
     // noise itself so that `coverage` in the element table means what it says.

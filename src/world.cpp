@@ -1,5 +1,6 @@
 #include "world.h"
 
+#include "config.h"
 #include "marching_squares.h"
 
 #include <algorithm>
@@ -47,6 +48,13 @@ light::Radiance Glow(Color color, float strength) {
     constexpr float kByte = 1.0f / 255.0f;
 
     return {color.r * kByte * strength, color.g * kByte * strength, color.b * kByte * strength};
+}
+
+// The colour a material outlines itself with, or nothing where outlines are
+// switched off. Transparent is what DrawPixelated already reads as "leave the
+// fill unbroken", so there is no second path to keep working.
+Color Outline(Color contour) {
+    return config::kDrawContours ? contour : BLANK;
 }
 
 } // namespace
@@ -852,7 +860,7 @@ float World::TotalWater(Rectangle region) const {
     return static_cast<float>(total);
 }
 
-Grid World::OccupancyField(const Chunk &chunk, int minPrecedence) const {
+Grid World::OccupancyField(const Chunk &chunk, int minPrecedence, bool groundOnly) const {
     const Grid &any = chunk.fields[0];
 
     Grid margin(any.Origin(), any.Cols(), any.Rows(), spacing_);
@@ -865,6 +873,7 @@ Grid World::OccupancyField(const Chunk &chunk, int minPrecedence) const {
 
             for (std::size_t e = 0; e < kElementCount; e++) {
                 if (!kElements[e].rules.occupies || kElements[e].rules.precedence < minPrecedence) continue;
+                if (groundOnly && !kElements[e].rules.blocksBodies) continue;
 
                 filled = std::max(filled, chunk.fields[e].ValueAt(i, j) - kElements[e].threshold);
             }
@@ -950,15 +959,53 @@ void World::DrawTerrain(Rectangle view) const {
     for (const Element element : exclusionOrder_) {
         const ElementDef &def = Def(element);
 
+        // Anything that is not part of the ground is drawn from its own field
+        // alone, never unioned into the silhouette of what is under it.
+        //
+        // The union is stored as the strongest of several fields, and
+        // interpolating that is not the same as interpolating each and taking
+        // the strongest. Between two smooth fields the difference is nothing,
+        // because exclusion already makes them cross their thresholds on the
+        // same line. Against a hand-placed material, which is one inside its
+        // brush and zero outside, the union's crossing lands a fraction of a
+        // cell further out than the material's own, and what shows in the gap
+        // is a ring of whatever was beneath.
+        if (!def.rules.blocksBodies) {
+            const std::size_t index = ElementIndex(element);
+
+            for (int cx = minCx; cx <= maxCx; cx++) {
+                for (int cy = minCy; cy <= maxCy; cy++) {
+                    const Chunk *chunk = Find(cx, cy);
+                    if (chunk == nullptr) continue;
+
+                    if (config::kPixelArt) {
+                        marching_squares::DrawPixelated(chunk->fields[index], def.threshold, def.fill,
+                                                        Outline(def.contour), config::kPixelSize);
+                    } else {
+                        marching_squares::DrawFilled(chunk->fields[index], def.threshold, def.fill);
+                        if (config::kDrawContours) {
+                            marching_squares::DrawContour(chunk->fields[index], def.threshold, def.contour);
+                        }
+                    }
+                }
+            }
+
+            continue;
+        }
+
         for (int cx = minCx; cx <= maxCx; cx++) {
             for (int cy = minCy; cy <= maxCy; cy++) {
                 const Chunk *chunk = Find(cx, cy);
                 if (chunk == nullptr) continue;
 
-                const Grid field = OccupancyField(*chunk, def.rules.precedence);
+                const Grid field = OccupancyField(*chunk, def.rules.precedence, true);
 
-                marching_squares::DrawFilled(field, 0.0f, def.fill);
-                marching_squares::DrawContour(field, 0.0f, def.contour);
+                if (config::kPixelArt) {
+                    marching_squares::DrawPixelated(field, 0.0f, def.fill, Outline(def.contour), config::kPixelSize);
+                } else {
+                    marching_squares::DrawFilled(field, 0.0f, def.fill);
+                    if (config::kDrawContours) marching_squares::DrawContour(field, 0.0f, def.contour);
+                }
             }
         }
     }
@@ -974,8 +1021,13 @@ void World::DrawTerrain(Rectangle view) const {
                 const Chunk *chunk = Find(cx, cy);
                 if (chunk == nullptr) continue;
 
-                marching_squares::DrawFilled(chunk->fields[e], def.threshold, def.fill);
-                marching_squares::DrawContour(chunk->fields[e], def.threshold, def.contour);
+                if (config::kPixelArt) {
+                    marching_squares::DrawPixelated(chunk->fields[e], def.threshold, def.fill, Outline(def.contour),
+                                                    config::kPixelSize);
+                } else {
+                    marching_squares::DrawFilled(chunk->fields[e], def.threshold, def.fill);
+                    if (config::kDrawContours) marching_squares::DrawContour(chunk->fields[e], def.threshold, def.contour);
+                }
             }
         }
     }
@@ -1005,8 +1057,13 @@ void World::DrawLiquids(Rectangle view) const {
 
                 const Grid field = LiquidRenderField(cx, cy, element);
 
-                marching_squares::DrawFilled(field, style.threshold, body);
-                marching_squares::DrawContour(field, style.threshold, surface);
+                if (config::kPixelArt) {
+                    marching_squares::DrawPixelated(field, style.threshold, body, Outline(surface),
+                                                    config::kPixelSize);
+                } else {
+                    marching_squares::DrawFilled(field, style.threshold, body);
+                    if (config::kDrawContours) marching_squares::DrawContour(field, style.threshold, surface);
+                }
             }
         }
     }

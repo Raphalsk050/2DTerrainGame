@@ -46,6 +46,27 @@ inline constexpr unsigned char kLiquidAlpha = 170;
 // answer inside the square it was solved for.
 inline constexpr bool kBlockyLight = true;
 
+// Draws the world as square pixels rather than as smooth polygons.
+//
+// It changes only how the field is rasterised, not what the field says, so the
+// shape is the same one the contour would have drawn. Nothing else on screen is
+// touched: the character keeps whatever resolution its own art has, which is
+// the reason for doing it here instead of rendering the whole frame small and
+// blowing it back up.
+inline constexpr bool kPixelArt = true;
+
+// Side of one square, in world units. A divisor of kResolution keeps the
+// squares lined up with the lattice the field is sampled on.
+inline constexpr float kPixelSize = 5.0f;
+
+// Outlines every material along its own boundary.
+//
+// Off, a material is only its fill, and what separates it from what is beside
+// it is the change of colour alone. Under pixel rasterisation this also saves
+// the four extra samples a square spends finding out whether it is exposed, so
+// turning it off is cheaper as well as plainer.
+inline constexpr bool kDrawContours = false;
+
 // The lantern the player carries.
 //
 // Strength is in the same unit the sky and a torch are measured in, so it can
