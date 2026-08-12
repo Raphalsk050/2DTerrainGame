@@ -26,6 +26,15 @@ struct Toggles {
     // generated, which is what this is for.
     bool unlit = false;
 
+    // The baked plant sprites, at one screen pixel per texel.
+    //
+    // The one overlay here that is not about world positions and so is drawn
+    // outside the camera transform. What it is for is the half of a plant that
+    // cannot be judged in place: a tree in the world is thirty texels tall behind
+    // a hillside at whatever the light is doing, and whether its notches came out
+    // as notches is a question about the image.
+    bool atlas = false;
+
     // Runs the weather far faster than real time.
     //
     // A front takes minutes to cross, which is right to play under and hopeless to

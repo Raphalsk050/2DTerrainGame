@@ -52,7 +52,10 @@ add_executable(${PROJECT_NAME}
     src/marching_squares.cpp
     src/noise_view.cpp
     src/debug_view.cpp
+    src/canopy.cpp
     src/editor.cpp
+    src/flora.cpp
+    src/grove.cpp
     src/hotbar.cpp
     src/light.cpp
     src/light_layer.cpp

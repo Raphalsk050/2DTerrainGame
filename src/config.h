@@ -64,6 +64,24 @@ inline constexpr bool kPixelArt = true;
 // squares lined up with the lattice the field is sampled on.
 inline constexpr float kPixelSize = 5.0f;
 
+// Side of one square of a plant, in world units.
+//
+// Finer than the world's own, and deliberately. A tree the size the world is
+// built against — a mature one is five of the character — is some twenty squares
+// tall at kPixelSize, and a trunk on that grid is three squares wide: one tone
+// for the lit side, one for the shadowed, and nothing left for the one between.
+// At this size a mature trunk is eight squares and a crown carries four greens
+// with room for the notches and the dark accents the reference art is made of.
+//
+// Two and not two and a half, which is what half of kPixelSize would have been.
+// The camera does not zoom, so a square of this size is exactly this many pixels
+// on screen, and at two and a half every sprite would have been drawn with its
+// columns alternating two pixels wide and three. An integer is the whole of the
+// requirement; nesting inside the ground's squares is not one, since the terrain
+// fills its interior a whole lattice cell at a time and only steps its outline
+// at kPixelSize — there is no texel grid there for this to line up with.
+inline constexpr float kFloraPixel = 2.0f;
+
 // Outlines every material along its own boundary.
 //
 // Off, a material is only its fill, and what separates it from what is beside

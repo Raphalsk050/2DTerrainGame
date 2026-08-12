@@ -74,6 +74,10 @@ void ReadToggles(Toggles &toggles) {
     if (IsKeyPressed(KEY_F5)) toggles.light = !toggles.light;
     if (IsKeyPressed(KEY_F6)) toggles.unlit = !toggles.unlit;
     if (IsKeyPressed(KEY_F7)) toggles.fastWeather = !toggles.fastWeather;
+
+    // F8 is the day skip, which is an action rather than a state and is read by
+    // the caller beside the other one.
+    if (IsKeyPressed(KEY_F9)) toggles.atlas = !toggles.atlas;
 }
 
 void DrawLight(const World &world, Rectangle view) {

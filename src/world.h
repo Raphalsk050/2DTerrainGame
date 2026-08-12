@@ -191,6 +191,21 @@ public:
     // every column with it.
     float HumidityAt(Vector2 world) const { return sky_.HumidityAt(world.x); }
 
+    // World Y at which the ground begins in a lattice column, looking down from
+    // the open sky.
+    //
+    // Read from the terrain function rather than from the world, and remembered
+    // once found. It is a pure function of the column, so a column answered on
+    // one frame has the same answer on every other, and scanning them all again
+    // each frame cost more than solving the light did.
+    //
+    // Public because it is the surface anything *placed* has to be placed
+    // against, and placement must not move. SurfaceProfile below is the surface
+    // as built, which is the right answer for something falling out of the sky
+    // and the wrong one for something grown out of the ground: a wood that read
+    // the built surface would rearrange itself around every hole dug near it.
+    float Skyline(int column) const;
+
     // World Y the first solid surface sits at, for a run of lattice columns
     // starting at `firstColumn`. Written into `out`, which is resized to `count`.
     //
@@ -396,15 +411,6 @@ private:
     // Cutoff each generated material's noise has to clear, measured from the
     // noise itself so that `probability` in the element table means what it says.
     void CalibrateSpawn();
-
-    // World Y at which the ground begins in a lattice column, looking down from
-    // the open sky.
-    //
-    // Read from the terrain function rather than from the world, and remembered
-    // once found. It is a pure function of the column, so a column answered on
-    // one frame has the same answer on every other, and scanning them all again
-    // each frame cost more than solving the light did.
-    float Skyline(int column) const;
 
     // The surface under a view, widened by `margin`, as the sky wants to be handed
     // it. Fills `surface_` and returns a view over it, so the caller holds nothing.

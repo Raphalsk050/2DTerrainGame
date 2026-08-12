@@ -1,6 +1,7 @@
 #include "config.h"
 #include "debug_view.h"
 #include "editor.h"
+#include "grove.h"
 #include "hotbar.h"
 #include "light_layer.h"
 #include "liquid_layer.h"
@@ -124,7 +125,7 @@ void DrawBrushMode(const Editor &editor) {
     DrawText(text, static_cast<int>(badge.x + 8.0f), static_cast<int>(badge.y + 4.0f), 14, color);
 }
 
-void Draw(const World &world, const Player &player, const Hotbar &hotbar, const Editor &editor,
+void Draw(const World &world, const Grove &grove, const Player &player, const Hotbar &hotbar, const Editor &editor,
           const LiquidLayer &liquids, const LightLayer &lights, const Camera2D &camera,
           const debug_view::Toggles &debug, float lantern) {
     const Rectangle view = ViewBounds(camera);
@@ -143,6 +144,12 @@ void Draw(const World &world, const Player &player, const Hotbar &hotbar, const 
     world.Sky().DrawClouds(view, world.Spacing());
 
     world.DrawTerrain(view);
+
+    // The plants over the ground and behind the character, and on this side of
+    // the light multiply: a tree is lit by the same daylight as the ground it
+    // stands on, and has to know nothing about it to be.
+    grove.Draw(flora::Season::Summer);
+
     player.Draw();
 
     // Rain in front of the world rather than behind it, so it falls past a cliff
@@ -192,6 +199,10 @@ void Draw(const World &world, const Player &player, const Hotbar &hotbar, const 
 
     EndMode2D();
 
+    // Outside the camera transform, unlike every other overlay: what it shows is
+    // the image that was baked, not a place in the world.
+    if (debug.atlas) grove.DrawSheet();
+
     const Color ink = {14, 18, 24, 255};
 
     DrawLabel("A/D: move  |  space: jump  |  S: crouch  |  J: attack  |  mouse: aim  |  F: fly", 10, 10, ink);
@@ -202,9 +213,9 @@ void Draw(const World &world, const Player &player, const Hotbar &hotbar, const 
                          debug.unlit ? "on" : "off", debug.fastWeather ? "on" : "off", lantern),
               10, 46, ink);
 
-    DrawLabel(TextFormat("chunks: %d (%d pinned)   edits kept: %d   water in view: %.1f   light rays: %ld",
-                         world.ResidentChunks(), world.PinnedChunks(), world.RememberedEdits(), world.TotalWater(view),
-                         world.Light().Rays()),
+    DrawLabel(TextFormat("chunks: %d (%d pinned)   edits kept: %d   plants: %d (%d drawn)   water: %.1f   rays: %ld",
+                         world.ResidentChunks(), world.PinnedChunks(), world.RememberedEdits(), grove.VisiblePlants(),
+                         grove.DrawnPlants(), world.TotalWater(view), world.Light().Rays()),
               10, 70, ink);
 
     const Vector2 centre = player.Centre();
@@ -687,6 +698,13 @@ int main() {
     World world(settings, config::kResolution);
     world.SetWeather(sky);
 
+    // The woods. Left at the table's own defaults for now: what a stand is, how
+    // thick it is and where its border falls are the numbers this is tuned by,
+    // and they are settled by walking through a wood at each setting rather than
+    // by argument, the same way the lantern and the cave coverage were.
+    Grove grove;
+    grove.Configure({.seed = settings.seed}, settings);
+
     // The two ends of a day, and they are two colours rather than one turned down.
     //
     // Noon is the near-neutral light this world was lit by before there was a clock;
@@ -734,6 +752,12 @@ int main() {
 
         world.Update(active);
 
+        // Grown over the visible band rather than the simulated one. A plant is
+        // drawn and nothing else — it holds no liquid and steps no automaton — so
+        // there is nothing about one off screen that has to have settled by the
+        // time it scrolls in.
+        grove.Update(world, ViewBounds(camera));
+
         hotbar.Update();
         editor.Update(world, hotbar, camera);
 
@@ -780,9 +804,10 @@ int main() {
         // Captured before the frame opens, since it renders to its own target.
         liquids.Capture(world, ViewBounds(camera), camera);
 
-        Draw(world, player, hotbar, editor, liquids, lights, camera, debug, lantern);
+        Draw(world, grove, player, hotbar, editor, liquids, lights, camera, debug, lantern);
     }
 
+    grove.Unload();
     lights.Unload();
     liquids.Unload();
     CloseWindow();
