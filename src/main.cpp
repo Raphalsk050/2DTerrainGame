@@ -167,11 +167,16 @@ void DrawBrushMode(const Editor &editor) {
 // doing and what the light is doing to it are two questions, and answering them
 // together is how a palette gets tuned against a time of day.
 void DrawProbe(World &world, Grove &grove, Harvest &gathered, Rectangle strip, const char *path, int zoom,
-               float seconds) {
+               float seconds, bool plants, bool lit) {
     // Run the clock on before drawing, so a still picture can be taken of a world
     // that has been blowing for a while. The sway and the gust are both pure
     // functions of this clock, so two probes a second apart are two frames of the
     // same wind rather than two unrelated pictures.
+    // Always at least one step, whatever was asked for: what the sky is giving
+    // off is worked out by StepWeather and is nothing until it has run, so a
+    // probe that skipped it would draw every lit picture at midnight.
+    world.StepWeather(1.0f / 60.0f);
+
     for (float t = 0.0f; t < seconds; t += 1.0f / 60.0f) world.StepWeather(1.0f / 60.0f);
 
     world.Update(strip);
@@ -192,15 +197,34 @@ void DrawProbe(World &world, Grove &grove, Harvest &gathered, Rectangle strip, c
     // The plants too, and in the order the frame draws them, because half the
     // things worth checking here are about whether two of these agree with each
     // other about where the ground is.
-    grove.Update(world, strip, {strip.x, strip.y}, world.Sky().Time(), 1.0f / 60.0f, gathered);
+    if (plants) grove.Update(world, strip, {strip.x, strip.y}, world.Sky().Time(), 1.0f / 60.0f, gathered);
 
     const auto season = static_cast<flora::Season>(world.Sky().Turn().index);
 
     BeginMode2D(camera);
     world.DrawTerrain(strip);
     sod::DrawTufts(world.Grass(), strip, world.Sky().Time(), world.Settings().seed);
-    grove.Draw(world.Sky(), season, world.Sky().Time());
+
+    // Left out on request, so that a check for something drawn clear of the
+    // ground has only the ground and the grass to look at. A fern is full of
+    // holes by design, and any test that cannot tell one of those from a tuft
+    // hanging in the air will report the wrong thing every time.
+    if (plants) grove.Draw(world.Sky(), season, world.Sky().Time());
+
     world.DrawLiquids(strip);
+
+    // And the light over all of it, which is the other half of every question
+    // about how dark something came out: what a material's own tones do and what
+    // the multiply does to them are two answers, and tuning either while looking
+    // at both together is how a palette ends up fighting a time of day.
+    if (lit) {
+        world.StepLight(strip);
+
+        LightLayer probeLight;
+        probeLight.Update(world.Light());
+        probeLight.Compose();
+    }
+
     EndMode2D();
 
     EndTextureMode();
@@ -1061,30 +1085,6 @@ int main(int argc, char **argv) {
     Grove grove;
     grove.Configure({.seed = settings.seed}, settings, world.Sky());
 
-    if (probing) {
-        const Rectangle strip = {static_cast<float>(std::atof(argv[2])), static_cast<float>(std::atof(argv[3])),
-                                 static_cast<float>(std::atof(argv[4])), static_cast<float>(std::atof(argv[5]))};
-
-        Harvest probed{};
-
-        DrawProbe(world, grove, probed, strip, argv[6], (argc >= 8) ? std::atoi(argv[7]) : 1,
-                  (argc >= 9) ? static_cast<float>(std::atof(argv[8])) : 0.0f);
-
-        CloseWindow();
-        return 0;
-    }
-
-    if (reading) {
-        const float x  = static_cast<float>(std::atof(argv[2]));
-        const float y0 = static_cast<float>(std::atof(argv[3]));
-        const float y1 = static_cast<float>(std::atof(argv[4]));
-
-        world.Update({x - 128.0f, y0 - 128.0f, 256.0f, y1 - y0 + 256.0f});
-        ReportColumn(world, settings, x, y0, y1);
-
-        CloseWindow();
-        return 0;
-    }
 
     if (weighing) {
         ReportTones();
@@ -1114,6 +1114,33 @@ int main(int argc, char **argv) {
     // the ratio suggests, and a torch stops washing out against it and starts
     // reading as the warm thing it is.
     world.SetDaylight({2.6f, 2.8f, 3.1f}, {0.05f, 0.06f, 0.09f});
+
+    if (probing) {
+        const Rectangle strip = {static_cast<float>(std::atof(argv[2])), static_cast<float>(std::atof(argv[3])),
+                                 static_cast<float>(std::atof(argv[4])), static_cast<float>(std::atof(argv[5]))};
+
+        Harvest probed{};
+
+        DrawProbe(world, grove, probed, strip, argv[6], (argc >= 8) ? std::atoi(argv[7]) : 1,
+                  (argc >= 9) ? static_cast<float>(std::atof(argv[8])) : 0.0f,
+                  (argc >= 10) ? (std::atoi(argv[9]) != 0) : true,
+                  (argc >= 11) ? (std::atoi(argv[10]) != 0) : false);
+
+        CloseWindow();
+        return 0;
+    }
+
+    if (reading) {
+        const float x  = static_cast<float>(std::atof(argv[2]));
+        const float y0 = static_cast<float>(std::atof(argv[3]));
+        const float y1 = static_cast<float>(std::atof(argv[4]));
+
+        world.Update({x - 128.0f, y0 - 128.0f, 256.0f, y1 - y0 + 256.0f});
+        ReportColumn(world, settings, x, y0, y1);
+
+        CloseWindow();
+        return 0;
+    }
 
     // Dropped in above the ground at the origin rather than at a fixed height,
     // since the surface there is now wherever the relief put it.

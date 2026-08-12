@@ -55,6 +55,22 @@ struct Texel {
     Vector2 normal;
 };
 
+// The top of a filled region as it is actually drawn, from where the field says
+// its edge is.
+//
+// Not the same number, and the difference is what anything standing on the ground
+// has to be placed against. A square is filled when its centre is inside, so the
+// top of the ground on screen is the first such row at or below the contour — up
+// to most of a texel away from the contour itself, by a different amount in every
+// column. Anything planted on the contour therefore floats above the ground it
+// grew in.
+//
+// World-anchored, like the grid it quantises onto, so it is the same answer
+// wherever the view happens to be and nothing crawls as it scrolls.
+inline float DrawnTop(float crossing, float pixel) {
+    return std::floor((crossing + pixel * 0.5f) / pixel) * pixel;
+}
+
 // A painter that gives every square the same colour.
 //
 // Declaring `uniform` is what tells the walk below that a lattice cell wholly

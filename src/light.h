@@ -218,6 +218,33 @@ struct Settings {
     // as the thickest wall light can work its way through.
     float surfaceReach = 80.0f;
 
+    // How far into a material the light carries with nothing taken off it, in
+    // world units, before `surfaceReach` starts to dim it.
+    //
+    // Without it the very face of a material is already in shadow. The sweep
+    // above measures from open space, so the first solid probe is a probe's
+    // width in and is dimmed by that much before anything is drawn — and since
+    // the falloff is squared, a face that ought to be showing the full daylight
+    // in front of it came out at six sevenths of it, with the ground under a
+    // sunlit meadow reading as dusk within a few pixels.
+    //
+    // A face is not in shadow. What a surface shows is the light arriving at it,
+    // and the light arriving at it is the light of the space it faces — which the
+    // sweep already carried there and then discounted for a distance the face has
+    // not actually travelled.
+    //
+    // Set from what the ground is made of rather than from the light. The cover
+    // over the rock is some forty pixels of soil, and a sunlit meadow whose earth
+    // reads as dusk two pixels down is not a lit surface — it is a lit line with a
+    // shadow under it. This carries the daylight through the whole of the cover
+    // and starts the falloff in the rock below, where a darkness that deepens is
+    // what should be happening.
+    //
+    // `surfaceReach` still measures the run after this, so the two together are
+    // how far light works into a material and this alone is how much of that run
+    // is spent at full strength.
+    float surfaceLip = 44.0f;
+
     // How conservatively a long ray reads the world, in [0,1].
     //
     // A far cascade steps in strides of many cells and reads a coarsened copy

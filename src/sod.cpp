@@ -208,19 +208,8 @@ std::int64_t CellAt(float worldX) {
     return static_cast<std::int64_t>(std::floor(worldX / kTuftSpan));
 }
 
-// The top of the ground as it was *drawn*, from where the field says it is.
-//
-// Not the same number, and the difference is what a blade stands on. The terrain
-// is rasterised onto squares of config::kPixelSize and a square is filled when its
-// centre is inside, so the top of the ground on screen is the first such row at or
-// below the contour — up to most of a terrain texel away from the contour itself.
-// A blade planted on the contour therefore floats above the ground it grew in, by
-// a different amount in every column.
-//
-// World-anchored, like every other grid here, so it is the same answer wherever
-// the view happens to be and nothing crawls as it scrolls.
 float DrawnTop(float crossing) {
-    return std::floor((crossing + config::kPixelSize * 0.5f) / config::kPixelSize) * config::kPixelSize;
+    return marching_squares::DrawnTop(crossing, config::kPixelSize);
 }
 
 // Where a tuft stands and how much of it there is, or nothing where the cell is
@@ -347,6 +336,8 @@ void DrawTufts(const Blades &ground, Rectangle view, float now, int seed) {
             const float curve = (Roll(cell, salt + 2, seed) - 0.5f) * 2.0f * kBladeCurve * height;
             const float lean  = Lean(height, at.push, Phase(cell, blade), now);
 
+            float previousX = Snap(baseX + dx);
+
             for (int k = 0; k < texels; k++) {
                 // How far up the blade this texel sits, in [0,1] from the foot.
                 const float t = (static_cast<float>(k) + 0.5f) / static_cast<float>(texels);
@@ -369,7 +360,31 @@ void DrawTufts(const Blades &ground, Rectangle view, float now, int seed) {
                 const int index =
                     std::clamp(static_cast<int>(lit * static_cast<float>(kElementRamp)), 0, kElementRamp - 1);
 
-                DrawRectangleV({x, y}, {pixel, pixel}, ramp.tone[index]);
+                const Color tone = ramp.tone[index];
+
+                // The whole run this row crosses, and not just the texel it ends
+                // on.
+                //
+                // A blade is a line and not a column of samples. The bend grows as
+                // the square of the height, so near the tip one row carries the
+                // blade two or three texels sideways — and one square per row
+                // leaves the top of a blade as loose specks with sky between them
+                // and the rest of it. Measured over twelve hundred columns of
+                // ordinary ground, that broke the tip off nearly half of them.
+                //
+                // Filled from where the row below ended to where this one does,
+                // *inclusive of both*: consecutive rows then share a column and
+                // the blade is connected by construction. Drawn along this row
+                // rather than the one under it, so nothing is painted into the
+                // ground the blade is standing on.
+                const float from = std::min(previousX, x);
+                const float to   = std::max(previousX, x);
+
+                for (float fill = from; fill <= to + pixel * 0.5f; fill += pixel) {
+                    DrawRectangleV({fill, y}, {pixel, pixel}, tone);
+                }
+
+                previousX = x;
             }
         }
     }

@@ -1376,7 +1376,16 @@ Grid World::OccupancyField(const Chunk &chunk, int minPrecedence, bool groundOnl
 }
 
 void World::ReadSod(Rectangle view) {
-    const float step = static_cast<float>(spacing_);
+    // Kept on the plant grid rather than on the lattice.
+    //
+    // The lattice is six pixels and a tuft is ten, so a profile at that spacing
+    // gave every blade in a clump the height of whichever lattice column the
+    // clump's own middle fell in — and where the ground steps, which it does by a
+    // terrace riser at a time, that put half the blades of a tuft a riser above
+    // the ground they were supposed to be standing on. At the plant grid each
+    // blade reads its own column, so the worst it can be out by is the texel it
+    // is drawn on.
+    const float step = config::kFloraPixel;
 
     // A margin either side, because the tufts standing on this reach past the
     // column they grew in and the band is drawn a whole chunk at a time.
@@ -1428,8 +1437,7 @@ void World::ReadSod(Rectangle view) {
     // Then the tufts' own grid, which is a different one — see Blades::standing.
     sodFirstCell_ = static_cast<std::int64_t>(std::floor(static_cast<float>(sodFirstColumn_) * step / sod::kTuftSpan));
 
-    const int cells =
-        static_cast<int>(std::ceil(static_cast<float>(columns) * step / sod::kTuftSpan)) + 2;
+    const int cells = static_cast<int>(std::ceil(static_cast<float>(columns) * step / sod::kTuftSpan)) + 2;
 
     sodStanding_.assign(static_cast<std::size_t>(cells), 1.0f);
 
@@ -1512,7 +1520,7 @@ sod::Blades World::Grass() const {
             .ramp        = sodRamp_.data(),
             .count       = static_cast<int>(sodRamp_.size()),
             .firstColumn = sodFirstColumn_,
-            .spacing     = static_cast<float>(spacing_),
+            .spacing     = config::kFloraPixel,
             .standing    = sodStanding_.data(),
             .cells       = static_cast<int>(sodStanding_.size()),
             .firstCell   = sodFirstCell_};
@@ -1533,13 +1541,31 @@ int World::MowGrass(Rectangle hitbox, float now) {
 }
 
 float World::GroundValueAt(Vector2 world) const {
+    int cx = 0;
+    int cy = 0;
+    ToChunk(world, cx, cy);
+
+    const Chunk *chunk = Find(cx, cy);
+
     float filled = -kUnboundedDepth;
 
     for (std::size_t e = 0; e < kElementCount; e++) {
         const ElementDef &def = kElements[e];
         if (!def.rules.occupies || !def.rules.blocksBodies) continue;
 
-        filled = std::max(filled, ValueAt(static_cast<Element>(e), world) - def.threshold);
+        // Interpolated between the four samples around the position, which is the
+        // same reading the rasteriser takes.
+        //
+        // Not the nearest vertex, and the difference is the whole point. Anything
+        // that has to agree with where the ground was *drawn* has to interpolate
+        // the field the way the drawing did; snapping to a vertex instead answers
+        // with the height of somewhere up to half a lattice step away, and the
+        // surface is terraced into risers four times that tall. What that put on
+        // screen was tufts of grass hanging in the air beside every step.
+        const float value = (chunk != nullptr) ? marching_squares::SampleAt(chunk->fields[e], world)
+                                               : ValueAt(static_cast<Element>(e), world);
+
+        filled = std::max(filled, value - def.threshold);
     }
 
     return filled;
@@ -1560,8 +1586,9 @@ Grid World::SodField(const Chunk &chunk) const {
     const float step      = static_cast<float>(spacing_);
 
     for (int i = 0; i < sod.Cols(); i++) {
-        // The column this vertex belongs to, in the numbering ReadSod filled.
-        const int column = static_cast<int>(std::lround(sod.PointAt(i, 0).x / step)) - sodFirstColumn_;
+        // The column this vertex belongs to, in the numbering ReadSod filled —
+        // which is the plant grid and not this one.
+        const int column = static_cast<int>(std::floor(sod.PointAt(i, 0).x / config::kFloraPixel)) - sodFirstColumn_;
 
         const float cover =
             sodCover_.empty()
@@ -1786,7 +1813,7 @@ void World::DrawTerrain(Rectangle view) const {
         const SodPainter grass{.ramps       = sodRamp_.data(),
                                .count       = static_cast<int>(sodRamp_.size()),
                                .firstColumn = sodFirstColumn_,
-                               .spacing     = static_cast<float>(spacing_),
+                               .spacing     = config::kFloraPixel,
                                .seed        = settings_.seed + kSodSeed};
 
         for (int cx = minCx; cx <= maxCx; cx++) {

@@ -528,7 +528,12 @@ void Field::Spread() {
             // cone of daylight widening downward, and turning the lamp up made
             // the cone longer. A curve that ends means rock further than this
             // from open space is black whatever is shining on the other side.
-            const float share = std::max(0.0f, 1.0f - distance_[cell] / reach);
+            // The lip comes off the distance first, so the face of a material
+            // shows the light in front of it rather than a discounted copy of
+            // it. See Settings::surfaceLip.
+            const float into = std::max(0.0f, distance_[cell] - settings_.surfaceLip);
+
+            const float share = std::max(0.0f, 1.0f - into / reach);
 
             probes_[cell] = previous_[cell] * (share * share);
         }
