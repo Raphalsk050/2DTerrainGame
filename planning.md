@@ -790,19 +790,202 @@ Tying the rain to the cloud paid for itself, and then some:
   plus a scan of whatever chunks have been built in — nothing, in a world nobody has
   built in. Net, the rain is cheaper than it was and lands on the right things.
 
-### 6.8 What weather still does not do
+### 6.8 The day, and what it turns
+
+One angle drives all of it. The sun's elevation is a sine of the phase, and the
+light, its colour, its direction and how fast the ground dries are every one of them
+a function of that single number. There is no keyframe table: a dawn is not four
+authored colours faded between.
+
+```
+phase     = frac((time + dayOffset) / dayMinutes·60)   0 = midnight, 0.5 = noon
+elevation = sin(phase·2π − π/2)                        −1 midnight, +1 noon
+light     = smoothstep(darkAt, litAt, elevation)       [0,1], everything else
+```
+
+Both edges sit **below** the horizon's own zero (−0.45 and 0.05), which is what makes
+the day longer than the night: light arrives before the sun does and outlasts it.
+Measured: **11.7 min of full day, 8.5 min of full night, 114 s per turning.**
+
+`dayMinutes = 24` deliberately is not a whole multiple of `spellMinutes = 5`. At four
+spells to a day every dawn would fall at the same point of a spell for ever and the
+weather would never once break differently over a sunrise.
+
+**`light` is pinned at exactly 1.0 for 49% of the cycle**, and `travel` at 0, so the
+beam is white and high noon is bit-for-bit the sky this world had before there was a
+clock in it. Verified. That is a real regression gate and it is why the edges are
+where they are.
+
+#### The sunset is in the coefficients already, but not where you would look
+
+The obvious move — thicken the air in the line of sight as the sun drops — is wrong,
+and it is worth writing down so nobody retries it. `1 − exp(−rayleigh·airmass)` is
+monotonically increasing in every channel, so **more air in the view path makes
+white, not red**: airmass 3.5 gives `[214,250,255]`, airmass 14 gives white.
+
+What was missing is extinction of the *incoming* beam. A sunset is red because the
+light crossed a long path before it arrived. Same coefficients, read the other way:
+
+```
+beam_c = exp(−rayleigh_c · travel)         normalised so the strongest channel is 1
+lit_c  = beam_c^(airmass/thickness) · (1 − exp(−rayleigh_c · airmass))
+```
+
+Raising the beam to the view's own airmass is what keeps the zenith blue while the
+horizon burns — the reddening shows up where the light had furthest to come.
+
+Two things about it that were got wrong first and are easy to get wrong again:
+
+- **`travel` keys to `elevation`, not to `light`.** Golden hour is when the sun is low
+  and it is *still broad day*. Keyed to the daylight, the colour peaks at half
+  brightness and reads brown.
+- **The beam has to fade back to white as the light goes.** Below the horizon
+  `travel` is at its longest and stays there, so without the fade the sky keeps its
+  sunset all night — and since the whole scene is *also* multiplied by a blue
+  moonlight, what comes out is brown. This is the one place two tints meet.
+
+Measured through the whole pipeline, horizon and zenith:
+
+| phase | elevation | light | horizon | zenith |
+| ---: | ---: | ---: | --- | --- |
+| 0.25 | +0.00 | 0.97 | `[209,172,77]` | `[17,36,71]` |
+| 0.30 | +0.31 | 1.00 | `[209,191,106]` | `[17,36,72]` |
+| 0.50 | +1.00 | 1.00 | `[209,249,255]` | `[17,36,75]` |
+| 0.00 | −1.00 | 0.00 | `[209,249,255]` | `[17,36,75]` |
+
+Midnight and noon share a *colour* and differ entirely in what multiplies it.
+
+#### The daylight must be mixed in exposed space
+
+The single arithmetic decision in the cycle, and the one that makes it look broken if
+it is got wrong. Light reaches the screen through `1 − exp(−value·exposure)`, and
+daylight sits so far up that curve that it is saturated: **halving the radiance
+leaves the screen five per cent darker.** A linear mix gives an afternoon where
+nothing happens for hours and then a cliff into night.
+
+So the two ends are exposed first, mixed as *brightnesses*, and put back through the
+curve to find the radiance that produces them:
+
+```
+lit    = E(night) + (E(day) − E(night)) · light
+wanted = lit · Mix(white, beam, 0.35)
+value  = −log1p(−wanted) / exposure
+```
+
+| light | radiance | on screen |
+| ---: | --- | --- |
+| 1.00 | `{2.600, 2.800, 3.100}` | `[254,254,255]` |
+| 0.75 | `{0.675, 0.564, 0.464}` | `[197,181,163]` |
+| 0.50 | `{0.363, 0.341, 0.327}` | `[140,135,131]` |
+| 0.25 | `{0.180, 0.184, 0.203}` | `[83,85,92]` |
+| 0.00 | `{0.050, 0.060, 0.090}` | `[27,32,46]` |
+
+Two ends rather than one dimmed, because a night is **blue** where the day is
+near-neutral. That is what makes a torch read as warm after dark, and it costs
+nothing: emission is added to the sky term rather than scaled by it, and `Expose` is
+per channel, so a torch stops washing out the moment daylight stops saturating the
+curve. No torch value changed.
+
+It lives in `World::StepWeather` and not in the caller, because the inversion has to
+use the same `exposure` the light field will read it back through.
+
+#### What the sky module gets is hue and direction, never brightness
+
+Everything drawn before the `lights.Compose()` multiply — the atmosphere, the clouds,
+the terrain, the player, the rain, the liquids — is already carrying the day. Scaling
+`AirAt` or `CloudTint` by the daylight *as well* squares it: `0.15 × 0.15 = 0.02`, a
+black frame at dusk. The four landing sites are all colour or geometry:
+
+| Where | What it takes |
+| --- | --- |
+| `AirAt` | the beam, raised to the view's own airmass. Colour only. Also colours the rain, which needed no change of its own — as its comment predicted. |
+| `CloudTint` | the beam on the sunlight, then the two lights run together as the light goes, so a cloud at night is a flat silhouette. |
+| `DrawClouds` | `today_.sun` in place of the deleted `Shading::sun`. It points *below* the horizon after sunset, so the deck lights from underneath at dusk — that falls out, nothing asked for it. |
+| `ShadeAt` | eased to `nightShade` as the light goes. |
+
+**`settings_` is never written at runtime.** Only `Configure` may touch it, and that
+measures the field over 32 768 samples. The sun's direction comes from `today_.sun`;
+moving it by re-configuring would cost more than the rest of the frame together.
+
+`ShadeAt` needs the taper because the shade is a *share* of the daylight held back,
+and holding back three quarters of a moonlit sky leaves nothing. Measured: a storm at
+midnight holds back 11.7% instead of 78%, and the ground under it exposes to 23
+against 26 in the open — darker, and still readable. At noon the taper is exactly 1
+and a daytime storm is untouched.
+
+### 6.9 Humidity, with a memory and no state
+
+`Climate::humidity` was a static function of X with one consumer, and
+`Climate::temperature` had none at all. Both are now read by a number a game rule can
+be written against:
+
+```
+humidity(x) = clamp(climate.humidity + wet·wetGain − drought·dryGain·(0.5 + temperature))
+```
+
+**`wet` and `drought` are read backwards out of the clock, not accumulated forwards
+through it.** That is only possible because the weather is a pure function of time,
+and it is worth saying what it buys: the ground remembers the last shower without the
+world keeping any state, so two views of it at the same moment agree and there is
+nothing to save. An exponential kernel *is* the leaky integrator `w += (rain−w)·k·dt`
+with the accumulator taken out.
+
+- **24 samples over 15 minutes**, half-life 4 min. Not 8: at 1.9-minute spacing
+  against a 1.2-minute crossfade on a 5-minute square wave, a coarse comb beats
+  against the rain and the reading jitters as the clock moves.
+- **Once a frame**, in `Advance`. Both are functions of the moment alone, so
+  recomputing them per query would be waste; what varies from place to place is the
+  climate they are added to, and that is read at the query.
+- Costs a couple of microseconds — the weather at a moment is a table lookup and a
+  hash, with no noise in it at all. `HumidityAt` itself costs one `ClimateAt`, which
+  is ~10 noise samples, so nothing may walk every column with it.
+
+Measured, a storm passing over `x = 0` (climate humidity 0.50): 0.47 → **0.73** at the
+height of it → 0.66, 0.47, 0.35, 0.28 over the twelve minutes after the rain stops →
+and back up as night falls and the drying stops.
+
+**Deliberately not fed back into `ColumnAt`.** Rain → humidity → cover → rain is a
+loop, and it would make `WeatherAt` — pure by contract, so a forecast agrees with what
+is drawn — disagree with the screen. The cloud cover still reads the *static* climate
+humidity, and that is the first thing someone will try to change.
+
+### 6.10 The controls, and what nothing does yet
+
+`F8` runs the day on to its next quarter. Two decisions in it worth keeping:
+
+- **It moves an offset, not the clock.** `Sky::Field` reads `time_` in five places, so
+  scrubbing it six hours would slide the cloud field several screens sideways and land
+  in a different spell of weather. `dayOffset_` shifts the day alone, wrapped to one
+  day so a long session cannot walk it out of float precision.
+- **It eases in over about three seconds rather than jumping.** What is usually being
+  checked *is* the transition, and a jump lands on the far side of it. Asking again
+  while one is running queues another quarter.
+
+`F7` already runs the day, since the day is keyed to the same clock the weather is —
+40× puts a whole day in 36 seconds.
+
+The query surface is three things: `Sky::Today()` for the whole `Daylight` row,
+`Sky::HumidityAt`, and `World::HumidityAt` forwarding it beside `RainAt`.
+Deliberately absent: a `DaylightAt(Vector2)`, because daylight will never vary with
+position and what a mob spawner actually wants is `LightLevelAt`, which exists; and an
+`IsNight()`, because that is a threshold and thresholds belong to the rule that needs
+one — mobs want `< 0.2`, crops want `> 0.5`, and baking one number in forces every
+rule to share it.
+
+**No sun or moon is drawn.** The sun is a direction the clouds are shaded from and a
+colour the light has, nothing more. When a body is wanted, `today_.sun` and
+`today_.phase` already say where it is.
+
+### 6.11 What weather still does not do
 
 - **Rain does not feed the water table.** The obvious next coupling and the one to be
   careful with: the liquid automaton is mass-based, so rain adding mass without a
   sink floods the world. It needs evaporation, or a cap per surface cell.
 - **Nothing gets wet.** `World::RainAt` answers; nothing reads it. Torches that
   gutter, ground that turns slick, crops that grow.
-- **No day and night.** Everything is built for it: the atmosphere, the cloud
-  palette and the rain colour all derive from one daylight, and `Shading::sun` is the
-  one thing a clock would have to move. Add it and every cloud in the world relights
-  itself.
 - **No snow.** `Climate::temperature` exists and falls with elevation; rain above a
-  snow line should fall as snow and lie.
+  snow line should fall as snow and lie. Half of it now has a consumer — the drying
+  of the ground reads it — so the field is at least exercised.
 - **Rain does not splash.** A drop's fall ends exactly on the surface it hits, and
   nothing is drawn at the contact. A couple of squares thrown up from the impact point
   is the cheapest thing left that would make the landing read as a landing.
@@ -810,6 +993,12 @@ Tying the rain to the cloud paid for itself, and then some:
   only lets edits *lower* it, so rain stops a few pixels above the floor of a fresh
   pit. Fixing it properly means fixing `Skyline`, which the light solve shares — so it
   is one change that would straighten both.
+- **A cloud's shadow stays directly beneath it** while the cloud itself is lit from
+  the side. Ground shade is one figure per column and marches straight down, so at a
+  low sun the two visibly disagree; at midday the sun is near vertical and they
+  agree. The fix is an offset of `(ground − cloudBase) · sun.x / −sun.y` inside
+  `ShadeAt`, capped as the sun nears the horizon — but it touches the light path and
+  widens the column range the solve must cover, so it is its own change.
 - **The cloud shape is not domain-warped.** The best-looking thing left undone, and
   rejected on cost: displacing the sample position by a second slowly-drifting field
   is two extra fbm evaluations per sample, ~+40% on a field the light path reads
@@ -871,10 +1060,12 @@ the height it is read at.
 
 **Inspecting it from inside the game.** There is an offline probe (statistics and
 one-pixel-per-world-pixel renders) that was written to tune this and is not in the
-repository. The two things the game itself now has are `F` for free flight, which
-suspends gravity and collision so a cave system can be followed through the rock,
-and `F6` to skip the light multiply so the world can be read unlit. A live
-settings panel would be the next step; raygui is already a dependency.
+repository. What the game itself now has: `F` for free flight, which suspends
+gravity and collision so a cave system can be followed through the rock; `F6` to
+skip the light multiply so the world can be read unlit; `F7` to run the weather and
+the day forty times over; and `F8` to run the day on to its next quarter, eased in
+rather than jumped, because what is usually being checked *is* the transition. A
+live settings panel would be the next step; raygui is already a dependency.
 
 ---
 

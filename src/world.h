@@ -134,9 +134,19 @@ public:
     void SetLightSettings(const light::Settings &settings) { lightSettings_ = settings; }
     const light::Settings &LightSettings() const { return lightSettings_; }
 
-    // Light the open sky gives off. Its horizon follows the terrain's own sky
-    // depth, so raising the ground raises what counts as being under it.
-    void SetSkyLight(light::Radiance radiance) { skyLight_ = radiance; }
+    // The two ends of a day: what the open sky gives off at noon, and what is left
+    // of it at midnight. Its horizon follows the terrain's own sky depth, so raising
+    // the ground raises what counts as being under it.
+    //
+    // The pair rather than one value, because what a clock has to move between is
+    // two lights and not one dimmed. A night is not a darker day: it is blue where
+    // the day is near-neutral, which is what makes a torch read as warm once the sun
+    // has gone.
+    void SetDaylight(light::Radiance noon, light::Radiance midnight);
+
+    // What it is giving off right now, worked out from those two and the time of
+    // day. Not settable — it is derived, and setting it would only be overwritten on
+    // the next step.
     light::Radiance SkyLight() const { return skyLight_; }
 
     // The weather over the world.
@@ -148,18 +158,38 @@ public:
     // about which frame's weather is being lit.
     void SetWeather(const weather::Settings &settings) { sky_.Configure(settings, settings_); }
 
-    // Drifts the weather. Separate from StepLight because the sky has to have
-    // finished moving before the frame is lit, and callers already own that order
-    // for the water.
-    void StepWeather(float dt) { sky_.Advance(dt); }
+    // Drifts the weather and the day, and works out what the sky is giving off by
+    // the end of it. Separate from StepLight because the sky has to have finished
+    // moving before the frame is lit, and callers already own that order for the
+    // water.
+    //
+    // The daylight is turned into a radiance here rather than by the caller, because
+    // doing it correctly needs the exposure the light field will read it back
+    // through, and that is this object's to know.
+    void StepWeather(float dt);
 
     const weather::Sky &Sky() const { return sky_; }
+
+    // Runs the day on to its next quarter. For looking at a transition rather than
+    // waiting for it; the weather and the clouds are not disturbed.
+    void SkipToQuarter() { sky_.SkipToQuarter(); }
 
     // How hard it is raining over a world position, in [0,1].
     //
     // Exposed because rain is a game rule as much as a picture: crops that need it,
     // a torch that will not stay lit in it, a surface that turns slick.
     float RainAt(Vector2 world) const { return sky_.RainAt(world.x); }
+
+    // How damp the ground is at a world position, in [0,1].
+    //
+    // The place's own climate, raised by rain that has fallen and lowered by the
+    // daylight that has stood on it since — so it has a memory of the last shower
+    // without the world having to keep one. The number a crop, a fire or a slick
+    // surface should be written against.
+    //
+    // Costs a climate sample, which is a handful of noise. Cheap once; do not walk
+    // every column with it.
+    float HumidityAt(Vector2 world) const { return sky_.HumidityAt(world.x); }
 
     // World Y the first solid surface sits at, for a run of lattice columns
     // starting at `firstColumn`. Written into `out`, which is resized to `count`.
@@ -183,13 +213,19 @@ public:
     void DrawTerrain(Rectangle view) const;
     void DrawLiquids(Rectangle view) const;
 
-    // Rain, over the ground it lands on.
+    // Rain, over the ground it lands on, and the stars, over the ground that hides
+    // them.
     //
     // Drawn from here rather than from the sky directly because the sky is a
     // function of position and time and knows nothing of what has been built. Only
-    // the world can say where a drop stops, so it is the world that hands the sky
-    // the surface to stop it against.
+    // the world can say where a drop stops or where a star is behind a hill, so it
+    // is the world that hands the sky the surface.
+    //
+    // The stars are drawn *after* the light rather than under it — see
+    // weather::Sky::DrawStars — which is why they need to be told about the ground
+    // at all instead of simply being covered by it.
     void DrawRain(Rectangle view) const;
+    void DrawStars(Rectangle view) const;
 
     // Field a liquid is drawn from, derived from its mass and clamped against
     // the solids around it. Exposed so the clamp can be checked directly.
@@ -370,6 +406,10 @@ private:
     // each frame cost more than solving the light did.
     float Skyline(int column) const;
 
+    // The surface under a view, widened by `margin`, as the sky wants to be handed
+    // it. Fills `surface_` and returns a view over it, so the caller holds nothing.
+    weather::Ground GroundUnder(Rectangle view, float margin) const;
+
     // Whether one of a chunk's own vertices is filled by something a body cannot
     // pass through. The test IsSolidAt makes, read straight off the chunk's grids:
     // no snapping, no map lookup and no falling back to the noise, which is what
@@ -405,6 +445,11 @@ private:
     std::vector<Spark> sparks_;
 
     light::Settings lightSettings_{};
+
+    // The two ends of the day, and the point of it the sky is at now. The last is
+    // derived every step and is the only one the solve reads.
+    light::Radiance dayLight_{2.6f, 2.8f, 3.1f};
+    light::Radiance nightLight_{0.05f, 0.06f, 0.09f};
     light::Radiance skyLight_{2.6f, 2.8f, 3.1f};
 
     light::Medium medium_;

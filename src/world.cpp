@@ -988,6 +988,46 @@ void World::SurfaceProfile(int firstColumn, int count, std::vector<float> &out) 
     }
 }
 
+void World::SetDaylight(light::Radiance noon, light::Radiance midnight) {
+    dayLight_   = noon;
+    nightLight_ = midnight;
+}
+
+void World::StepWeather(float dt) {
+    sky_.Advance(dt);
+
+    const weather::Daylight &today = sky_.Today();
+    const float exposure           = std::max(lightSettings_.exposure, 1e-3f);
+
+    // The day, mixed where the eye reads it rather than where the light is measured.
+    //
+    // This is the one arithmetic decision in the whole cycle and getting it wrong
+    // makes the feature look broken. Light reaches the screen through
+    // 1 - exp(-value * exposure), and daylight sits so far up that curve that it is
+    // saturated: halving the radiance leaves the screen five per cent darker. Mixing
+    // there gives an afternoon where nothing happens for hours and then a cliff into
+    // night. So the two ends are exposed first, mixed as brightnesses, and the
+    // result put back through the curve to find the radiance that produces it.
+    //
+    // Per channel, because the two ends are different colours and not one dimmed.
+    auto expose  = [&](float value) { return 1.0f - std::exp(-value * exposure); };
+    auto radiate = [&](float lit) { return -std::log1p(-std::clamp(lit, 0.0f, 1.0f - 1e-4f)) / exposure; };
+
+    // Tinted by the colour the sun has left, but only partly. The sky picture
+    // carries the saturated version of a sunset; the ground wants the suggestion of
+    // one, or an evening comes out brown rather than golden.
+    const float warm = 0.35f;
+
+    auto channel = [&](float day, float night, float beam) {
+        const float lit = expose(night) + (expose(day) - expose(night)) * today.light;
+
+        return radiate(lit * (1.0f - warm + warm * beam));
+    };
+
+    skyLight_ = {channel(dayLight_.r, nightLight_.r, today.beam.x), channel(dayLight_.g, nightLight_.g, today.beam.y),
+                 channel(dayLight_.b, nightLight_.b, today.beam.z)};
+}
+
 void World::AddLight(Vector2 world, light::Radiance radiance, float radius) {
     sparks_.push_back({world, radiance, radius});
 }
@@ -1385,12 +1425,8 @@ void World::DrawLiquids(Rectangle view) const {
     }
 }
 
-void World::DrawRain(Rectangle view) const {
+weather::Ground World::GroundUnder(Rectangle view, float margin) const {
     const float step = static_cast<float>(spacing_);
-
-    // The same stretch the sky will draw over, asked for rather than guessed at: the
-    // rain leans, so drops landing inside the view start well outside it.
-    const float margin = sky_.RainReach();
 
     const int firstColumn = static_cast<int>(std::floor((view.x - margin) / step));
     const int columns     = static_cast<int>(std::ceil((view.width + 2.0f * margin) / step)) + 2;
@@ -1400,10 +1436,22 @@ void World::DrawRain(Rectangle view) const {
     // placed on this frame should stop this frame's rain.
     SurfaceProfile(firstColumn, columns, surface_);
 
-    sky_.DrawRain(view, {.top     = surface_.data(),
-                         .count   = static_cast<int>(surface_.size()),
-                         .originX = static_cast<float>(firstColumn) * step,
-                         .spacing = step});
+    return {.top     = surface_.data(),
+            .count   = static_cast<int>(surface_.size()),
+            .originX = static_cast<float>(firstColumn) * step,
+            .spacing = step};
+}
+
+void World::DrawRain(Rectangle view) const {
+    // The same stretch the sky will draw over, asked for rather than guessed at: the
+    // rain leans, so drops landing inside the view start well outside it.
+    sky_.DrawRain(view, GroundUnder(view, sky_.RainReach()));
+}
+
+void World::DrawStars(Rectangle view) const {
+    // No lean to allow for — a star is drawn where it is — so the view itself is the
+    // whole of what has to be covered.
+    sky_.DrawStars(view, GroundUnder(view, 0.0f));
 }
 
 void World::DrawVertexOverlay(Rectangle view, float vertexSize, Color filledColor, Color emptyColor) const {

@@ -97,6 +97,49 @@ struct Weather {
     Color ambient  = {255, 255, 255, 255};
 };
 
+// The time of day at one moment.
+//
+// Kept apart from `Weather` rather than folded into it, for two reasons. A mood row
+// is the whole definition of a kind of weather and every field of it is
+// interpolated together; a daylight field would be the one exception to the rule
+// that design exists to enforce. And they are genuinely orthogonal — a storm at
+// noon and the same storm at midnight are the same weather, seen by a different
+// light.
+//
+// Everything below follows from `elevation` alone. Nothing here is a keyframe and
+// no colour in it is authored: a sunset is what the air already in `Atmosphere`
+// does to light that has crossed a long path of it.
+struct Daylight {
+    const char *name = "night";
+
+    // Where the day has got to, in [0,1). Zero is midnight, a half is noon.
+    float phase = 0.0f;
+
+    // How high the sun stands, in [-1,1]. Below zero it has set.
+    float elevation = -1.0f;
+
+    // How much of the day's light there is, in [0,1].
+    //
+    // The one scalar everything else is scaled by, and the number a game rule
+    // should be written against — mobs that will not walk in it, crops that need
+    // it, ground that dries under it.
+    float light = 0.0f;
+
+    // Which way the sun lies, for the cloud's own shading. Y grows downward, so a
+    // negative Y is overhead. It points *below* the horizon once the sun has set,
+    // which is what lights the underside of a cloud at dusk, and is free.
+    Vector2 sun = {0.8f, -0.6f};
+
+    // How far the sunlight has travelled through air before arriving, as a share of
+    // the longest such path. Zero with the sun overhead, one along the horizon.
+    float travel = 0.0f;
+
+    // The colour it has left after that journey, normalised so its strongest
+    // channel is one. White overhead, orange along the horizon — the reddening is
+    // the blue scattered out on the way in, not a colour anybody picked.
+    Vector3 beam = {1.0f, 1.0f, 1.0f};
+};
+
 // The air, as a scattering medium.
 //
 // The gradient up the sky is not a pair of colours interpolated between. It is
@@ -154,6 +197,63 @@ struct Atmosphere {
     float bandHeight = 10.0f;
 };
 
+// The stars, which are what the sky is when there is no sun in it.
+//
+// Scattered rather than placed: one to a cell of a coarse lattice, each one's
+// presence, position and brightness hashed out of the cell it is in. A pure
+// function of where you are looking, like everything else in the sky, so there is
+// no field to hold and no two views of it can disagree.
+//
+// Drawn between the air and the cloud, which is the whole of how a cloud hides
+// them. What a cloud cannot hide is the sky above its own ceiling, and that is what
+// `hidden` is for.
+struct Stars {
+    // Pixels of screen between one star and the next, roughly. Smaller is a denser
+    // sky; below about forty they stop reading as points and start reading as noise.
+    float spacing = 70.0f;
+
+    // Share of the world's own motion the field takes as the view moves.
+    //
+    // Zero pins them to the screen, which reads as dust on the glass; one puts them
+    // at arm's length and they slide past like scenery. Small, because a star is a
+    // long way off, and the whole point of the number is that it barely moves.
+    //
+    // Applied about the horizon, so the horizon stays where it is and the sky draws
+    // in towards it — which is what distance does.
+    float parallax = 0.14f;
+
+    // How hard the air puts them out, read against the same airmass that whitens the
+    // horizon.
+    //
+    // This is why there are none low in the sky and plenty overhead: light from a
+    // star near the horizon has the whole thickness of the air to cross and does not
+    // arrive. The fact that makes the horizon pale, seen from the other side.
+    float haze = 0.30f;
+
+    // How far a fully overcast sky puts them out. At one a storm has no stars in it
+    // at all, which is what a storm looks like.
+    float hidden = 1.0f;
+
+    // How much a star's brightness wavers, and how quickly. Air moving in front of
+    // it; the reason a star twinkles and a planet does not.
+    float twinkle     = 0.25f;
+    float twinkleRate = 1.7f;
+
+    // The two ends of the colour a star can be, drawn between per star.
+    //
+    // Not one colour. A field of identical warm-white dots reads as dead, and the
+    // reason is that a real sky is not one colour: a star's colour is its
+    // temperature, and they run from blue-white through white to amber. Two ends and
+    // a hash is the whole of it, and it is the difference between a sky and a
+    // scattering of pixels.
+    //
+    // Both are kept well clear of grey. What the eye is given here is a handful of
+    // very small marks against a nearly black ground, and a colour that is only
+    // slightly tinted does not survive being blended down to a quarter alpha.
+    Color hot  = {170, 202, 255, 255};
+    Color cool = {255, 186, 128, 255};
+};
+
 // How a cloud takes the light.
 //
 // One rule, applied per cell, from the cell's own depth into the cloud. Nothing
@@ -185,13 +285,9 @@ struct Shading {
     // smooth ramp with no pixel-art character left; five or six reads as drawn.
     int layers = 6;
 
-    // Direction the sun lies in. Y grows downward, so a negative Y is overhead. The
-    // horizontal share should be the larger, or the shading reads as "lit from
-    // above" and the cloud has no side to it.
-    //
-    // Once there is a time of day this is the one thing it has to move, and every
-    // cloud in the world relights itself.
-    Vector2 sun = {0.80f, -0.60f};
+    // Where the sun lies is no longer written here. It is `Daylight::sun`, swung
+    // through the day by `Day::sunTilt`, and every cloud in the world relights
+    // itself as it moves. Nothing else about the shading changed.
 
     // How far towards the sun the depth is read, in pixels.
     float sunReach = 120.0f;
@@ -218,9 +314,81 @@ struct Shading {
     float lightest = 0.94f;
 };
 
+// The turning of the day.
+//
+// One angle drives all of it. The sun's elevation is a sine of the phase, and the
+// light, its colour, its direction and how fast the ground dries are every one of
+// them a function of that single number. There is no keyframe table here on
+// purpose: a dawn is not four authored colours faded between, it is what happens
+// when the light has to cross more air to arrive.
+struct Day {
+    // Length of one whole turn, in minutes of the weather's own clock — so the
+    // debug key that runs the weather fast runs the day fast with it.
+    //
+    // Deliberately not a whole multiple of `spellMinutes`. At four spells to a day
+    // every dawn would fall at the same point of a spell for ever, and the weather
+    // would never once break differently over a sunrise.
+    float dayMinutes = 24.0f;
+
+    // Where in the turn a fresh world starts, in [0,1): zero is midnight, a half is
+    // noon.
+    //
+    // Not zero, which is where the clock would otherwise begin. Opening the game in
+    // the pitch dark reads as something being broken rather than as night, and it is
+    // the first thing anybody sees.
+    float startAt = 0.30f;
+
+    // Sun elevations the daylight eases between: dark at or below the first, full
+    // at or above the second.
+    //
+    // Both sit below the horizon's own zero, which is what makes the day longer
+    // than the night — light arrives before the sun does and outlasts it. Widening
+    // the gap buys a longer twilight; lowering the pair buys a longer day.
+    float darkAt = -0.45f;
+    float litAt  = 0.05f;
+
+    // How far the sun leans off vertical at noon, as a share.
+    //
+    // A sun directly overhead lights only the tops of the clouds and takes the side
+    // off them, which is the fault `Shading` warns about. Held off the vertical so
+    // there is always a lit flank, and the tilt is what swings the shadows across
+    // the sky through the day.
+    float sunTilt = 0.50f;
+
+    // How much air the light crosses at the horizon, against overhead.
+    //
+    // This is the whole of the sunset. It is *not* the air in the line of sight —
+    // more of that only whitens, because in-scattering saturates every channel
+    // towards one. It is the air the beam already crossed before arriving, which
+    // takes the blue out of it and leaves the red.
+    float travel = 0.65f;
+
+    // Share of a cloud's shade that survives the night.
+    //
+    // Without it a storm at midnight is black: the shade multiplies whatever light
+    // there is, and holding back three quarters of a moonlit sky leaves nothing.
+    // The cloud is still there and still darker; it simply cannot take away light
+    // that was not arriving.
+    float nightShade = 0.15f;
+
+    // How long the ground remembers the weather, and how quickly it forgets.
+    //
+    // Both in minutes. The window is how far back the reckoning looks; the half
+    // life is how fast rain an hour ago counts for less than rain a minute ago.
+    float wetMinutes  = 15.0f;
+    float wetHalfLife = 4.0f;
+
+    // How far a soaking can raise the ground's humidity, and how far a long dry
+    // spell of daylight can lower it, on top of the climate the place already has.
+    float wetGain = 0.55f;
+    float dryGain = 0.30f;
+};
+
 struct Settings {
     Atmosphere air{};
+    Stars stars{};
     Shading shading{};
+    Day day{};
 
     // The weather this world can have, and how long a spell of it lasts.
     //
@@ -462,6 +630,36 @@ public:
     // replay agree with what is drawn.
     Weather WeatherAt(float seconds) const;
 
+    // The time of day right now, and at any moment. The same pair, and the same
+    // promise: everything in `Daylight` follows from the argument alone.
+    const Daylight &Today() const { return today_; }
+    Daylight DaylightAt(float seconds) const;
+
+    float SecondsPerDay() const;
+
+    // How damp the ground is over a column, in [0,1].
+    //
+    // The climate the place has, raised by rain that has fallen and lowered by
+    // daylight that has stood on it since. A game rule's number: crops that will
+    // not set in a drought, a fire that will not take, ground that stays slick.
+    //
+    // Has memory and keeps no state, which is only possible because the weather is
+    // a pure function of the clock — so how much it has rained lately can simply be
+    // asked of the past rather than accumulated through it.
+    float HumidityAt(float worldX) const;
+
+    // Runs the day forward to its next quarter — midnight, dawn, noon or dusk.
+    //
+    // For looking at the thing rather than waiting for it. Eased in over a few
+    // seconds rather than jumped, because what is usually being checked *is* the
+    // transition, and a jump lands on the far side of it. Asking again while one is
+    // running queues another.
+    //
+    // Moves the day alone. The clock the clouds and the weather run on is untouched,
+    // so the sky does not tear sideways and the afternoon's storm still arrives when
+    // it was going to.
+    void SkipToQuarter();
+
     Column ColumnAt(float worldX) const;
 
     // How far the cloud field stands above the cutoff at a point of sky. Positive
@@ -525,6 +723,19 @@ public:
     // frame rather than being drawn over it.
     void DrawAtmosphere(Rectangle view) const;
 
+    // The stars.
+    //
+    // Drawn *after* the light rather than under it, and this is the whole reason
+    // they read at all. A star is a light, not a lit surface: inside the multiply it
+    // can never come out brighter than the night sky's own radiance, which at
+    // midnight is about a tenth — so every star was a grey square on a nearly black
+    // ground, and its colour went with its brightness.
+    //
+    // The price is that the two things that should hide one no longer do it by being
+    // drawn on top. Both are asked instead: the ground comes in as `ground`, and the
+    // cloud is read out of the field at the star's own position.
+    void DrawStars(Rectangle view, const Ground &ground) const;
+
     // The cloud band, drawn in world space through the same rasteriser the world
     // uses, so it belongs to the same picture. Costs nothing when the band is out
     // of view, which underground it always is.
@@ -579,6 +790,19 @@ private:
     // of it, so the sequence is the same every run of the same world.
     Mood MoodOfSpell(long spell) const;
 
+    // Just the daylight share at a moment: the sine and the ease across it, without
+    // the sun's colour or its direction.
+    //
+    // Split out for the reckoning of how long the ground has stood in the sun, which
+    // asks for it two dozen times a frame and would otherwise pay for three
+    // exponentials it throws away every time.
+    float SunLightAt(float seconds) const;
+
+    // Works out how wet the world is and how long it has stood in the sun, by
+    // reading the clock backwards. Called once from Advance; both answers are the
+    // same everywhere, so nothing else has cause to.
+    void Reckon();
+
     Settings settings_{};
     terrain::Settings terrain_{};
 
@@ -591,9 +815,29 @@ private:
 
     float time_ = 0.0f;
 
-    // Derived from time_ by Advance. Held rather than recomputed because every
-    // column asks for it and the answer is the same for all of them.
+    // How far the day has been run on ahead of that clock, and how much of a skip is
+    // still to be paid out.
+    //
+    // The day rides on its own offset rather than on `time_` itself, so running it
+    // forward does not drag the cloud field sideways with it — six hours at this
+    // wind is several screens of drift and a different spell of weather. Wrapped to
+    // one day, so a long session cannot walk it out of float precision.
+    float dayOffset_ = 0.0f;
+    float daySkip_   = 0.0f;
+
+    // Derived from the clock by Advance. Held rather than recomputed because every
+    // column asks for the same answer.
     Weather now_{};
+    Daylight today_{};
+
+    // How wet the world is and how long it has stood in the sun, both reckoned
+    // backwards over the last quarter hour.
+    //
+    // Functions of the moment alone — the same everywhere — so they are worked out
+    // once a frame here and not once per column that asks. What varies from place to
+    // place is the climate they are added to, and that is read at the query.
+    float wet_     = 0.0f;
+    float drought_ = 0.0f;
 };
 
 } // namespace weather

@@ -11,7 +11,17 @@
 namespace weather {
 namespace {
 
-constexpr float kPi = 3.14159265f;
+constexpr float kPi  = 3.14159265f;
+constexpr float kLn2 = 0.69314718f;
+
+// Share of a whole day run through per second while a skip is owed.
+//
+// A twelfth, so a quarter of a day arrives in about three seconds: long enough to
+// watch the light turn over, short enough not to be waiting for it. Paid out of the
+// same dt the weather is stepped with, so the debug key that runs the weather fast
+// makes this near-instant too, which is the right way round — with that on there is
+// nothing to skip.
+constexpr float kSkipRate = 1.0f / 12.0f;
 
 float SmoothStep(float edge0, float edge1, float x) {
     const float t = std::clamp((x - edge0) / std::max(edge1 - edge0, 1e-6f), 0.0f, 1.0f);
@@ -31,6 +41,16 @@ float Swing(float share) {
 
 unsigned char ToByte(float value) {
     return static_cast<unsigned char>(std::clamp(value, 0.0f, 1.0f) * 255.0f + 0.5f);
+}
+
+// A colour multiplied channel by channel, which is what light does to a surface.
+//
+// Mix cannot stand in for this: it slides one colour towards another, so a white
+// tint leaves the colour alone and a black one takes it to black, where a *scale*
+// of one leaves it alone and a scale of a half halves it. Tinting sunlight by the
+// colour the sun has left after crossing the air is a multiplication.
+Color Scale(Color colour, Vector3 by) {
+    return {ToByte(colour.r / 255.0f * by.x), ToByte(colour.g / 255.0f * by.y), ToByte(colour.b / 255.0f * by.z), 255};
 }
 
 Color Mix(Color a, Color b, float t) {
@@ -167,9 +187,182 @@ Weather Sky::WeatherAt(float seconds) const {
     return weather;
 }
 
+// ------------------------------------------------------------------- the day
+
+float Sky::SecondsPerDay() const {
+    return std::max(settings_.day.dayMinutes, 0.1f) * 60.0f;
+}
+
+float Sky::SunLightAt(float seconds) const {
+    const Day &day = settings_.day;
+
+    const float phase = seconds / SecondsPerDay() + day.startAt;
+
+    // The sun's height, as a sine of the turn. Midnight at the bottom, noon at the
+    // top, and the two crossings are sunrise and sunset without either being written
+    // down anywhere.
+    const float elevation = std::sin((phase - std::floor(phase)) * 2.0f * kPi - kPi * 0.5f);
+
+    // Eased across the horizon rather than switched at it, over a band that begins
+    // below zero: light arrives before the sun does and outlasts it, which is what
+    // twilight is and what makes the day longer than the night.
+    return SmoothStep(day.darkAt, day.litAt, elevation);
+}
+
+Daylight Sky::DaylightAt(float seconds) const {
+    const Day &day = settings_.day;
+
+    const float turns = seconds / SecondsPerDay();
+
+    Daylight light;
+    light.phase     = turns - std::floor(turns);
+    light.elevation = std::sin(light.phase * 2.0f * kPi - kPi * 0.5f);
+    light.light     = SmoothStep(day.darkAt, day.litAt, light.elevation);
+
+    light.name = (light.light >= 0.98f)                           ? "day"
+                 : (light.light <= 0.02f)                         ? "night"
+                 : (light.elevation > 0.0f || light.phase < 0.5f) ? "dawn"
+                                                                  : "dusk";
+
+    // Where it lies. The tilt is held off the vertical on purpose: a sun directly
+    // overhead lights only the tops of the clouds and takes the side off them, which
+    // is the one thing the shading settings warn about.
+    //
+    // Nothing is drawn there. This is a direction the cloud is shaded from, not a
+    // body in the sky — and it keeps pointing after the sun has set, which is what
+    // lights the underside of a cloud at dusk and costs nothing.
+    const float across = std::cos(light.phase * 2.0f * kPi - kPi * 0.5f);
+
+    light.sun = Unit({across, -light.elevation * day.sunTilt}, {0.8f, -0.6f});
+
+    // How far the light has come through the air to arrive. Longest along the
+    // horizon, nothing overhead.
+    //
+    // Keyed to the sun's height and not to the daylight, and the difference is the
+    // whole look of it: golden hour is when the sun is low and it is *still broad
+    // day*. Keyed to the daylight, the colour would peak at half brightness and read
+    // as brown.
+    light.travel = day.travel * (1.0f - std::clamp(light.elevation, 0.0f, 1.0f));
+
+    // And what is left of it after that journey.
+    //
+    // This is the sunset, and it is the one thing about the sky that could not be
+    // had by thickening the air in the line of sight. That air only ever *adds*: in
+    // scattering saturates every channel towards one, so more of it whitens. What
+    // reddens the light is the air it already crossed, which scatters the blue out
+    // of the beam before it arrives — the same coefficients, read the other way
+    // round.
+    const Vector3 &scatter = settings_.air.rayleigh;
+
+    const Vector3 through = {std::exp(-scatter.x * light.travel), std::exp(-scatter.y * light.travel),
+                             std::exp(-scatter.z * light.travel)};
+
+    // Normalised to its strongest channel, so this only ever says what colour the
+    // light is. How much of it there is, is `light`, and it is applied once.
+    const float strongest = std::max({through.x, through.y, through.z, 1e-4f});
+
+    // Then run back to white as the light itself goes.
+    //
+    // A beam that has set has no colour left to give, and the tint has to go with
+    // it: below the horizon `travel` is at its longest and stays there, so without
+    // this the sky keeps its sunset all night. That matters more than it sounds,
+    // because the whole scene is *also* multiplied by the light — an orange sky
+    // under a blue moonlight is the one place two tints meet, and what comes out is
+    // brown. The colour peaks where it should anyway, just above the horizon, where
+    // the sun is low and it is still broad day.
+    const float shown = light.light;
+
+    light.beam = {1.0f + (through.x / strongest - 1.0f) * shown, 1.0f + (through.y / strongest - 1.0f) * shown,
+                  1.0f + (through.z / strongest - 1.0f) * shown};
+
+    return light;
+}
+
+void Sky::SkipToQuarter() {
+    const float span = SecondsPerDay();
+
+    // Where the day already is, counting anything still owed from a previous ask, so
+    // that pressing twice queues two quarters rather than landing on the same one.
+    const float ahead = (time_ + dayOffset_ + daySkip_) / span;
+    const float into  = ahead - std::floor(ahead);
+
+    daySkip_ += (0.25f - std::fmod(into, 0.25f)) * span;
+}
+
 void Sky::Advance(float dt) {
     time_ += dt;
-    now_ = WeatherAt(time_);
+
+    // Any skip still owed, paid out over a few seconds rather than in one step. What
+    // is usually being looked at *is* the transition, and a jump lands on the far
+    // side of it.
+    if (daySkip_ > 0.0f) {
+        const float step = std::min(daySkip_, SecondsPerDay() * kSkipRate * std::max(dt, 0.0f));
+
+        dayOffset_ += step;
+        daySkip_ -= step;
+    }
+
+    // Wrapped, so a session left running overnight cannot walk the offset out of the
+    // precision a float has left.
+    dayOffset_ = std::fmod(dayOffset_, SecondsPerDay());
+
+    now_   = WeatherAt(time_);
+    today_ = DaylightAt(time_ + dayOffset_);
+
+    Reckon();
+}
+
+void Sky::Reckon() {
+    const Day &day = settings_.day;
+
+    // How much it has rained lately, and how long the ground has stood in the sun.
+    //
+    // Read backwards out of the clock rather than accumulated forwards through it.
+    // That is only possible because the weather is a pure function of time, and it
+    // is worth saying what it buys: the ground has a memory without the world having
+    // any state, so two views of it at the same moment agree and there is nothing to
+    // save. An exponential kernel is exactly the leaky integrator
+    // `w += (rain - w) * k * dt` with the accumulator taken out of it.
+    //
+    // Two dozen samples over the window. Fewer aliases badly: the rain is close to a
+    // square wave on a five-minute period with a crossing of about one, so a coarse
+    // comb beats against it and the reading jitters as the clock moves. This costs a
+    // couple of microseconds once a frame — the weather at a moment is a table
+    // lookup and a hash, with no noise in it at all.
+    constexpr int kSamples = 24;
+
+    const float window = std::max(day.wetMinutes, 0.1f) * 60.0f;
+    const float decay  = kLn2 / std::max(day.wetHalfLife, 0.01f) / 60.0f;
+
+    float rain    = 0.0f;
+    float sun     = 0.0f;
+    float weights = 0.0f;
+
+    for (int step = 0; step < kSamples; step++) {
+        const float back = (static_cast<float>(step) + 0.5f) / static_cast<float>(kSamples) * window;
+
+        const float weight = std::exp(-decay * back);
+
+        rain += WeatherAt(time_ - back).rain * weight;
+        sun += SunLightAt(time_ + dayOffset_ - back) * weight;
+
+        weights += weight;
+    }
+
+    wet_     = (weights > 0.0f) ? rain / weights : 0.0f;
+    drought_ = (weights > 0.0f) ? sun / weights : 0.0f;
+}
+
+float Sky::HumidityAt(float worldX) const {
+    const terrain::Climate climate = terrain::ClimateAt(worldX, terrain_);
+    const Day &day                 = settings_.day;
+
+    // The climate of the place, raised by what has fallen on it and lowered by what
+    // has stood over it. Warm ground gives up its water faster than cold, which is
+    // the first thing anything in this world has ever asked of the temperature.
+    const float dried = drought_ * day.dryGain * (0.5f + climate.temperature);
+
+    return std::clamp(climate.humidity + wet_ * day.wetGain - dried, 0.0f, 1.0f);
 }
 
 // ------------------------------------------------------------------ the field
@@ -289,7 +482,14 @@ void Sky::Configure(const Settings &settings, const terrain::Settings &terrain) 
         erosionAt_ = Cutoff(settings_.moods[static_cast<int>(Mood::Fair)].cover);
     }
 
-    now_ = WeatherAt(time_);
+    // The moment, as it stands. Filled here as well as in Advance so that a sky
+    // configured and then drawn before the first frame is stepped has a time of day
+    // and a soil that has been rained on, rather than the midnight and the drought a
+    // default-constructed one would report.
+    now_   = WeatherAt(time_);
+    today_ = DaylightAt(time_ + dayOffset_);
+
+    Reckon();
 }
 
 float Sky::Cutoff(float cover) const {
@@ -451,7 +651,18 @@ float Sky::UndersideAt(float worldX) const {
 }
 
 float Sky::ShadeAt(float worldX) const {
-    return CoverAt(worldX) * std::clamp(settings_.shade * now_.shade, 0.0f, 1.0f);
+    const float held = std::clamp(settings_.shade * now_.shade, 0.0f, 1.0f);
+
+    // Eased off as the light goes.
+    //
+    // Without this a storm at midnight is black, and for a reason worth stating: the
+    // shade is a *share* of the daylight held back, and holding back three quarters
+    // of a moonlit sky leaves nothing at all. The cloud is still there and the ground
+    // under it is still darker; it simply cannot take away light that was never
+    // arriving. At noon this is one exactly, so nothing about a daytime storm moved.
+    const float day = settings_.day.nightShade + (1.0f - settings_.day.nightShade) * today_.light;
+
+    return CoverAt(worldX) * held * day;
 }
 
 float Sky::RainAt(float worldX) const {
@@ -475,14 +686,32 @@ Color Sky::AirAt(float worldY, float cover) const {
     // with height, and this one number is the entire gradient.
     const float airmass = air.thickness * std::exp(-altitude / std::max(air.scaleHeight, 1.0f));
 
+    // What colour the light arriving here already is, weighted by how much of this
+    // line of sight is deep air.
+    //
+    // The sun's own journey, not this one. Overhead it has crossed almost nothing
+    // and is white; along the horizon it has crossed the most air there is and has
+    // had the blue taken out of it. Weighting by the view's own airmass is what
+    // keeps the zenith blue while the horizon burns — the reddening shows up where
+    // the light had furthest to come.
+    const float depth = airmass / std::max(air.thickness, 1e-3f);
+
+    const Vector3 beam = {std::pow(std::max(today_.beam.x, 1e-4f), depth),
+                          std::pow(std::max(today_.beam.y, 1e-4f), depth),
+                          std::pow(std::max(today_.beam.z, 1e-4f), depth)};
+
     // What that air scatters, channel by channel. Blue scatters some five times
     // more strongly than red, so thin air passes blue alone and thick air scatters
     // everything until it is white. The pale horizon, the blue overhead and the
     // dark above it are all this expression — none of the three is written down
     // anywhere.
-    const Color lit = {ToByte(1.0f - std::exp(-air.rayleigh.x * airmass)),
-                       ToByte(1.0f - std::exp(-air.rayleigh.y * airmass)),
-                       ToByte(1.0f - std::exp(-air.rayleigh.z * airmass)), 255};
+    //
+    // Colour only. How *bright* the sky is belongs to the light layer the whole
+    // scene is multiplied by, and it is already carrying the day: dimming here as
+    // well would square it, and dusk would come out black.
+    const Color lit = {ToByte(beam.x * (1.0f - std::exp(-air.rayleigh.x * airmass))),
+                       ToByte(beam.y * (1.0f - std::exp(-air.rayleigh.y * airmass))),
+                       ToByte(beam.z * (1.0f - std::exp(-air.rayleigh.z * airmass))), 255};
 
     // Then washed towards grey by the weather. What is being looked at under a full
     // sky is the underside of the cloud deck, not the air.
@@ -501,6 +730,119 @@ void Sky::DrawAtmosphere(Rectangle view) const {
     // stripes across the air behind the clouds.
     for (float y = top; y < view.y + view.height; y += band) {
         DrawRectangleRec({view.x, y, view.width, band}, AirAt(y + band * 0.5f, now_.cover));
+    }
+}
+
+void Sky::DrawStars(Rectangle view, const Ground &ground) const {
+    const Stars &stars    = settings_.stars;
+    const Atmosphere &air = settings_.air;
+
+    // Three reasons there is nothing to draw, all of them decided before a single
+    // star is placed: the sun is up, the deck is closed over them, or the view is
+    // under the ground.
+    const float dark  = 1.0f - today_.light;
+    const float open  = 1.0f - std::clamp(now_.cover * stars.hidden, 0.0f, 1.0f);
+    const float shown = dark * open;
+
+    if (shown <= 0.004f) return;
+
+    const float parallax = std::clamp(stars.parallax, 0.01f, 1.0f);
+    const float step     = std::max(stars.spacing, 4.0f) * parallax;
+    const float pixel    = std::max(config::kPixelSize, 1.0f);
+
+    // The field's own frame: the world scaled about the horizon, so the horizon
+    // stays put and everything above it draws in towards it. That is what distance
+    // does, and it is the whole of the parallax.
+    const float highest = air.horizon + (view.y - air.horizon) * parallax;
+    const float lowest  = air.horizon;
+
+    // Nothing above the horizon is in view at all, which underground is always.
+    if (lowest <= highest) return;
+
+    const int i0 = static_cast<int>(std::floor(view.x * parallax / step));
+    const int i1 = static_cast<int>(std::ceil((view.x + view.width) * parallax / step));
+    const int j0 = static_cast<int>(std::floor(highest / step));
+    const int j1 = static_cast<int>(std::ceil(lowest / step));
+
+    // The band a cloud can stand in. A star outside it has nothing to be behind, and
+    // most of them are: the deck is a ribbon near the top of the sky and the sky is
+    // everything above the ground.
+    const float ceiling = settings_.ceiling;
+    const float base    = settings_.base + settings_.rainDrop * now_.rain;
+
+    for (int i = i0; i <= i1; i++) {
+        // The weather over this stretch, read once for the column of stars rather
+        // than once for each. It is the expensive half of asking about a cloud, and
+        // it is the same answer all the way up.
+        bool asked = false;
+        Column column;
+
+        for (int j = j0; j <= j1; j++) {
+            // One to a cell, placed inside it by the cell's own hash. The same trick
+            // the rain uses on its drops, and for the same reason: there are a great
+            // many of them and nothing about one is worth remembering.
+            const int cell = i * 73856093 ^ j * 19349663;
+
+            const Vector2 at = {(static_cast<float>(i) + Hash(cell)) * step,
+                                (static_cast<float>(j) + Hash(cell + 1)) * step};
+
+            // Back out to the world, to be drawn there.
+            const Vector2 world = {at.x / parallax, air.horizon + (at.y - air.horizon) / parallax};
+
+            if (world.y > lowest || world.y < view.y || world.y > view.y + view.height) continue;
+
+            // Behind the land. Being drawn after the light, a star is no longer
+            // covered by the ground simply because the ground was drawn later, so
+            // the ground has to be asked. The world's own surface, edits and all —
+            // the same one the rain lands on.
+            if (world.y > GroundAt(ground, world.x, terrain_)) continue;
+
+            // And behind a cloud, for the same reason and read the same way: out of
+            // the field at the star's own position, which is exactly what being
+            // covered by the cloud would have meant.
+            if (world.y > ceiling && world.y < base) {
+                if (!asked) {
+                    column = ColumnAt(world.x);
+                    asked  = true;
+                }
+
+                if (MarginAt(world, column) > kCloudEdge) continue;
+            }
+
+            // Put out by the air it has to shine through. The same airmass that
+            // whitens the horizon, which is why there are none down there and plenty
+            // overhead — and it thins them out gradually rather than ending the field
+            // on a line.
+            const float altitude = std::max(air.horizon - world.y, 0.0f);
+            const float airmass  = air.thickness * std::exp(-altitude / std::max(air.scaleHeight, 1.0f));
+
+            const float through = std::exp(-stars.haze * airmass);
+
+            // Its own brightness, and the waver of the air in front of it.
+            //
+            // The floor is high on purpose. A star is one square, and a square at a
+            // fifth alpha is the sky with a slightly lighter square in it — the mark
+            // has to carry its own colour or the whole field greys out.
+            const float magnitude = 0.55f + 0.45f * Hash(cell + 2);
+
+            const float waver =
+                1.0f - stars.twinkle * 0.5f *
+                           (1.0f + std::sin(time_ * stars.twinkleRate + Hash(cell + 3) * 2.0f * kPi));
+
+            const float alpha = shown * through * magnitude * waver;
+            if (alpha <= 0.01f) continue;
+
+            // Its temperature, which is the whole of its colour: blue-white at one
+            // end, amber at the other, most of them somewhere between.
+            const Color colour = Mix(stars.cool, stars.hot, Hash(cell + 4));
+
+            // One square of the world's own lattice, like everything else drawn here.
+            const auto m = static_cast<int>(std::floor(world.x / pixel));
+            const auto n = static_cast<int>(std::floor(world.y / pixel));
+
+            DrawRectangleRec({static_cast<float>(m) * pixel, static_cast<float>(n) * pixel, pixel, pixel},
+                             Fade(colour, alpha));
+        }
     }
 }
 
@@ -540,7 +882,18 @@ float Sky::BandLight(int index, int count) const {
 }
 
 Color Sky::CloudTint(float lit) const {
-    return Mix(now_.ambient, now_.sunlight, std::clamp(lit, 0.0f, 1.0f));
+    // The mood's sunlight, tinted by the colour the sun has left — so a cloud goes
+    // gold at the same moment the sky behind it does, off the same one number.
+    const Color sun = Scale(now_.sunlight, today_.beam);
+
+    // Then run back towards the shadow as the light goes. Not dimmed: dimming is the
+    // light layer's job and this is already inside it. What happens instead is that
+    // the two lights collapse together, so a cloud at night has no lit side left and
+    // reads as a flat silhouette, which is what a cloud at night looks like. At noon
+    // this is `sun` exactly and nothing about a daytime sky moved.
+    const Color day = Mix(now_.ambient, sun, today_.light);
+
+    return Mix(now_.ambient, day, std::clamp(lit, 0.0f, 1.0f));
 }
 
 // ------------------------------------------------------------------ the cloud
@@ -585,7 +938,15 @@ void Sky::DrawClouds(Rectangle view, int spacing) const {
     }
 
     // How far towards the sun the depth is read, in grid cells.
-    const Vector2 sun     = Unit(settings_.shading.sun, {0.8f, -0.6f});
+    // Where the sun is now, not where the settings said it was. Read from the day
+    // rather than written into `settings_`, which only Configure may touch: that
+    // measures the field's distribution over thirty thousand samples, and calling it
+    // to move the sun would cost more than the rest of the frame put together.
+    //
+    // It points below the horizon once the sun has set, so the probe reads the cloud
+    // *beneath* a cell and the deck lights from underneath at dusk. That falls out;
+    // nothing asked for it.
+    const Vector2 sun     = Unit(today_.sun, {0.8f, -0.6f});
     const float reach     = settings_.shading.sunReach;
     const Vector2 towards = {sun.x * reach, sun.y * reach};
 

@@ -89,6 +89,22 @@ void FollowPlayer(Camera2D &camera, const Player &player, float dt) {
     camera.target.y += (target.y - camera.target.y) * t;
 }
 
+// A line of the readout, dark with a pale edge under it.
+//
+// Grey on its own was unreadable, and measurably so rather than as a matter of
+// taste: the daytime sky at the top of the screen sits at very nearly the same
+// brightness as GRAY does, so the text and the background were the same value and
+// only the letter shapes separated them. Black alone fixes the day and breaks the
+// night, which is the same fault the other way up. The shadow is what makes one
+// colour work against a bright sky, a dark one, wet rock and open water alike,
+// because it supplies the contrast the background refuses to.
+//
+// Drawn twice. That is the whole cost, on six lines of text.
+void DrawLabel(const char *text, int x, int y, Color colour) {
+    DrawText(text, x + 1, y + 1, 14, {235, 240, 248, 190});
+    DrawText(text, x, y, 14, colour);
+}
+
 // Badge showing what the next click will do, next to the bar that decides what
 // it will do it with. The brush is modal, so the mode has to be somewhere the
 // eye passes without being sent looking for it.
@@ -153,6 +169,17 @@ void Draw(const World &world, const Player &player, const Hotbar &hotbar, const 
     // world underneath was already drawn at full brightness.
     if (!debug.unlit) lights.Compose();
 
+    // The stars go on this side of that line, and they are the only part of the
+    // world that does.
+    //
+    // A star is a light rather than something lit, and the multiply cannot express
+    // one: under it nothing may come out brighter than the sky's own radiance, which
+    // at midnight is a tenth — so every star was a grey smudge and its colour went
+    // with its brightness. Out here it keeps both. What it costs is that the ground
+    // and the cloud no longer hide a star by being drawn over it, so both are asked
+    // instead.
+    world.DrawStars(view);
+
     // Drawn over the world rather than under it: the point of an overlay is to
     // check the world against what produced it, which is impossible while the
     // world covers it.
@@ -165,26 +192,28 @@ void Draw(const World &world, const Player &player, const Hotbar &hotbar, const 
 
     EndMode2D();
 
-    DrawText("A/D: move  |  space: jump  |  S: crouch  |  J: attack  |  mouse: aim  |  F: fly", 10, 10, 14, GRAY);
-    DrawText("left: apply brush  |  X: place/dig  |  1-9 or wheel: material  |  - / +: brush size  |  R: regenerate",
-             10, 28, 14, GRAY);
-    DrawText(TextFormat("V: vertices  |  F3: chunks  |  F4: height grid  |  F5: light probes  |  F6: unlit %s  |"
-                        "  F7: fast weather %s  |  , . : lantern %.1f",
-                        debug.unlit ? "on" : "off", debug.fastWeather ? "on" : "off", lantern),
-             10, 46, 14, GRAY);
+    const Color ink = {14, 18, 24, 255};
 
-    DrawText(TextFormat("chunks: %d (%d pinned)   edits kept: %d   water in view: %.1f   light rays: %ld",
-                        world.ResidentChunks(), world.PinnedChunks(), world.RememberedEdits(), world.TotalWater(view),
-                        world.Light().Rays()),
-             10, 70, 14, GRAY);
+    DrawLabel("A/D: move  |  space: jump  |  S: crouch  |  J: attack  |  mouse: aim  |  F: fly", 10, 10, ink);
+    DrawLabel("left: apply brush  |  X: place/dig  |  1-9 or wheel: material  |  - / +: brush size  |  R: regenerate",
+              10, 28, ink);
+    DrawLabel(TextFormat("V: vertices  |  F3: chunks  |  F4: height grid  |  F5: light probes  |  F6: unlit %s  |"
+                         "  F7: fast weather %s  |  F8: next quarter  |  , . : lantern %.1f",
+                         debug.unlit ? "on" : "off", debug.fastWeather ? "on" : "off", lantern),
+              10, 46, ink);
+
+    DrawLabel(TextFormat("chunks: %d (%d pinned)   edits kept: %d   water in view: %.1f   light rays: %ld",
+                         world.ResidentChunks(), world.PinnedChunks(), world.RememberedEdits(), world.TotalWater(view),
+                         world.Light().Rays()),
+              10, 70, ink);
 
     const Vector2 centre = player.Centre();
     const auto under     = editor.Under();
 
-    DrawText(TextFormat("y: %d   under cursor: %s   light here: %.2f   light at cursor: %.2f",
-                        static_cast<int>(centre.y), under.has_value() ? Def(*under).name : "open",
-                        world.LightLevelAt(centre), world.LightLevelAt(editor.Aim())),
-             10, 88, 14, GRAY);
+    DrawLabel(TextFormat("y: %d   under cursor: %s   light here: %.2f   light at cursor: %.2f",
+                         static_cast<int>(centre.y), under.has_value() ? Def(*under).name : "open",
+                         world.LightLevelAt(centre), world.LightLevelAt(editor.Aim())),
+              10, 88, ink);
 
     // The weather, and then the cloud standing in it. Read together they show the
     // chain working: the weather sets the level, the sky over this spot fills to it,
@@ -192,11 +221,27 @@ void Draw(const World &world, const Player &player, const Hotbar &hotbar, const 
     // underside of that same cloud rather than from a height of its own.
     const weather::Weather &sky = world.Sky().Now();
 
-    DrawText(
+    DrawLabel(
         TextFormat("weather: %-8s  sky %.0f%% full   rain %.0f%%   |   here: %.0f%% cloud  %.0f%% shade  base y %d",
                    sky.name, sky.cover * 100.0f, sky.rain * 100.0f, world.Sky().CoverAt(centre.x) * 100.0f,
                    world.Sky().ShadeAt(centre.x) * 100.0f, static_cast<int>(world.Sky().UndersideAt(centre.x))),
-        10, 106, 14, sky.rain > 0.0f ? Color{140, 170, 210, 255} : GRAY);
+        10, 106, sky.rain > 0.0f ? Color{16, 44, 82, 255} : ink);
+
+    // Then the day, and how damp it has left the ground. The clock is the world's
+    // own and not the wall's: a whole turn is `Day::dayMinutes` of weather time, so
+    // it runs fast under F7 with everything else.
+    const weather::Daylight &today = world.Sky().Today();
+
+    const float hours  = today.phase * 24.0f;
+    const float damp   = world.HumidityAt(centre);
+    const int filled   = static_cast<int>(damp * 10.0f + 0.5f);
+    const char *soaked = "..........";
+    const char *dry    = "          ";
+
+    DrawLabel(TextFormat("%02d:%02d  %-5s   daylight %.0f%%   |   humidity %.0f%%  [%.*s%.*s]", static_cast<int>(hours),
+                         static_cast<int>((hours - std::floor(hours)) * 60.0f), today.name, today.light * 100.0f,
+                         damp * 100.0f, filled, soaked, 10 - filled, dry),
+              10, 124, damp > 0.66f ? Color{16, 44, 82, 255} : ink);
 
     // Flight suspends gravity and collision both, which is not something to be
     // left on by accident, so it says so where the eye already is.
@@ -380,6 +425,41 @@ int main() {
                 .bandHeight   = 10.0f,
             },
 
+        .stars =
+            {
+                // Seventy pixels apart puts a hundred-odd in a screen of sky, which
+                // is enough to read as a sky and few enough that each one is a mark
+                // rather than grain.
+                .spacing = 70.0f,
+
+                // A seventh of the world's motion. Enough that walking a screen
+                // moves them a little and they sit behind the landscape rather than
+                // on it; little enough that they are plainly a long way off.
+                .parallax = 0.14f,
+
+                // Gentle. The air genuinely does put out everything near the horizon,
+                // but a strong figure here takes the whole field down with it, and
+                // the complaint about the first version of this was that the stars
+                // were too faint rather than too many.
+                .haze = 0.30f,
+
+                // A full sky has no stars in it at all, which is what a storm looks
+                // like from underneath.
+                .hidden = 1.0f,
+
+                // Present but not restless. A quarter of the brightness, wavering a
+                // little under twice a second.
+                .twinkle     = 0.25f,
+                .twinkleRate = 1.7f,
+
+                // Two ends of a colour temperature rather than one white, and both
+                // well clear of grey: a star is one square against a nearly black
+                // ground, and a tint that is merely suggested does not survive being
+                // blended down.
+                .hot  = {170, 202, 255, 255},
+                .cool = {255, 186, 128, 255},
+            },
+
         // How a cloud takes the light: Beer-Lambert with the powder term, per cell,
         // from that cell's own depth towards the sun. Nothing here takes the camera
         // as an input, which is the point.
@@ -387,14 +467,10 @@ int main() {
             {
                 .layers = 6,
 
-                // Up and well to the right. The horizontal share has to be the larger
-                // of the two or the shading reads as "lit from above" and the cloud
-                // has no side to it — which is the whole difference between a shaded
-                // shape and a lit one.
-                //
-                // Once there is a time of day, this is the one thing it has to move,
-                // and every cloud in the world relights itself.
-                .sun      = {0.80f, -0.60f},
+                // Where the sun is comes from the day now, not from here. See
+                // `Day::sunTilt` below: it is held off the vertical so the cloud
+                // always keeps a lit flank, which is the whole difference between a
+                // shaded shape and a lit one.
                 .sunReach = 150.0f,
 
                 // High, because the depth it is given is a field margin and those run
@@ -411,6 +487,56 @@ int main() {
                 // it.
                 .darkest  = 0.08f,
                 .lightest = 0.92f,
+            },
+
+        .day =
+            {
+                // Long enough that a day is something lived through rather than
+                // watched, and deliberately not a whole multiple of `spellMinutes`:
+                // at four spells to a day every dawn would fall at the same point of
+                // a spell for ever and the weather would never once break
+                // differently over a sunrise. At 24 against 5 the two only realign
+                // every fifth day.
+                //
+                // F7 runs this forty times faster along with the weather, which puts
+                // a whole day in half a minute. F8 runs it on to the next quarter.
+                .dayMinutes = 24.0f,
+
+                // Both below the horizon's own zero, so light arrives before the sun
+                // does and outlasts it. Twelve minutes of full day, eight and a half
+                // of full night, and about two minutes of turning at each end.
+                //
+                // Note what the top edge buys: the daylight is pinned at exactly one
+                // for about half the cycle, so high noon is the sky this world had
+                // before there was a clock in it, unchanged.
+                .darkAt = -0.45f,
+                .litAt  = 0.05f,
+
+                // Half off vertical at noon. A sun straight overhead lights only the
+                // tops of the clouds and takes the side off them.
+                .sunTilt = 0.50f,
+
+                // How much more air the light crosses along the horizon than
+                // overhead. This one number is the sunset. Above about 0.8 the
+                // middle of the sky passes through an olive on its way down, which
+                // is real Rayleigh and reads as a bruise.
+                .travel = 0.65f,
+
+                // What a cloud can still hold back at midnight. Without it a storm
+                // after dark is not dim, it is black.
+                .nightShade = 0.15f,
+
+                // How long the ground remembers a shower, and how fast it forgets.
+                // A quarter of an hour back, halving every four minutes — so a storm
+                // is still felt underfoot two spells of weather after it passed.
+                .wetMinutes  = 15.0f,
+                .wetHalfLife = 4.0f,
+
+                // Both against a climate that already runs the whole range, so
+                // neither may be large: a soaking should make a dry place damp, not
+                // make every place the same.
+                .wetGain = 0.55f,
+                .dryGain = 0.30f,
             },
 
         // The weather this world has, and how long a spell of it lasts.
@@ -538,6 +664,16 @@ int main() {
     World world(settings, config::kResolution);
     world.SetWeather(sky);
 
+    // The two ends of a day, and they are two colours rather than one turned down.
+    //
+    // Noon is the near-neutral light this world was lit by before there was a clock;
+    // midnight is a fiftieth of it and blue where the day is not. Both are radiances
+    // and neither can be read as a brightness — light reaches the screen through an
+    // exposure curve, so this midnight is a readable dark rather than the near-black
+    // the ratio suggests, and a torch stops washing out against it and starts
+    // reading as the warm thing it is.
+    world.SetDaylight({2.6f, 2.8f, 3.1f}, {0.05f, 0.06f, 0.09f});
+
     // Dropped in above the ground at the origin rather than at a fixed height,
     // since the surface there is now wherever the relief put it.
     Player player({0.0f, terrain::Height(0.0f, settings) - 96.0f});
@@ -580,6 +716,11 @@ int main() {
 
         debug_view::ReadToggles(debug);
         if (IsKeyPressed(KEY_R)) world.Reset();
+
+        // An action rather than a state, so it is read here beside the other one and
+        // not held in the debug toggles. Asking again while one is running queues
+        // another quarter.
+        if (IsKeyPressed(KEY_F8)) world.SkipToQuarter();
 
         // Turned up and down while walking, since how much light the player
         // carries is a balance question and the only way to settle it is to be
