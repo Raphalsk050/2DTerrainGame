@@ -282,6 +282,30 @@ float Tunnel(Vector2 world, const TunnelLayer &layer, int seed, float halfWidth)
     return halfWidth - std::abs(value) / std::max(slope, 1e-9f);
 }
 
+// The position the cave layers are read at, pushed around by a field of its own.
+//
+// Two components out of one shape, the second read a long way off along the third
+// axis so it is a different field rather than the same one shifted — which would
+// displace every position along the same diagonal and shear the caves instead of
+// bending them.
+//
+// The displacement is the same for every layer, so they warp together and keep
+// crossing each other where they did. Warping each separately would pull the
+// junctions apart.
+Vector2 Warped(Vector2 world, const CaveSettings &c, int seed) {
+    if (c.warpAmplitude <= 0.0f) return world;
+
+    NoiseShape shape = Reseed(c.warp, seed);
+
+    const float dx = Signed(world, shape);
+
+    shape.offsetZ += 137.0f;
+
+    const float dy = Signed(world, shape);
+
+    return {world.x + dx * c.warpAmplitude, world.y + dy * c.warpAmplitude};
+}
+
 // How much of the regional cave layers a position is entitled to, in [0,1].
 //
 // One field read against a cutoff that descends with depth, rather than two
@@ -618,6 +642,13 @@ float SolidityBelow(Vector2 world, float depth, const Settings &s) {
 
     const float crust = CrustAllowance(depth, caves);
 
+    // Every layer below reads here rather than at `world`. The region is not
+    // warped: it decides where cave country *is*, and a region boundary that
+    // wandered would only move, not improve — while sharing the displacement with
+    // the layers would tie the two together and put a visible kink in the region
+    // edge wherever the warp is strongest.
+    const Vector2 at = Warped(world, caves, s.seed);
+
     // How honeycombed this stretch of the underground is, which is what leaves
     // some of it near-solid rock and the rest cave country.
     const float country = RegionAllowance(world, depth, caves, s.seed);
@@ -664,8 +695,8 @@ float SolidityBelow(Vector2 world, float depth, const Settings &s) {
         // a crack too narrow to enter that nonetheless lets the daylight in.
         constexpr float kMouthSqueeze = 1.6f;
 
-        carve(Tunnel(world, caves.shafts, s.seed,
-                     TunnelWidth(world, caves.shafts, s.seed, depth, reach, (1.0f - mouth) * kMouthSqueeze)));
+        carve(Tunnel(at, caves.shafts, s.seed,
+                     TunnelWidth(at, caves.shafts, s.seed, depth, reach, (1.0f - mouth) * kMouthSqueeze)));
     }
 
     if (crust <= 0.0f) return solid;
@@ -678,25 +709,25 @@ float SolidityBelow(Vector2 world, float depth, const Settings &s) {
         return crust * (floor + (1.0f - floor) * country);
     };
 
-    carve(Tunnel(world, caves.crawlways, s.seed,
-                 TunnelWidth(world, caves.crawlways, s.seed, depth, allowance(caves.crawlways))));
+    carve(Tunnel(at, caves.crawlways, s.seed,
+                 TunnelWidth(at, caves.crawlways, s.seed, depth, allowance(caves.crawlways))));
 
-    carve(Tunnel(world, caves.galleries, s.seed,
-                 TunnelWidth(world, caves.galleries, s.seed, depth, allowance(caves.galleries))));
+    carve(Tunnel(at, caves.galleries, s.seed,
+                 TunnelWidth(at, caves.galleries, s.seed, depth, allowance(caves.galleries))));
 
     // The rooms follow the region outright: a room in dead rock is a bubble, and
     // what makes a room worth arriving in is the corridors that lead to it.
     const float region = crust * country;
 
     if (region > 0.0f) {
-        carve(Chamber(world, caves.chambers, caves.calibration.chamber, s.seed, depth, region));
-        carve(Chamber(world, caves.caverns, caves.calibration.cavern, s.seed, depth, region));
+        carve(Chamber(at, caves.chambers, caves.calibration.chamber, s.seed, depth, region));
+        carve(Chamber(at, caves.caverns, caves.calibration.cavern, s.seed, depth, region));
     }
 
     // And the wall, last, because what it roughens is the outline all of the
     // above agreed on rather than any one of them. Held to the crust allowance so
     // it cannot bite into the ground the player walks on.
-    return solid + Roughness(world, solid, caves.roughness, s.seed, crust);
+    return solid + Roughness(at, solid, caves.roughness, s.seed, crust);
 }
 
 } // namespace

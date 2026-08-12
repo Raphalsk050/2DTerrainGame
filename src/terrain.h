@@ -390,6 +390,32 @@ struct CaveSettings {
     // Sharpens or softens the border between cave country and dead rock.
     float regionFade = 0.15f;
 
+    // Displacement of the position every cave layer is read at, in pixels.
+    //
+    // This is the term that decides whether the underground reads as rock or as
+    // vector art, and nothing else in the settings can stand in for it.
+    //
+    // The zero set of a smooth field is a smooth curve. A band around one is
+    // therefore a ribbon, and a network of ribbons — however its width is
+    // modulated, however its junctions are blended — still reads as a set of long
+    // clean arcs meeting at clean angles, which is a thing no rock does. The
+    // reason is that every irregularity a cave has comes from the *path* being
+    // irregular, and the path is the contour of a field that has none.
+    //
+    // Warping fixes it at the source: the field is read at a position pushed
+    // around by another field, so the contour meanders, doubles back and kinks at
+    // whatever scale the warp works at. It is Inigo Quilez's fbm-of-fbm, the
+    // standard tool for exactly this, and it costs two samples for the whole cave
+    // stack rather than two per layer, since every layer is read at the same
+    // displaced position.
+    //
+    // The amplitude wants to be a good fraction of the corridor spacing. Small and
+    // it only roughens the wall, which `roughness` already does better; too large
+    // and the layers fold back through themselves and the network stops being
+    // navigable.
+    NoiseShape warp{};
+    float warpAmplitude = 0.0f;
+
     // Pixels over which two layers meeting are blended into one another.
     //
     // The layers are unioned, and the exact union of two distances is their

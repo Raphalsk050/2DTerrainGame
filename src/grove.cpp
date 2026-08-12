@@ -272,15 +272,32 @@ void Grove::ReadGround(const World &world, Rectangle view) {
     const int count = std::max(last - first + 1, 1);
 
     surface_.assign(static_cast<std::size_t>(count), 0.0f);
+    sunk_.assign(static_cast<std::size_t>(count), 0.0f);
 
     // The skyline and not the surface as built. It is memoised per column, so
     // after one pass over a stretch of world this is a lookup each — and it is
     // the answer that does not move when somebody digs, which is what keeps a
     // wood from rearranging itself around a hole.
-    for (int i = 0; i < count; i++) surface_[static_cast<std::size_t>(i)] = world.Skyline(first + i);
+    //
+    // And, beside it, how far that answer has fallen below the land's own
+    // surface. The skyline follows the sky *down* wherever an entrance has opened
+    // the ground — which is exactly right for lighting and exactly wrong for
+    // planting, since what it reports inside a wide cave mouth is a ledge halfway
+    // down a shaft. The two heights agree over ordinary ground and disagree by a
+    // long way over a hole, so their difference is the whole of the test.
+    for (int i = 0; i < count; i++) {
+        const float x = static_cast<float>(first + i) * spacing;
 
-    ground_ = {
-        .top = surface_.data(), .count = count, .originX = static_cast<float>(first) * spacing, .spacing = spacing};
+        surface_[static_cast<std::size_t>(i)] = world.Skyline(first + i);
+        sunk_[static_cast<std::size_t>(i)] =
+            surface_[static_cast<std::size_t>(i)] - terrain::Height(x, world.Settings());
+    }
+
+    ground_ = {.top     = surface_.data(),
+               .sunk    = sunk_.data(),
+               .count   = count,
+               .originX = static_cast<float>(first) * spacing,
+               .spacing = spacing};
 }
 
 void Grove::Update(const World &world, Rectangle view, Vector2 player, float now, float dt, Harvest &into) {

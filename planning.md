@@ -340,6 +340,20 @@ near-solid rock and cave country, while a connected backbone always exists to
 travel through. Regional pinch-outs also read as natural cave ends, which a flat
 wall does not.
 
+**The position every cave layer is read at is warped, and this is the one that
+mattered most.** The zero set of a smooth field is a smooth curve, so a band
+around one is a ribbon — and a network of ribbons still reads as clean arcs
+meeting at clean angles however its width is modulated and however its junctions
+are blended, because every irregularity a cave has comes from the *path* being
+irregular and the path had none. Reading the field at a position pushed around by
+another field fixes it at the source: the contour meanders, hooks and doubles
+back. Inigo Quilez's fbm-of-fbm, and it costs two samples for the whole cave stack
+rather than two per layer, since every layer shares the displacement — warping
+them separately would pull the junctions apart. Note that warping breaks the
+eikonal property the band width relies on, so a warped corridor is narrower than
+it asks for wherever the warp compresses space; the widths are authored against
+the warp rather than against the setting.
+
 **A corridor of constant width is a pipe.** `Tunnel` carves a band of exactly the
 half-width it is handed — the local-slope division above is what guarantees it —
 and what that control costs is character, because nothing underground has a
@@ -423,14 +437,14 @@ below. Over 8000 × 4200 px with the settings as authored:
 | --- | --- |
 | Relief | 271 px, about 90 px of swing per screen of travel |
 | Mean surface slope | 10°, steepest single step 14 px (a terrace riser) |
-| Cave volume | 12% of the rock just under the crust, 25% at 2000 px; 18.7% overall |
-| Reachable from the sky | 83.3% of all open space, without digging |
-| Caves lost | 11.0% of the void, in 28 sealed voids over 200 cells |
-| Vertical clearance | median 36 px; 90% of the *space* is walkable upright, 96% crouchable |
-| Cave mouths | one every 470 px, 52 px wide |
+| Cave volume | 13% of the rock just under the crust, 24% at 2000 px; 19.2% overall |
+| Reachable from the sky | 85.2% of all open space, without digging |
+| Caves lost | 9.2% of the void, in 26 sealed voids over 200 cells |
+| Vertical clearance | median 30 px; 88% of the *space* is walkable upright, 95% crouchable |
+| Cave mouths | one every 530 px, 67 px wide |
 | Water | 24% of the void under the table, which moves 12 px at worst across a cave |
-| Ore at a cave wall | 2.2× to 3.0× what the blind rock holds, per `--ore` |
-| Liquid movement after generating | 0.2–0.7% of the water present, over 600 steps |
+| Ore at a cave wall | 1.7× to 3.0× what the blind rock holds, and 9× for gold, per `--ore` |
+| Liquid movement after generating | 0.9–1.2% of the water present, over 600 steps |
 
 Four of those want reading carefully.
 
@@ -1242,6 +1256,14 @@ cliff on every biome border. Blend the *parameters*, not the resulting heights.
 **Ravines.** Long narrow vertical gashes breaking the surface. Cheap: the shaft
 layer with a much lower frequency, much greater reach and a width that grows
 downward instead of shrinking.
+
+**A wide cave mouth is not ground.** `World::Skyline` follows the sky *down* into
+an opening, which is right for lighting and wrong for planting: what it reports
+inside a wide mouth is a ledge halfway down a shaft, level, with level ground
+either side, so every footing test `flora` has passes and a tree grows on the
+wall of a cave. `flora::Ground` now carries how far each column's top lies below
+`terrain::Height` and `LayerRules::rootLimit` rejects the rest. Grass is not yet
+covered by it.
 
 **Ore districts.** Veins know their depth band and their distance from a cave wall,
 and nothing else. Minecraft's `vein_toggle` ties them to a second low-frequency

@@ -227,5 +227,6 @@ private:
     // The skyline under one frame's plants. Kept between frames only so that
     // updating does not allocate; nothing in it survives the call that fills it.
     std::vector<float> surface_;
+    std::vector<float> sunk_;
     flora::Ground ground_{};
 };

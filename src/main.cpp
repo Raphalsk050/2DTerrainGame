@@ -1383,10 +1383,19 @@ int main(int argc, char **argv) {
                     // Fifteen hundred pixels to go from the one to the other, which is
                     // about two screens of descent.
                     .region                = {.frequency = 0.6f, .octaves = 2, .seed = 4410},
-                    .regionCoverage        = 0.50f,
+                    .regionCoverage        = 0.42f,
                     .regionCoverageShallow = 0.10f,
                     .regionDeepens         = 1500.0f,
                     .regionFade            = 0.08f,
+
+                    // The warp, and it is the difference between rock and vector
+                    // art. Sixty pixels is a good share of the spacing between
+                    // corridors, so a passage wanders by more than its own width
+                    // over its length instead of running an arc; one feature every
+                    // three hundred pixels, so it bends several times per screen.
+                    // Three octaves, so it kinks at more than one scale.
+                    .warp          = {.frequency = 3.2f, .octaves = 3, .seed = 4425},
+                    .warpAmplitude = 64.0f,
 
                     // Two texels of flare where two layers meet. Enough to take the
                     // knife edge off a junction, small against the passages it joins.
@@ -1440,9 +1449,9 @@ int main(int argc, char **argv) {
                     // to a hall in others, rather than the parallel-sided pipe a
                     // single number gives. The girth field is stretched less than the
                     // halls themselves, so the width changes several times along one.
-                    .galleries = {.shape        = {.frequency = 0.7f, .octaves = 2, .aspect = 3.0f, .seed = 4412},
-                                  .width        = 30.0f,
-                                  .widthAtDepth = 38.0f,
+                    .galleries = {.shape        = {.frequency = 0.7f, .octaves = 3, .aspect = 3.0f, .seed = 4412},
+                                  .width        = 36.0f,
+                                  .widthAtDepth = 44.0f,
                                   .growthDepth  = 1400.0f,
                                   .girth        = {.frequency = 3.6f, .octaves = 2, .aspect = 2.0f, .seed = 4415},
                                   .swing        = 0.85f,
@@ -1459,9 +1468,9 @@ int main(int argc, char **argv) {
                     // next is a squeeze on hands and knees. That is the cheapest
                     // connectivity there is: measured, the same guarantee carried on
                     // the halls cost four times the rock.
-                    .crawlways = {.shape        = {.frequency = 1.4f, .octaves = 2, .aspect = 1.5f, .seed = 4413},
-                                  .width        = 22.0f,
-                                  .widthAtDepth = 28.0f,
+                    .crawlways = {.shape        = {.frequency = 1.4f, .octaves = 3, .aspect = 1.5f, .seed = 4413},
+                                  .width        = 26.0f,
+                                  .widthAtDepth = 32.0f,
                                   .growthDepth  = 1400.0f,
                                   .girth        = {.frequency = 5.0f, .octaves = 2, .aspect = 1.5f, .seed = 4416},
                                   .swing        = 0.80f,
@@ -1487,7 +1496,7 @@ int main(int argc, char **argv) {
                     // distance apart, and what the underground reads as then is not a
                     // cave system but a row of bars — the same fault as a corridor of
                     // constant width, stood on end.
-                    .shafts = {.shape        = {.frequency = 0.50f, .octaves = 3, .aspect = 0.40f, .seed = 4414},
+                    .shafts = {.shape        = {.frequency = 0.40f, .octaves = 3, .aspect = 0.40f, .seed = 4414},
                                .width        = 22.0f,
                                .widthAtDepth = 26.0f,
                                .growthDepth  = 1800.0f,
@@ -1929,10 +1938,11 @@ int main(int argc, char **argv) {
         // two knobs and a row of bare numbers is unreadable a day later.
         terrain::CaveSettings &c = tuned.caves;
 
-        const std::array<std::pair<const char *, float *>, 32> knobs = {{
+        const std::array<std::pair<const char *, float *>, 34> knobs = {{
             {"region", &c.regionCoverage},        {"shallow", &c.regionCoverageShallow},
             {"deepens", &c.regionDeepens},         {"fade", &c.regionFade},
             {"blend", &c.blend},                  {"crust", &c.crust},
+            {"warp", &c.warpAmplitude},           {"warpfreq", &c.warp.frequency},
             {"gwidth", &c.galleries.width},       {"gdeep", &c.galleries.widthAtDepth},
             {"gpinch", &c.galleries.pinch},       {"gswing", &c.galleries.swing},
             {"gfloor", &c.galleries.floor},       {"gfreq", &c.galleries.shape.frequency},

@@ -643,10 +643,24 @@ struct LayerSettings {
     float slopeSpan  = 36.0f;
 
     // Drop across the trunk's own footing, in pixels, past which there is
-    // nothing to stand on. This is the test that keeps a tree off the mouth of a
+    // nothing to stand on. This is the test that keeps a tree off the *edge* of a
     // shaft: a column open into a cave is not a steep slope, it is a hole, and
     // the slope test above averages straight over it.
     float dropLimit = 44.0f;
+
+    // How far below the land's own surface a plant may take root, in pixels.
+    //
+    // The test above catches the edge of a hole and not its floor. Where an
+    // entrance is wide, the ground the sky finds is a ledge well down inside the
+    // shaft — level, with level ground either side of it, so every footing test
+    // passes and a tree grows halfway down a cliff with its roots in the air over
+    // a cave. Nothing about the local shape says anything is wrong; the only way
+    // to know is to compare against where the land's surface actually is.
+    //
+    // Generous rather than tight, because the ground the scan reports is up to a
+    // lattice step off and the surface is terraced into risers besides. What it
+    // has to exclude is a cave mouth, and a cave mouth is far deeper than this.
+    float rootLimit = 40.0f;
 };
 
 // How much of the world is wooded, and how the woods are arranged.
@@ -747,13 +761,29 @@ void Calibrate(Settings &settings);
 // blink out of existence because somebody put a hole near it.
 struct Ground {
     const float *top = nullptr;
-    int count        = 0;
-    float originX    = 0.0f;
-    float spacing    = 1.0f;
+
+    // How far each column's top lies below the land's own surface, in pixels.
+    //
+    // Zero over ordinary ground, and a long way from it down the inside of a cave
+    // mouth — which is the one thing `top` alone cannot say, since a ledge in a
+    // shaft is indistinguishable from a ledge on a hill by any local measurement.
+    // See LayerRules::rootLimit.
+    //
+    // Optional: a null pointer reads as zero everywhere, which is the right
+    // answer for a caller that has no caves to worry about.
+    const float *sunk = nullptr;
+
+    int count     = 0;
+    float originX = 0.0f;
+    float spacing = 1.0f;
 };
 
 // Surface at a world position, from the nearest column prepared.
 float GroundAt(const Ground &ground, float worldX);
+
+// How far the ground at a position lies below the land's own surface. See
+// Ground::sunk.
+float SunkAt(const Ground &ground, float worldX);
 
 // One plant the world grows, before anything that has happened to it.
 struct Plant {

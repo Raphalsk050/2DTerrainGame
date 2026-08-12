@@ -159,6 +159,17 @@ float GroundAt(const Ground &ground, float worldX) {
     return ground.top[std::clamp(column, 0, ground.count - 1)];
 }
 
+float SunkAt(const Ground &ground, float worldX) {
+    if (ground.sunk == nullptr || ground.count <= 0) return 0.0f;
+
+    // The same nearest-column rule GroundAt uses, since the two are read together
+    // and an answer taken from a different column than the height would be about
+    // somewhere else.
+    const auto column = static_cast<int>(std::lround((worldX - ground.originX) / std::max(ground.spacing, 1e-3f)));
+
+    return ground.sunk[std::clamp(column, 0, ground.count - 1)];
+}
+
 std::int64_t CellAt(Layer layer, const Settings &settings, float worldX) {
     return FloorDiv(worldX, settings.layer[LayerIndex(layer)].cellSpan);
 }
@@ -268,6 +279,11 @@ bool Grow(Layer layer, std::int64_t cell, const Settings &settings, const terrai
     if (std::max({surface, leftFoot, rightFoot}) - std::min({surface, leftFoot, rightFoot}) > rules.dropLimit) {
         return false;
     }
+
+    // And not down a hole, which the footing test cannot see. It compares the
+    // ground against itself, so a level ledge inside a cave mouth passes it three
+    // times over; only the distance to the land's own surface tells them apart.
+    if (SunkAt(ground, x) > rules.rootLimit) return false;
 
     // Then the lie of the land, which thins a wood out on a hillside rather than
     // ending it. Measured over a wide baseline on purpose: the surface is
