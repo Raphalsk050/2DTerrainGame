@@ -4,6 +4,8 @@
 #include "grid.h"
 #include "light.h"
 #include "raylib.h"
+#include "sod.h"
+#include "soil.h"
 #include "terrain.h"
 #include "water.h"
 #include "weather.h"
@@ -248,6 +250,23 @@ public:
     // volume can be checked from outside the simulation.
     float TotalWater(Rectangle region) const;
 
+    // The grass over the ground now in play, for whatever stands on it.
+    //
+    // Filled once a frame by Update. Both the band drawn into the terrain and the
+    // tufts standing on it read from this, which is what stops the two from
+    // disagreeing about where the grass is or how tall it has grown.
+    sod::Blades Grass() const;
+
+    // Cuts whatever grass a blow reaches, and reports how many tufts came down.
+    //
+    // Called only on the frame a swing begins. Player::AttackHitbox stays live for
+    // the whole strike window, so a caller reading that instead cuts the same
+    // tuft nine times and hands out nine times the fibre.
+    int MowGrass(Rectangle hitbox, float now);
+
+    // How many tufts the world can no longer describe on its own.
+    int MownTufts() const { return static_cast<int>(mown_.size()); }
+
     // Split so that liquids can be collected into their own layer and
     // composited in a single blend.
     void DrawTerrain(Rectangle view) const;
@@ -449,10 +468,80 @@ private:
     // makes it cheap enough to walk a whole chunk with.
     bool SolidVertex(const Chunk &chunk, int i, int j) const;
 
+    // World Y of the first solid met falling down a column, or false where the
+    // column holds nothing at all within reach.
+    //
+    // Not SurfaceProfile, and the difference matters here. That one only ever
+    // raises the surface — a column dug out below the skyline still answers with
+    // the skyline, deliberately, because it is also asked about columns whose
+    // chunks are not resident and the noise is the only thing that can answer
+    // those. Grass has to follow the hole the player dug, so it pays for the walk.
+    bool SurfaceOf(float worldX, float &outTop) const;
+
+    // The whole ground at a world position, as the distance past its own
+    // threshold: positive inside anything a body cannot walk through, negative in
+    // open space.
+    //
+    // The union across materials rather than any one of them, because what buries
+    // a sod is anything at all standing on it.
+    float GroundValueAt(Vector2 world) const;
+
+    // Works out the grass over a span of columns and points sodRamp_/sodCover_ at
+    // it. Called once a frame, before anything reads either.
+    void ReadSod(Rectangle view);
+
+    // The field the grass is drawn from, derived from a chunk's own soil and from
+    // the silhouette of the ground as a whole.
+    //
+    // Positive where there is grass, and by how much: inside the soil, within
+    // sod::kSodDepth of a face, on the side of that face that looks at the sky,
+    // and as much of it as has grown back. A field rather than a test, so that the
+    // same rasteriser draws it and it therefore lands on exactly the contour the
+    // ground did — no alignment to get right, because there is no second answer to
+    // align with.
+    Grid SodField(const Chunk &chunk) const;
+
     terrain::Settings settings_;
     int spacing_;
 
     std::array<float, kElementCount> spawnCutoff_{};
+
+    // How each material colours one of its own texels.
+    //
+    // Built once, here, rather than per chunk per frame: what a painter carries is
+    // the seven-step ramp its four authored tones expand into, and interpolating
+    // that a hundred times a frame to get the same seven colours would be work
+    // done to arrive back where it started.
+    std::array<soil::Paint, kElementCount> paint_{};
+
+    // The grass over the ground now in play, one entry per lattice column.
+    //
+    // Kept rather than asked for per texel because what decides the colour — the
+    // climate, the turn of the year, how much rain the ground has had — varies
+    // over thousands of pixels and the texels being drawn are five apart. Asking
+    // per texel would be sampling the surface's eight octaves a few hundred times
+    // a frame to be told the same answer.
+    //
+    // Filled by ReadSod once a frame. Both the band the terrain draws and the
+    // tufts standing on it read from this, which is what keeps the two from
+    // disagreeing about where the grass is.
+    std::vector<soil::Ramp> sodRamp_;
+    std::vector<float> sodCover_;
+    std::vector<float> sodTop_;
+    std::vector<float> sodPush_;
+    int sodFirstColumn_ = 0;
+
+    // What is left of each tuft after a blow, on the tufts' own grid.
+    std::vector<float> sodStanding_;
+    std::int64_t sodFirstCell_ = 0;
+
+    // The tufts the player has cut, and when.
+    //
+    // Sparse, and it gives entries back: a tuft nobody has swung at has no record
+    // at all, and one that has grown again has nothing left to say and is
+    // dropped. So unlike edits_, which only ever grows, this tracks what is
+    // outstanding rather than everything that has ever happened.
+    std::unordered_map<std::int64_t, float> mown_;
 
     // Occupying materials in ascending order of precedence. A chunk is carved
     // in this order so that when a material is clamped, everything that

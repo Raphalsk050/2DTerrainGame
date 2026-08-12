@@ -64,6 +64,8 @@ add_executable(${PROJECT_NAME}
     src/player.cpp
     src/water.cpp
     src/weather.cpp
+    src/soil.cpp
+    src/sod.cpp
     src/world.cpp
     src/terrain.cpp
 )

@@ -331,6 +331,52 @@ struct ElementLight {
     float strength = 0.0f;
 };
 
+// How many tones a material is authored from, and how many it is drawn from.
+//
+// Four to write and seven to draw, which is the arrangement the canopy arrived at
+// for leaves and for the same two reasons. Four is as many as can be judged
+// against each other by eye in a table; seven is as few as a surface can carry a
+// lit crest, a body and a shaded belly on without the steps between them reading
+// as bands.
+inline constexpr std::size_t kElementTones = 4;
+inline constexpr int kElementRamp          = 7;
+
+// How a material is painted.
+//
+// The same separation the plants are drawn with: the tones and the form are one
+// job, the texture is another, and they work at different scales. What is
+// authored here is never the hour — the light multiply over the whole frame is
+// what says what time of day it is, and a tone that had the sun baked into it
+// would fight it.
+struct ElementPaint {
+    // Darkest first.
+    Color tone[kElementTones];
+
+    // The per-texel stipple, in tone steps.
+    //
+    // Under one on purpose, and this is the rule that decides whether the result
+    // reads as drawn or as noisy: the texture's job is to break the boundary
+    // between two tones the way a pixel artist breaks it by hand, not to decide
+    // which tone a region is. At one it starts making that decision, and past it
+    // the whole surface is static.
+    float grain = 0.55f;
+
+    // The slow drift, in tone steps, over a few hundred pixels.
+    //
+    // What stops a wall of one material being one colour. Free to be more than a
+    // step, because unlike the grain it varies at the scale of the shape rather
+    // than of the texel, so what it produces is a lighter patch of rock and not
+    // a speckle.
+    float patch = 0.9f;
+
+    // Bedding, in tone steps: the same drift again, stretched flat.
+    //
+    // Rock is laid down in layers and reads wrongly without them — the patch term
+    // alone gives clouds inside the stone. Zero for anything with no bedding to
+    // show, which is most things that are not stone.
+    float strata = 0.0f;
+};
+
 struct ElementDef {
     const char *name;
 
@@ -338,7 +384,7 @@ struct ElementDef {
     // every rule above alike.
     float threshold;
 
-    Color fill; // Zero alpha leaves the material unfilled.
+    ElementPaint paint;
     Color contour;
 
     ElementRules rules;
@@ -357,7 +403,13 @@ inline constexpr ElementDef kElements[] = {
         // describes.
         .threshold = terrain::kSurfaceLevel,
 
-        .fill    = {105, 115, 130, 255},
+        .paint   = {.tone   = {{62, 70, 84, 255}, {84, 93, 108, 255}, {105, 115, 130, 255}, {132, 143, 158, 255}},
+
+                    .grain  = 0.55f,
+
+                    .patch  = 1.00f,
+
+                    .strata = 1.15f},
         .contour = {0, 82, 172, 255},
         .rules   = {.blocksBodies = true, .blocksLiquid = true, .occupies = true, .precedence = 0},
         .spawn   = {.generator = Generator::Terrain},
@@ -379,7 +431,13 @@ inline constexpr ElementDef kElements[] = {
         // seam a fraction of a cell wide between them.
         .threshold = terrain::kSurfaceLevel,
 
-        .fill    = {122, 88, 56, 255},
+        .paint   = {.tone   = {{68, 48, 30, 255}, {95, 68, 42, 255}, {122, 88, 56, 255}, {154, 115, 76, 255}},
+
+                    .grain  = 0.72f,
+
+                    .patch  = 0.95f,
+
+                    .strata = 0.40f},
         .contour = {74, 52, 30, 255},
         .rules   = {.blocksBodies = true, .blocksLiquid = true, .occupies = true, .precedence = 7},
         .spawn =
@@ -407,7 +465,10 @@ inline constexpr ElementDef kElements[] = {
     {
         .name      = "sand",
         .threshold = terrain::kSurfaceLevel,
-        .fill      = {214, 192, 134, 255},
+        .paint   = {.tone   = {{148, 128, 84, 255}, {181, 160, 108, 255}, {214, 192, 134, 255}, {240, 224, 178, 255}},
+                    .grain  = 0.50f,
+                    .patch  = 0.70f,
+                    .strata = 0.60f},
         .contour   = {166, 144, 92, 255},
         .rules     = {.blocksBodies = true, .blocksLiquid = true, .occupies = true, .precedence = 8},
         .spawn =
@@ -437,7 +498,10 @@ inline constexpr ElementDef kElements[] = {
     {
         .name      = "snow",
         .threshold = terrain::kSurfaceLevel,
-        .fill      = {234, 239, 248, 255},
+        .paint   = {.tone   = {{168, 182, 205, 255}, {201, 213, 231, 255}, {234, 239, 248, 255}, {252, 254, 255, 255}},
+                    .grain  = 0.34f,
+                    .patch  = 0.55f,
+                    .strata = 0.00f},
         .contour   = {182, 196, 216, 255},
         .rules     = {.blocksBodies = true, .blocksLiquid = true, .occupies = true, .precedence = 9},
         .spawn =
@@ -477,7 +541,10 @@ inline constexpr ElementDef kElements[] = {
     {
         .name      = "torch",
         .threshold = 0.45f,
-        .fill      = {255, 216, 150, 255},
+        .paint   = {.tone   = {{196, 128, 44, 255}, {226, 170, 92, 255}, {255, 216, 150, 255}, {255, 242, 210, 255}},
+                    .grain  = 0.30f,
+                    .patch  = 0.30f,
+                    .strata = 0.00f},
         .contour   = {196, 128, 44, 255},
 
         // Claims its vertex, so it replaces what it is put on and can be mined
@@ -508,7 +575,10 @@ inline constexpr ElementDef kElements[] = {
     {
         .name      = "coal",
         .threshold = 0.45f,
-        .fill      = {58, 58, 66, 255},
+        .paint   = {.tone   = {{24, 24, 30, 255}, {40, 40, 48, 255}, {58, 58, 66, 255}, {82, 82, 92, 255}},
+                    .grain  = 0.62f,
+                    .patch  = 0.75f,
+                    .strata = 0.45f},
         .contour   = {26, 26, 32, 255},
         .rules     = {.blocksBodies = true, .blocksLiquid = true, .occupies = true, .precedence = 1},
         .spawn =
@@ -530,7 +600,10 @@ inline constexpr ElementDef kElements[] = {
     {
         .name      = "copper",
         .threshold = 0.45f,
-        .fill      = {196, 110, 74, 255},
+        .paint   = {.tone   = {{116, 56, 34, 255}, {155, 82, 53, 255}, {196, 110, 74, 255}, {228, 150, 112, 255}},
+                    .grain  = 0.62f,
+                    .patch  = 0.75f,
+                    .strata = 0.45f},
         .contour   = {132, 66, 40, 255},
         .rules     = {.blocksBodies = true, .blocksLiquid = true, .occupies = true, .precedence = 2},
         .spawn =
@@ -550,7 +623,10 @@ inline constexpr ElementDef kElements[] = {
     {
         .name      = "iron",
         .threshold = 0.45f,
-        .fill      = {150, 143, 134, 255},
+        .paint   = {.tone   = {{86, 80, 74, 255}, {117, 111, 103, 255}, {150, 143, 134, 255}, {186, 180, 172, 255}},
+                    .grain  = 0.62f,
+                    .patch  = 0.75f,
+                    .strata = 0.45f},
         .contour   = {92, 86, 79, 255},
         .rules     = {.blocksBodies = true, .blocksLiquid = true, .occupies = true, .precedence = 3},
         .spawn =
@@ -570,7 +646,10 @@ inline constexpr ElementDef kElements[] = {
     {
         .name      = "gold",
         .threshold = 0.45f,
-        .fill      = {222, 183, 64, 255},
+        .paint   = {.tone   = {{136, 104, 24, 255}, {179, 143, 43, 255}, {222, 183, 64, 255}, {248, 218, 122, 255}},
+                    .grain  = 0.62f,
+                    .patch  = 0.75f,
+                    .strata = 0.45f},
         .contour   = {148, 114, 20, 255},
         .rules     = {.blocksBodies = true, .blocksLiquid = true, .occupies = true, .precedence = 4},
         .spawn =
@@ -590,7 +669,10 @@ inline constexpr ElementDef kElements[] = {
     {
         .name      = "diamond",
         .threshold = 0.45f,
-        .fill      = {104, 224, 226, 255},
+        .paint   = {.tone   = {{38, 144, 152, 255}, {70, 184, 189, 255}, {104, 224, 226, 255}, {170, 245, 246, 255}},
+                    .grain  = 0.62f,
+                    .patch  = 0.75f,
+                    .strata = 0.45f},
         .contour   = {40, 146, 154, 255},
         .rules     = {.blocksBodies = true, .blocksLiquid = true, .occupies = true, .precedence = 5},
         .spawn =
@@ -613,7 +695,10 @@ inline constexpr ElementDef kElements[] = {
     {
         .name      = "emerald",
         .threshold = 0.45f,
-        .fill      = {72, 206, 118, 255},
+        .paint   = {.tone   = {{24, 122, 60, 255}, {47, 163, 88, 255}, {72, 206, 118, 255}, {134, 233, 166, 255}},
+                    .grain  = 0.62f,
+                    .patch  = 0.75f,
+                    .strata = 0.45f},
         .contour   = {26, 124, 62, 255},
         .rules     = {.blocksBodies = true, .blocksLiquid = true, .occupies = true, .precedence = 6},
         .spawn =
@@ -644,7 +729,13 @@ inline constexpr ElementDef kElements[] = {
         // running water breaks into disconnected pieces or vanishes.
         .threshold = 0.15f,
 
-        .fill    = {102, 191, 255, 255},
+        .paint   = {.tone   = {{48, 122, 190, 255}, {74, 156, 223, 255}, {102, 191, 255, 255}, {160, 218, 255, 255}},
+
+                    .grain  = 0.35f,
+
+                    .patch  = 0.70f,
+
+                    .strata = 0.00f},
         .contour = {56, 152, 236, 255},
         .rules   = {.flows = true, .buoyancy = 1.0f},
         .spawn =
@@ -811,4 +902,16 @@ inline float CoverThickness(const ElementSpawn &spawn, float worldX, float tempe
 
 inline constexpr const ElementDef &StyleOf(Element element) {
     return Def(element);
+}
+
+// The one colour to stand for a material where only one will fit.
+//
+// The body tone of its ramp, opaque. Wanted by the polygon path, which fills a
+// region rather than walking texels and so has nowhere to put a texture, and by
+// anything that has to name the material outside the world — a swatch on the
+// bar, a marker on an overlay.
+inline constexpr Color Body(const ElementDef &def) {
+    const Color tone = def.paint.tone[kElementTones / 2];
+
+    return {tone.r, tone.g, tone.b, 255};
 }

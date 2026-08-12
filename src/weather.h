@@ -210,7 +210,7 @@ struct Atmosphere {
 struct Stars {
     // Pixels of screen between one star and the next, roughly. Smaller is a denser
     // sky; below about forty they stop reading as points and start reading as noise.
-    float spacing = 70.0f;
+    float spacing = 90.0f;
 
     // How big one is, in world pixels.
     //
@@ -265,7 +265,7 @@ struct Stars {
     // star left shining on the rim of a cloud is the one place the eye goes. And an
     // edge is where a cloud is thinnest, so something dimming as it passes behind
     // one is what it should do anyway.
-    float cloudEdge = 0.09f;
+    float cloudEdge = 0.12f;
 
     // How much brighter the brightest star is than the faintest.
     //

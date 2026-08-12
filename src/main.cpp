@@ -6,6 +6,8 @@
 #include "light_layer.h"
 #include "liquid_layer.h"
 #include "player.h"
+#include "sod.h"
+#include "soil.h"
 #include "raylib.h"
 #include "terrain.h"
 #include "weather.h"
@@ -16,6 +18,7 @@
 #include <array>
 #include <cstdio>
 #include <cstdlib>
+#include <vector>
 
 namespace {
 
@@ -163,7 +166,14 @@ void DrawBrushMode(const Editor &editor) {
 // Drawn unlit, for the same reason F6 exists — what a material's own colour is
 // doing and what the light is doing to it are two questions, and answering them
 // together is how a palette gets tuned against a time of day.
-void DrawProbe(World &world, Rectangle strip, const char *path) {
+void DrawProbe(World &world, Grove &grove, Harvest &gathered, Rectangle strip, const char *path, int zoom,
+               float seconds) {
+    // Run the clock on before drawing, so a still picture can be taken of a world
+    // that has been blowing for a while. The sway and the gust are both pure
+    // functions of this clock, so two probes a second apart are two frames of the
+    // same wind rather than two unrelated pictures.
+    for (float t = 0.0f; t < seconds; t += 1.0f / 60.0f) world.StepWeather(1.0f / 60.0f);
+
     world.Update(strip);
 
     RenderTexture2D canvas = LoadRenderTexture(static_cast<int>(strip.width), static_cast<int>(strip.height));
@@ -179,8 +189,17 @@ void DrawProbe(World &world, Rectangle strip, const char *path) {
     // something rather than against black.
     ClearBackground({92, 132, 176, 255});
 
+    // The plants too, and in the order the frame draws them, because half the
+    // things worth checking here are about whether two of these agree with each
+    // other about where the ground is.
+    grove.Update(world, strip, {strip.x, strip.y}, world.Sky().Time(), 1.0f / 60.0f, gathered);
+
+    const auto season = static_cast<flora::Season>(world.Sky().Turn().index);
+
     BeginMode2D(camera);
     world.DrawTerrain(strip);
+    sod::DrawTufts(world.Grass(), strip, world.Sky().Time(), world.Settings().seed);
+    grove.Draw(world.Sky(), season, world.Sky().Time());
     world.DrawLiquids(strip);
     EndMode2D();
 
@@ -191,6 +210,11 @@ void DrawProbe(World &world, Rectangle strip, const char *path) {
     // A render texture is filled bottom row first, so what comes back off it is
     // upside down.
     ImageFlipVertical(&image);
+
+    // Nearest neighbour, because the whole subject is where one texel ends and
+    // the next begins. Anything that filters would answer a question about the
+    // tones by inventing colours that are not in the ramp.
+    if (zoom > 1) ImageResizeNN(&image, image.width * zoom, image.height * zoom);
 
     ExportImage(image, path);
 
@@ -273,6 +297,118 @@ void ReportCovers(const terrain::Settings &settings, float fromX, float toX, flo
     }
 }
 
+// How each material's paint divides itself, measured rather than argued.
+//
+// Three numbers per material, all in ramp steps, and each one answers a rule the
+// art has to obey:
+//
+//  - `form` is how far apart a lit top face and a shaded underside come out. This
+//    is the term that has to carry the picture, and it is the only one allowed to
+//    move a texel more than a step.
+//  - `stipple` is how far apart two neighbouring texels come out *inside* the
+//    material, where there is no face and the texture is all there is. The rule
+//    is that this stays under one step: a stipple breaks the boundary between two
+//    tones, and past a step it stops breaking a boundary and starts drawing one.
+//  - `jumps` is the share of neighbouring pairs that land two whole tones apart,
+//    which is what the eye reads as static rather than as texture. It is the
+//    number that caught the first setting here: grain was authored at 0.72 steps,
+//    which is under a step and looked reasonable in the table, but two neighbours
+//    at opposite ends of it are 1.44 apart and a fifth of them crossed two tones.
+void ReportTones() {
+    constexpr int kAcross = 200;
+    constexpr int kDown   = 60;
+
+    std::printf("%-8s %7s %8s %8s %7s %7s\n", "", "form", "across", "down", "jump-x", "jump-y");
+
+    for (const ElementDef &def : kElements) {
+        const soil::Paint paint = soil::For(def, 0);
+
+        // A face at its most extreme either way: the top of a ledge and the belly
+        // of an overhang, both hard against the surface.
+        const marching_squares::Texel top{{0.0f, 0.0f}, 0.0f, {0.0f, -1.0f}};
+        const marching_squares::Texel under{{0.0f, 0.0f}, 0.0f, {0.0f, 1.0f}};
+
+        const float form = (soil::Shading(paint, top).form - soil::Shading(paint, under).form) / soil::kStep;
+
+        // Then the inside, where the form is nothing and the texture is the whole
+        // of what is drawn. Sampled on the terrain's own texel grid, because that
+        // is the grid the grain is quantised to and any other spacing would
+        // measure a different picture from the one drawn.
+        //
+        // Both axes, and that is not symmetry for its own sake: the bedding term
+        // is stretched flat by kStrataAspect, so it barely changes along a row and
+        // changes fast down a column. Measured across only, it does not appear at
+        // all — which is exactly the reading that would let a material be authored
+        // into horizontal stripes and pass.
+        std::vector<float> lit(static_cast<std::size_t>(kAcross) * kDown);
+
+        for (int j = 0; j < kDown; j++) {
+            for (int i = 0; i < kAcross; i++) {
+                const Vector2 at = {static_cast<float>(i) * config::kPixelSize,
+                                    static_cast<float>(j) * config::kPixelSize};
+
+                lit[static_cast<std::size_t>(j) * kAcross + i] =
+                    soil::Shading(paint, {at, kUnboundedDepth, {0.0f, -1.0f}}).Lit();
+            }
+        }
+
+        double apart[2] = {0.0, 0.0};
+        int pairs[2]    = {0, 0};
+        int jumps[2]    = {0, 0};
+
+        const auto compare = [&](float a, float b, int axis) {
+            apart[axis] += std::fabs(a - b) / soil::kStep;
+            pairs[axis]++;
+
+            if (std::abs(static_cast<int>(a * kElementRamp) - static_cast<int>(b * kElementRamp)) >= 2) jumps[axis]++;
+        };
+
+        for (int j = 0; j < kDown; j++) {
+            for (int i = 0; i < kAcross; i++) {
+                const float here = lit[static_cast<std::size_t>(j) * kAcross + i];
+
+                if (i > 0) compare(here, lit[static_cast<std::size_t>(j) * kAcross + i - 1], 0);
+                if (j > 0) compare(here, lit[static_cast<std::size_t>(j - 1) * kAcross + i], 1);
+            }
+        }
+
+        std::printf("%-8s %7.2f %8.2f %8.2f %6.1f%% %6.1f%%\n", def.name, form, apart[0] / std::max(pairs[0], 1),
+                    apart[1] / std::max(pairs[1], 1), 100.0 * jumps[0] / std::max(pairs[0], 1),
+                    100.0 * jumps[1] / std::max(pairs[1], 1));
+    }
+}
+
+// Every material's field down one column, against the surface it is placed
+// relative to.
+//
+// The question this answers is the one that cannot be answered by looking: two
+// materials whose contours should meet on the same line, and a picture in which
+// they plainly do not. A drawn edge is the field interpolated, thresholded and
+// quantised onto texels, and any of those three can be where the discrepancy
+// entered — so the field itself has to be readable on its own.
+void ReportColumn(const World &world, const terrain::Settings &settings, float worldX, float fromY, float toY) {
+    std::printf("x %.0f   surface y %.1f\n\n", worldX, terrain::Height(worldX, settings));
+
+    std::printf("%8s %8s", "y", "depth");
+    for (const ElementDef &def : kElements) std::printf(" %8s", def.name);
+    std::printf("\n");
+
+    for (float y = fromY; y <= toY; y += static_cast<float>(config::kResolution)) {
+        std::printf("%8.0f %8.1f", y, terrain::Depth({worldX, y}, settings));
+
+        for (std::size_t e = 0; e < kElementCount; e++) {
+            const float value = world.ValueAt(static_cast<Element>(e), {worldX, y});
+
+            // Printed as the distance from its own threshold, since that is what
+            // decides whether the material is there and what the contour
+            // interpolates through. Zero is the edge.
+            std::printf(" %8.3f", value - kElements[e].threshold);
+        }
+
+        std::printf("\n");
+    }
+}
+
 void Draw(const World &world, const Grove &grove, const Harvest &gathered, const Player &player,
           const Hotbar &hotbar, const Editor &editor, const LiquidLayer &liquids, const LightLayer &lights,
           const Camera2D &camera, const debug_view::Toggles &debug, float lantern, const char *notice,
@@ -293,6 +429,14 @@ void Draw(const World &world, const Grove &grove, const Harvest &gathered, const
     world.Sky().DrawClouds(view, world.Spacing());
 
     world.DrawTerrain(view);
+
+    // The tufts on top of the band the terrain drew, and under everything that
+    // stands in them: a trunk belongs in front of the grass around its own foot,
+    // which is the reason the ferns are drawn before the trees as well.
+    //
+    // On the weather clock, so the sway runs with the wind that drives it and
+    // both speed up together under F7.
+    sod::DrawTufts(world.Grass(), view, world.Sky().Time(), world.Settings().seed);
 
     // The plants over the ground and behind the character, and on this side of
     // the light multiply: a tree is lit by the same daylight as the ground it
@@ -474,9 +618,17 @@ int main(int argc, char **argv) {
     // See ReportCovers.
     const bool counting = argc >= 5 && TextIsEqual(argv[1], "--covers");
 
+    // `--tones` reports how each material's paint divides between form and
+    // texture. See ReportTones.
+    const bool weighing = argc >= 2 && TextIsEqual(argv[1], "--tones");
+
+    // `--column x y0 y1` prints every material's field down one column. See
+    // ReportColumn.
+    const bool reading = argc >= 5 && TextIsEqual(argv[1], "--column");
+
     // Resizable, with a floor under it: below the minimum the hotbar is wider than
     // the frame and the head-up display runs off the side of it.
-    SetConfigFlags((probing || counting) ? FLAG_WINDOW_HIDDEN : FLAG_WINDOW_RESIZABLE);
+    SetConfigFlags((probing || counting || weighing || reading) ? FLAG_WINDOW_HIDDEN : FLAG_WINDOW_RESIZABLE);
 
     InitWindow(config::kScreenWidth, config::kScreenHeight, "marching squares");
     SetWindowMinSize(config::kMinScreenWidth, config::kMinScreenHeight);
@@ -913,7 +1065,29 @@ int main(int argc, char **argv) {
         const Rectangle strip = {static_cast<float>(std::atof(argv[2])), static_cast<float>(std::atof(argv[3])),
                                  static_cast<float>(std::atof(argv[4])), static_cast<float>(std::atof(argv[5]))};
 
-        DrawProbe(world, strip, argv[6]);
+        Harvest probed{};
+
+        DrawProbe(world, grove, probed, strip, argv[6], (argc >= 8) ? std::atoi(argv[7]) : 1,
+                  (argc >= 9) ? static_cast<float>(std::atof(argv[8])) : 0.0f);
+
+        CloseWindow();
+        return 0;
+    }
+
+    if (reading) {
+        const float x  = static_cast<float>(std::atof(argv[2]));
+        const float y0 = static_cast<float>(std::atof(argv[3]));
+        const float y1 = static_cast<float>(std::atof(argv[4]));
+
+        world.Update({x - 128.0f, y0 - 128.0f, 256.0f, y1 - y0 + 256.0f});
+        ReportColumn(world, settings, x, y0, y1);
+
+        CloseWindow();
+        return 0;
+    }
+
+    if (weighing) {
+        ReportTones();
 
         CloseWindow();
         return 0;
@@ -1025,6 +1199,22 @@ int main(int argc, char **argv) {
         // window, so reading that instead lands nine blows per swing.
         if (player.AttackStarted()) {
             grove.Strike(player.AttackHitbox(), 1.0f, player.Centre(), world.Sky().Time());
+
+            // And whatever grass the same swing went through. A tuft gives up
+            // fibre where a tree gives up wood, into the same pile on the ground.
+            const Rectangle swing = player.AttackHitbox();
+
+            const int mown = world.MowGrass(swing, world.Sky().Time());
+
+            if (mown > 0) {
+                const Vector2 from = {swing.x + swing.width * 0.5f, swing.y + swing.height * 0.5f};
+
+                // Thrown away from the player rather than towards them, which is
+                // the side the blow came from and the way the wood already goes.
+                const float away = (from.x < player.Centre().x) ? -1.0f : 1.0f;
+
+                grove.Fallen().Spawn(Item::Fibre, mown, from, away, world.Sky().Time());
+            }
         }
 
         // A sapling goes in where the player is standing, and the species is the

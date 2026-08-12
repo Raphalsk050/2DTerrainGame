@@ -144,11 +144,6 @@ void DrawFilled(const Grid &grid, float threshold, Color color) {
     }
 }
 
-namespace {
-
-// The field at any world position, interpolated between the four samples around
-// it. Clamped at the border, so a square asking about its neighbour just past
-// the last sample is answered from the edge rather than from nothing.
 float SampleAt(const Grid &grid, Vector2 world) {
     if (grid.Cols() < 2 || grid.Rows() < 2) return 0.0f;
 
@@ -165,91 +160,6 @@ float SampleAt(const Grid &grid, Vector2 world) {
 
     return grid.ValueAt(i, j) * (1.0f - fx) * (1.0f - fy) + grid.ValueAt(i + 1, j) * fx * (1.0f - fy) +
            grid.ValueAt(i, j + 1) * (1.0f - fx) * fy + grid.ValueAt(i + 1, j + 1) * fx * fy;
-}
-
-// What one square is: empty, inside, or inside with a neighbour outside.
-enum class Square { Empty, Fill, Edge };
-
-} // namespace
-
-void DrawPixelated(const Grid &grid, float threshold, Color fill, Color outline, float pixel) {
-    if (pixel <= 0.0f || (fill.a == 0 && outline.a == 0)) return;
-
-    const float step   = static_cast<float>(grid.Spacing());
-    const bool outlined = outline.a > 0;
-
-    for (int i = 0; i < grid.Cols() - 1; i++) {
-        for (int j = 0; j < grid.Rows() - 1; j++) {
-            const float a = grid.ValueAt(i, j);
-            const float b = grid.ValueAt(i + 1, j);
-            const float c = grid.ValueAt(i, j + 1);
-            const float d = grid.ValueAt(i + 1, j + 1);
-
-            const int corners =
-                (a > threshold) + (b > threshold) + (c > threshold) + (d > threshold);
-
-            if (corners == 0) continue;
-
-            const Vector2 at = grid.PointAt(i, j);
-
-            // A cell the contour does not pass through is one rectangle, and
-            // most cells are of that kind. Only the ones it does pass through
-            // are worth taking apart a square at a time, which is what keeps
-            // this the cost of the outline rather than of the area.
-            if (corners == 4) {
-                if (fill.a > 0) DrawRectangleV(at, {step, step}, fill);
-                continue;
-            }
-
-            // Squares whose centre falls in this cell. Anchoring to the world
-            // rather than to the cell is what stops the grid from shifting by a
-            // fraction of a square at every cell border.
-            const int m0 = static_cast<int>(std::floor(at.x / pixel));
-            const int m1 = static_cast<int>(std::ceil((at.x + step) / pixel));
-            const int n0 = static_cast<int>(std::floor(at.y / pixel));
-            const int n1 = static_cast<int>(std::ceil((at.y + step) / pixel));
-
-            for (int n = n0; n <= n1; n++) {
-                const float y = (static_cast<float>(n) + 0.5f) * pixel;
-                if (y < at.y || y >= at.y + step) continue;
-
-                // Squares of a kind are drawn as one rectangle rather than one
-                // each. A run costs the same as a single square to submit, and
-                // a filled row of a cell is one call instead of a dozen.
-                Square run = Square::Empty;
-                int from   = m0;
-
-                for (int m = m0; m <= m1 + 1; m++) {
-                    const float x = (static_cast<float>(m) + 0.5f) * pixel;
-
-                    Square square = Square::Empty;
-
-                    if (m <= m1 && x >= at.x && x < at.x + step && SampleAt(grid, {x, y}) > threshold) {
-                        const bool exposed = outlined && (SampleAt(grid, {x - pixel, y}) <= threshold ||
-                                                          SampleAt(grid, {x + pixel, y}) <= threshold ||
-                                                          SampleAt(grid, {x, y - pixel}) <= threshold ||
-                                                          SampleAt(grid, {x, y + pixel}) <= threshold);
-
-                        square = exposed ? Square::Edge : Square::Fill;
-                    }
-
-                    if (square == run) continue;
-
-                    if (run != Square::Empty) {
-                        const Color color = (run == Square::Edge) ? outline : fill;
-
-                        if (color.a > 0) {
-                            DrawRectangleV({static_cast<float>(from) * pixel, static_cast<float>(n) * pixel},
-                                           {static_cast<float>(m - from) * pixel, pixel}, color);
-                        }
-                    }
-
-                    run  = square;
-                    from = m;
-                }
-            }
-        }
-    }
 }
 
 void DrawVertices(const Grid &grid, float threshold, float size, Color filledColor, Color emptyColor) {

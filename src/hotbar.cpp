@@ -89,7 +89,7 @@ void Hotbar::Draw(const std::array<int, kElementCount> &collected) const {
         // Backed with the world's background colour first, so a translucent
         // element shows the same shade here as it does out in the world.
         DrawRectangleRec(swatch, RAYWHITE);
-        DrawRectangleRec(swatch, (style.fill.a > 0) ? style.fill : style.contour);
+        DrawRectangleRec(swatch, Body(style));
         DrawRectangleLinesEx(swatch, 1.0f, style.contour);
 
         // The key that selects it, not its position in the row. The last slots

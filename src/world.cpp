@@ -36,6 +36,19 @@ constexpr int kDropMargin = 12;
 // leaves the free surface everywhere else to the material itself.
 constexpr float kClampGain = 6.0f;
 
+// Added to the world's seed for the grass's own texture, so its grain is not the
+// soil's grain read at the same place.
+constexpr int kSodSeed = 4231;
+
+// Lattice rows above a chunk that the sod's column walk primes itself from, and
+// the depth it assumes where those rows are solid all the way up.
+//
+// Three, because what the walk measures stops mattering past sod::kSodDepth and
+// that is under two rows of the lattice; the third is the one that says whether
+// the second was itself buried.
+constexpr int kSodSeedRows  = 3;
+constexpr float kSodBuried = 1.0e6f;
+
 // How far down a column is followed looking for the ground before it is called
 // a shaft. Past this the sky can no longer reach anyway, so the answer would
 // change nothing.
@@ -79,6 +92,36 @@ Color Outline(Color contour) {
     return config::kDrawContours ? contour : BLANK;
 }
 
+// The grass, painted with the same equation the materials are and over a ramp
+// that changes with the column.
+//
+// The shading is soil's own and not a second copy of it: what makes the top of a
+// sod read as lit and its underside as shaded is exactly what makes the top of a
+// ledge read that way, and the sod's own field supplies the face. All this adds
+// is which greens the ramp is made of, which is the one thing that is not a
+// property of the shape.
+struct SodPainter {
+    const soil::Ramp *ramps = nullptr;
+    int count               = 0;
+    int firstColumn         = 0;
+    float spacing           = 1.0f;
+    int seed                = 0;
+
+    Color operator()(const marching_squares::Texel &texel) const {
+        const int column = static_cast<int>(std::floor(texel.at.x / spacing)) - firstColumn;
+
+        const soil::Paint paint{.ramp   = ramps[std::clamp(column, 0, count - 1)],
+                                .grain  = sod::kGrassGrain,
+                                .patch  = sod::kGrassPatch,
+                                .strata = sod::kGrassStrata,
+                                .bedded = true,
+                                .seed   = seed};
+
+        return paint(texel);
+    }
+};
+
+
 } // namespace
 
 World::World(const terrain::Settings &settings, int spacing) : settings_(settings), spacing_(spacing) {
@@ -88,6 +131,16 @@ World::World(const terrain::Settings &settings, int spacing) : settings_(setting
 
     std::sort(exclusionOrder_.begin(), exclusionOrder_.end(),
               [](Element a, Element b) { return Def(a).rules.precedence < Def(b).rules.precedence; });
+
+    // A stride between the materials' texture seeds, so that the grain on the
+    // soil is not the grain on the rock beneath it read at the same place. Added
+    // to the world's own seed for the reason every other field here is: one
+    // number moves the whole world and the fields stay decorrelated.
+    constexpr int kPaintStride = 977;
+
+    for (std::size_t e = 0; e < kElementCount; e++) {
+        paint_[e] = soil::For(kElements[e], settings_.seed + static_cast<int>(e) * kPaintStride);
+    }
 
     // The generator's own cutoffs first, since everything below asks it where
     // the ground is and an uncalibrated one answers with no caves at all.
@@ -541,6 +594,11 @@ void World::Update(Rectangle view) {
             if (Find(cx, cy) == nullptr) Emplace(cx, cy);
         }
     }
+
+    // The grass over what is now in play, worked out once here rather than in the
+    // draw, because the tufts standing on it are drawn by somebody else and the
+    // two have to be told the same thing.
+    ReadSod(view);
 
     for (auto it = chunks_.begin(); it != chunks_.end();) {
         int cx = 0;
@@ -1317,6 +1375,281 @@ Grid World::OccupancyField(const Chunk &chunk, int minPrecedence, bool groundOnl
     return margin;
 }
 
+void World::ReadSod(Rectangle view) {
+    const float step = static_cast<float>(spacing_);
+
+    // A margin either side, because the tufts standing on this reach past the
+    // column they grew in and the band is drawn a whole chunk at a time.
+    constexpr float kMargin = 256.0f;
+
+    sodFirstColumn_ = static_cast<int>(std::floor((view.x - kMargin) / step));
+
+    const int columns = static_cast<int>(std::ceil((view.width + 2.0f * kMargin) / step)) + 2;
+
+    sodRamp_.resize(static_cast<std::size_t>(columns));
+    sodCover_.assign(static_cast<std::size_t>(columns), 1.0f);
+    sodTop_.assign(static_cast<std::size_t>(columns), 0.0f);
+    sodPush_.assign(static_cast<std::size_t>(columns), 0.0f);
+
+    const weather::Sky::Season turn = sky_.Turn();
+    const auto season               = static_cast<flora::Season>(turn.index % flora::kSeasonCount);
+
+    const float reach = std::max(sky_.WindReach(), 1e-3f);
+
+    for (int i = 0; i < columns; i++) {
+        const float x = static_cast<float>(sodFirstColumn_ + i) * step;
+
+        sodRamp_[static_cast<std::size_t>(i)] =
+            sod::RampAt(terrain::ClimateAt(x, settings_), season, turn.blend, sky_.HumidityAt(x));
+
+        // As a share of what the strongest gust could do, so a field is at rest
+        // on a still day and near its limit in a storm. Per column rather than
+        // per view, because a gust is a wave crossing the world and the whole
+        // point of it is that it arrives somewhere before it arrives everywhere.
+        sodPush_[static_cast<std::size_t>(i)] = std::clamp(sky_.WindAt(x) / reach, -1.0f, 1.0f);
+
+        float top   = 0.0f;
+        float cover = 0.0f;
+
+        if (SurfaceOf(x, top)) {
+            // Grass grows on soil and on nothing else, which is the whole of the
+            // rule: dig past the soil and the floor is rock and stays bare, and
+            // a desert or a snowfield grows nothing because its surface is not
+            // soil either. Nothing here has to know about sand or snow.
+            const Vector2 under = {x, top + static_cast<float>(spacing_) * 0.5f};
+
+            if (OccupantAt(under) == Element::Soil) cover = 1.0f;
+        }
+
+        sodTop_[static_cast<std::size_t>(i)]   = top;
+        sodCover_[static_cast<std::size_t>(i)] = cover;
+    }
+
+    // Then the tufts' own grid, which is a different one — see Blades::standing.
+    sodFirstCell_ = static_cast<std::int64_t>(std::floor(static_cast<float>(sodFirstColumn_) * step / sod::kTuftSpan));
+
+    const int cells =
+        static_cast<int>(std::ceil(static_cast<float>(columns) * step / sod::kTuftSpan)) + 2;
+
+    sodStanding_.assign(static_cast<std::size_t>(cells), 1.0f);
+
+    const float now    = sky_.Time();
+    const float regrow = std::max(sod::kMowMinutes * 60.0f, 1e-3f);
+
+    for (auto it = mown_.begin(); it != mown_.end();) {
+        const float grown = std::clamp((now - it->second) / regrow, 0.0f, 1.0f);
+
+        // A tuft that is back has nothing left to say about itself, so the record
+        // is dropped and the procedural answer stands again. This is what keeps
+        // the cost of mowing a field proportional to what is still short rather
+        // than to everything that was ever cut.
+        if (grown >= 1.0f) {
+            it = mown_.erase(it);
+            continue;
+        }
+
+        const std::int64_t at = it->first - sodFirstCell_;
+
+        if (at >= 0 && at < cells) {
+            sodStanding_[static_cast<std::size_t>(at)] = sod::kStubble + (1.0f - sod::kStubble) * grown;
+        }
+
+        ++it;
+    }
+}
+
+bool World::SurfaceOf(float worldX, float &outTop) const {
+    const float step = static_cast<float>(spacing_);
+
+    // Started above the surface the noise describes rather than at a fixed
+    // height, and carried well past it: what is wanted is the first solid a
+    // falling body would meet, and the player can have built above the skyline or
+    // dug a long way below it.
+    constexpr float kAbove = 96.0f;
+    constexpr float kBelow = 640.0f;
+
+    const int column = static_cast<int>(std::lround(worldX / step));
+
+    // Started on the lattice, and this is not tidiness.
+    //
+    // Skyline is a scan that began at an arbitrary height, so its answer is *not*
+    // on the lattice — its own declaration says so and warns what happens next.
+    // GroundValueAt reads the vertex nearest to what it is asked about, so a walk
+    // stepping the lattice from an off-lattice start snaps two consecutive steps
+    // onto the same vertex and then skips one, and the crossing it reports lands
+    // anywhere within half a step of where the ground actually is. Half a step at
+    // the edge of the ground is the difference between grass on the soil and grass
+    // hanging over it.
+    const float from = std::floor((Skyline(column) - kAbove) / step) * step;
+
+    float y          = from;
+    const float stop = from + kAbove + kBelow;
+
+    float previous = GroundValueAt({worldX, y});
+
+    for (y += step; y <= stop; y += step) {
+        const float here = GroundValueAt({worldX, y});
+
+        if (previous <= 0.0f && here > 0.0f) {
+            // Interpolated onto the contour, so the tufts stand on the line the
+            // ground was drawn along instead of on the lattice it was sampled on.
+            const float t = -previous / std::max(here - previous, 1e-6f);
+
+            outTop = y - step + t * step;
+            return true;
+        }
+
+        previous = here;
+    }
+
+    return false;
+}
+
+sod::Blades World::Grass() const {
+    return {.top         = sodTop_.data(),
+            .cover       = sodCover_.data(),
+            .push        = sodPush_.data(),
+            .ramp        = sodRamp_.data(),
+            .count       = static_cast<int>(sodRamp_.size()),
+            .firstColumn = sodFirstColumn_,
+            .spacing     = static_cast<float>(spacing_),
+            .standing    = sodStanding_.data(),
+            .cells       = static_cast<int>(sodStanding_.size()),
+            .firstCell   = sodFirstCell_};
+}
+
+int World::MowGrass(Rectangle hitbox, float now) {
+    // Bounded by what one swing can reach. A hitbox is a body's arm, not a
+    // region, so a handful of cells is the whole of it.
+    constexpr int kRoom = 16;
+
+    std::int64_t cut[kRoom];
+
+    const int taken = sod::Cut(Grass(), hitbox, settings_.seed, cut, kRoom);
+
+    for (int i = 0; i < taken; i++) mown_[cut[i]] = now;
+
+    return taken;
+}
+
+float World::GroundValueAt(Vector2 world) const {
+    float filled = -kUnboundedDepth;
+
+    for (std::size_t e = 0; e < kElementCount; e++) {
+        const ElementDef &def = kElements[e];
+        if (!def.rules.occupies || !def.rules.blocksBodies) continue;
+
+        filled = std::max(filled, ValueAt(static_cast<Element>(e), world) - def.threshold);
+    }
+
+    return filled;
+}
+
+Grid World::SodField(const Chunk &chunk) const {
+    const Grid &soil = chunk.fields[ElementIndex(Element::Soil)];
+
+    // The silhouette of the whole ground, which is what says where the sky stops.
+    // Read from the union rather than from the soil alone because what buries a
+    // sod is anything at all standing on it — snow the world laid down, or rock
+    // the player did.
+    const Grid filled = OccupancyField(chunk);
+
+    Grid sod(soil.Origin(), soil.Cols(), soil.Rows(), spacing_);
+
+    const float threshold = Def(Element::Soil).threshold;
+    const float step      = static_cast<float>(spacing_);
+
+    for (int i = 0; i < sod.Cols(); i++) {
+        // The column this vertex belongs to, in the numbering ReadSod filled.
+        const int column = static_cast<int>(std::lround(sod.PointAt(i, 0).x / step)) - sodFirstColumn_;
+
+        const float cover =
+            sodCover_.empty()
+                ? 1.0f
+                : sodCover_[static_cast<std::size_t>(std::clamp(column, 0, static_cast<int>(sodCover_.size()) - 1))];
+
+        // How far under the sky this column already is where the chunk begins.
+        //
+        // Without it every chunk would start its own reckoning at its top row, and
+        // a chunk that begins underground would read its first row as the surface
+        // and lay a stripe of turf along its own ceiling. Only a few vertices are
+        // needed: what is being measured is a depth that stops mattering past the
+        // thickness of a sod.
+        const Vector2 top = sod.PointAt(i, 0);
+
+        float prevValue = -1.0f;
+        float prevDepth = -step;
+
+        for (int seed = kSodSeedRows; seed >= 1; seed--) {
+            const float y     = top.y - static_cast<float>(seed) * step;
+            const float value = GroundValueAt({top.x, y});
+
+            // The topmost seed row is where the walk has to start from something,
+            // and buried is the safe answer: a chunk deep in the rock is deep in
+            // the rock, and reading it as open sky is the fault this exists to
+            // prevent.
+            const float depth = (value > 0.0f) ? ((seed == kSodSeedRows) ? kSodBuried : prevDepth + step) : -step;
+
+            prevValue = value;
+            prevDepth = depth;
+        }
+
+        for (int j = 0; j < sod.Rows(); j++) {
+            const float here = filled.ValueAt(i, j);
+
+            // Depth below the topmost solid in this column, in pixels, walked
+            // rather than read off the field.
+            //
+            // The field cannot answer it. A material's value is its distance to
+            // its own edges, so where the soil meets the rock under it the union
+            // dips — the soil is near its own floor and the rock has been cut away
+            // to make room — and read as a depth that dip says "surface" thirty
+            // pixels underground. What it drew was a stripe of turf buried in the
+            // rock, level, following the bottom of the soil.
+            //
+            // Walking the column has no such reading to make. It also gives the
+            // sky-facing test away for nothing: a cave roof and the belly of an
+            // overhang are deep under the topmost solid of their own column by
+            // construction, so neither can be turfed and there is no normal to
+            // test.
+            float depth;
+
+            if (here <= 0.0f) {
+                depth = -step;
+            } else if (prevValue <= 0.0f) {
+                // Just entered the ground. The crossing is interpolated so the
+                // reckoning starts on the contour rather than on the lattice,
+                // which is what keeps the band an even thickness on a slope.
+                const float t = -prevValue / std::max(here - prevValue, 1e-6f);
+
+                depth = (1.0f - t) * step;
+            } else {
+                depth = prevDepth + step;
+            }
+
+            prevValue = here;
+            prevDepth = depth;
+
+            // Inside the soil, and the soil alone. The exclusion pass has already
+            // cut sand and snow out of this field, so neither of them can grow
+            // grass and neither has to be asked about.
+            float value = soil.ValueAt(i, j) - threshold;
+
+            // And within a sod's depth of the sky.
+            value = std::min(value, (sod::kSodDepth - depth) / terrain::kDensitySpan);
+
+            // And as much of it as has grown back. Subtracted rather than
+            // multiplied: the field is a distance, and a smaller distance is a
+            // shallower sod, while a smaller field is a sod in the wrong place.
+            value -= (1.0f - cover) * sod::kSodDepth / terrain::kDensitySpan;
+
+            sod.SetValue(i, j, value);
+        }
+    }
+
+    return sod;
+}
+
 Grid World::LiquidRenderField(int cx, int cy, Element element) const {
     const Chunk *chunk = Find(cx, cy);
     const float span   = ChunkSpan();
@@ -1411,10 +1744,10 @@ void World::DrawTerrain(Rectangle view) const {
                     if (chunk == nullptr) continue;
 
                     if (config::kPixelArt) {
-                        marching_squares::DrawPixelated(chunk->fields[index], def.threshold, def.fill,
-                                                        Outline(def.contour), config::kPixelSize);
+                        marching_squares::DrawPainted(chunk->fields[index], def.threshold, paint_[index],
+                                                      Outline(def.contour), config::kPixelSize);
                     } else {
-                        marching_squares::DrawFilled(chunk->fields[index], def.threshold, def.fill);
+                        marching_squares::DrawFilled(chunk->fields[index], def.threshold, Body(def));
                         if (config::kDrawContours) {
                             marching_squares::DrawContour(chunk->fields[index], def.threshold, def.contour);
                         }
@@ -1433,11 +1766,35 @@ void World::DrawTerrain(Rectangle view) const {
                 const Grid field = OccupancyField(*chunk, def.rules.precedence, true);
 
                 if (config::kPixelArt) {
-                    marching_squares::DrawPixelated(field, 0.0f, def.fill, Outline(def.contour), config::kPixelSize);
+                    marching_squares::DrawPainted(field, 0.0f, paint_[ElementIndex(element)], Outline(def.contour),
+                                                  config::kPixelSize);
                 } else {
-                    marching_squares::DrawFilled(field, 0.0f, def.fill);
+                    marching_squares::DrawFilled(field, 0.0f, Body(def));
                     if (config::kDrawContours) marching_squares::DrawContour(field, 0.0f, def.contour);
                 }
+            }
+        }
+    }
+
+    // Then the grass, over the finished ground.
+    //
+    // Last of the solid draws and not a material in the list above, because it is
+    // not a material: it is the soil's own field read a second way. Rasterised by
+    // the same routine at the same texel size, so it lands on the ground's own
+    // staircase by construction rather than by being lined up with it.
+    if (config::kPixelArt && !sodRamp_.empty()) {
+        const SodPainter grass{.ramps       = sodRamp_.data(),
+                               .count       = static_cast<int>(sodRamp_.size()),
+                               .firstColumn = sodFirstColumn_,
+                               .spacing     = static_cast<float>(spacing_),
+                               .seed        = settings_.seed + kSodSeed};
+
+        for (int cx = minCx; cx <= maxCx; cx++) {
+            for (int cy = minCy; cy <= maxCy; cy++) {
+                const Chunk *chunk = Find(cx, cy);
+                if (chunk == nullptr) continue;
+
+                marching_squares::DrawPainted(SodField(*chunk), 0.0f, grass, BLANK, config::kPixelSize);
             }
         }
     }
@@ -1454,10 +1811,10 @@ void World::DrawTerrain(Rectangle view) const {
                 if (chunk == nullptr) continue;
 
                 if (config::kPixelArt) {
-                    marching_squares::DrawPixelated(chunk->fields[e], def.threshold, def.fill, Outline(def.contour),
-                                                    config::kPixelSize);
+                    marching_squares::DrawPainted(chunk->fields[e], def.threshold, paint_[e], Outline(def.contour),
+                                                  config::kPixelSize);
                 } else {
-                    marching_squares::DrawFilled(chunk->fields[e], def.threshold, def.fill);
+                    marching_squares::DrawFilled(chunk->fields[e], def.threshold, Body(def));
                     if (config::kDrawContours) marching_squares::DrawContour(chunk->fields[e], def.threshold, def.contour);
                 }
             }
@@ -1480,7 +1837,7 @@ void World::DrawLiquids(Rectangle view) const {
 
         // Drawn fully opaque. Transparency belongs to the layer as a whole, and
         // applying it here would blend each piece against its neighbours again.
-        const Color body    = {style.fill.r, style.fill.g, style.fill.b, 255};
+        const Color body    = Body(style);
         const Color surface = {style.contour.r, style.contour.g, style.contour.b, 255};
 
         for (int cx = minCx; cx <= maxCx; cx++) {
@@ -1490,8 +1847,8 @@ void World::DrawLiquids(Rectangle view) const {
                 const Grid field = LiquidRenderField(cx, cy, element);
 
                 if (config::kPixelArt) {
-                    marching_squares::DrawPixelated(field, style.threshold, body, Outline(surface),
-                                                    config::kPixelSize);
+                    marching_squares::DrawPainted(field, style.threshold, paint_[e], Outline(surface),
+                                                  config::kPixelSize);
                 } else {
                     marching_squares::DrawFilled(field, style.threshold, body);
                     if (config::kDrawContours) marching_squares::DrawContour(field, style.threshold, surface);

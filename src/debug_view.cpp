@@ -222,7 +222,7 @@ void DrawLayers(const World &world, Rectangle view) {
                 // rather than silently against sea level.
                 const float share = BandAbundance(def->spawn, at, terrain::Depth(at, settings));
 
-                DrawRectangleRec({gutter, y, kGutterBar, 2.0f}, Fade(def->fill, 0.15f + 0.7f * share));
+                DrawRectangleRec({gutter, y, kGutterBar, 2.0f}, Fade(Body(*def), 0.15f + 0.7f * share));
             }
 
             DrawRectangleLinesEx({gutter, top, kGutterBar, bottom - top}, 1.0f, color);
@@ -238,12 +238,12 @@ void DrawLayers(const World &world, Rectangle view) {
             // against the slab it is written on.
             DrawLabel(TextFormat("%s  %s..%s  peak %d", def->name, from, to,
                                  static_cast<int>(def->spawn.band.peak)),
-                      {labels, at}, ColorBrightness(def->fill, 0.55f));
+                      {labels, at}, ColorBrightness(Body(*def), 0.55f));
         }
 
         // The peak, drawn brighter than the edges, since it is the height that
         // now decides where the material is worth digging for.
-        DrawBandEdge(def->spawn, def->spawn.band.peak, view, ColorBrightness(def->fill, 0.5f));
+        DrawBandEdge(def->spawn, def->spawn.band.peak, view, ColorBrightness(Body(*def), 0.5f));
 
         gutter += kGutterStep;
     }
