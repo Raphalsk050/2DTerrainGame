@@ -1,11 +1,14 @@
 #include "terrain.h"
 
+#include "cave.h"
+
 // stb_perlin ships inside raylib. Without STB_PERLIN_IMPLEMENTATION this header
 // contributes declarations only; the implementation is already compiled into
 // libraylib. The include path is set in CMakeLists.txt.
 #include "stb_perlin.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <vector>
@@ -191,202 +194,10 @@ float WarpedX(Vector2 world, const Settings &s) {
     return world.x + Signed(world, Reseed(surface.warp, s.seed)) * surface.warpAmplitude * reach;
 }
 
-// Union of two signed distances, flared over `blend` pixels where they meet.
-//
-// The exact union is the minimum, and a minimum creases: two corridors crossing
-// leave a wedge of rock with a knife edge in each quadrant of the junction.
-// Nothing in rock erodes to a point, so the crease is not only the worse picture
-// but the wrong one, and rounding it is closer to the material than the exact
-// answer is.
-//
-// The standard quadratic blend. Note that it is always at or below the true
-// minimum, by up to a quarter of `blend`, so it carves as well as rounds.
-float SmoothMin(float a, float b, float blend) {
-    if (blend <= 0.0f) return std::min(a, b);
-
-    const float h = std::clamp(0.5f + 0.5f * (b - a) / blend, 0.0f, 1.0f);
-
-    return b + (a - b) * h - blend * h * (1.0f - h);
-}
-
-// Half-width a tunnel layer has at a position, in pixels, scaled by how much of
-// the layer that position is entitled to.
-//
-// An allowance of zero leaves a half-width of zero, and a band of zero width
-// carves nothing, so switching a layer off region by region needs no branch and
-// pinches the tunnel shut smoothly instead of ending it on a flat wall.
-//
-// The width varies from place to place as well as with depth. Tunnel carves a
-// band of exactly the width it is handed, by construction — so the only way a
-// corridor gets a cross-section that changes along its length is for the width
-// handed in to change, which is what the girth field is for. See TunnelLayer.
-// `squeeze` is added to the layer's own pinch, for a caller that wants the
-// corridor shut rather than narrowed. The two ways of holding a layer back are
-// not interchangeable: an allowance scales the width, so a strong one still
-// leaves a slit, while a pinch subtracts from it and takes it to nothing.
-float TunnelWidth(Vector2 world, const TunnelLayer &layer, int seed, float depth, float allowance,
-                  float squeeze = 0.0f) {
-    const float target = (layer.widthAtDepth > 0.0f) ? layer.widthAtDepth : layer.width;
-    const float grown  = layer.width + (target - layer.width) * SmoothStep(0.0f, layer.growthDepth, depth);
-
-    const float pinch = layer.pinch + squeeze;
-
-    if (layer.swing <= 0.0f && pinch <= 0.0f) return grown * allowance;
-
-    // Signed rather than folded, so the modulation is centred: as much of the
-    // corridor narrows as widens, and the layer's stated width stays the width it
-    // averages rather than the width it never exceeds.
-    const float swell = 1.0f + Signed(world, Reseed(layer.girth, seed)) * layer.swing - pinch;
-    const float width = grown * std::max(swell, 0.0f) * allowance;
-
-    // Collapsed below the width of one drawn texel.
-    //
-    // A width that tapers smoothly to nothing passes through every value on the
-    // way, and the small ones are a passage the grid cannot express: what they
-    // draw is a hairline scratch across the rock, one texel wide and hundreds
-    // long, following the corridor that nearly was. Squaring the last texel of
-    // width away takes those out without putting a step in the field, since it is
-    // still continuous and still reaches zero at the same place.
-    constexpr float kThinnest = 5.0f;
-
-    return width * SmoothStep(0.0f, kThinnest, width);
-}
-
-// Signed distance into a tunnel in pixels: positive inside the corridor,
-// negative in the rock around it.
-//
-// The corridor is a band around the *zero set* of the field, not around its
-// peaks. That distinction is the whole layer: the region where a field exceeds
-// a value is a set of patches, while its zero set is a family of long curves,
-// so this gives corridors where a threshold would give pockets.
-float Tunnel(Vector2 world, const TunnelLayer &layer, int seed, float halfWidth) {
-    if (halfWidth <= 0.0f) return -kFar;
-
-    const NoiseShape shape = Reseed(layer.shape, seed);
-    const float value      = Signed(world, shape);
-
-    // Distance to the zero set, taken from the field's slope here rather than
-    // from an average of it over the world.
-    //
-    // The average is what makes a band balloon. Where the field happens to run
-    // flat near zero, a fixed number of field units spans a great deal of
-    // ground, and the corridor arrives as an open pit the size of the flat
-    // patch — which is how the surface ended up with a hole four hundred pixels
-    // across. Dividing by the local slope makes the corridor the width it was
-    // asked for wherever it goes, and costs two more samples of the field.
-    const float gx = (Signed({world.x + kProbe, world.y}, shape) - value) / kProbe;
-    const float gy = (Signed({world.x, world.y + kProbe}, shape) - value) / kProbe;
-
-    const float slope = std::sqrt(gx * gx + gy * gy);
-
-    return halfWidth - std::abs(value) / std::max(slope, 1e-9f);
-}
-
-// The position the cave layers are read at, pushed around by a field of its own.
-//
-// Two components out of one shape, the second read a long way off along the third
-// axis so it is a different field rather than the same one shifted — which would
-// displace every position along the same diagonal and shear the caves instead of
-// bending them.
-//
-// The displacement is the same for every layer, so they warp together and keep
-// crossing each other where they did. Warping each separately would pull the
-// junctions apart.
-Vector2 Warped(Vector2 world, const CaveSettings &c, int seed) {
-    if (c.warpAmplitude <= 0.0f) return world;
-
-    NoiseShape shape = Reseed(c.warp, seed);
-
-    const float dx = Signed(world, shape);
-
-    shape.offsetZ += 137.0f;
-
-    const float dy = Signed(world, shape);
-
-    return {world.x + dx * c.warpAmplitude, world.y + dy * c.warpAmplitude};
-}
-
-// How much of the regional cave layers a position is entitled to, in [0,1].
-//
-// One field read against a cutoff that descends with depth, rather than two
-// fields: the same stretch of world is the same stretch at every depth, so a
-// system that is a crack near the surface opens into cave country under itself
-// instead of a second, unrelated set of regions appearing further down.
-float RegionAllowance(Vector2 world, float depth, const CaveSettings &c, int seed) {
-    const float cutoff = c.calibration.regionShallow
-                       + (c.calibration.region - c.calibration.regionShallow)
-                             * SmoothStep(0.0f, std::max(c.regionDeepens, 1.0f), depth);
-
-    const float value = Sample(world, Reseed(c.region, seed));
-
-    return SmoothStep(cutoff - std::max(c.regionFade, 1e-3f), cutoff, value);
-}
-
-// How far a room's field is past its cutoff at a position, in pixels of rock.
-//
-// A room has no direction, so it is measured by how far the field is past its
-// cutoff rather than by a distance to a curve. What gives it a way in and out is
-// the tunnel layers crossing it.
-float RoomAt(Vector2 world, const ChamberLayer &layer, float cutoff, int seed, float height) {
-    // Divided by the span the field still has above its cutoff, so the middle of
-    // a room reaches the height asked for whatever the cutoff came out at.
-    // Without it, raising the coverage would also make every room taller.
-    const float headroom = std::max(1.0f - cutoff, 1e-3f);
-
-    return ((Sample(world, Reseed(layer.shape, seed)) - cutoff) / headroom) * height;
-}
-
-// Signed distance into a room in pixels, floor included.
-float Chamber(Vector2 world, const ChamberLayer &layer, float cutoff, int seed, float depth, float allowance) {
-    if (layer.coverage <= 0.0f || allowance <= 0.0f) return -kFar;
-
-    // Rooms open out with depth, which is what makes the descent worth making.
-    const float height = layer.height
-                       + (layer.heightAtDepth - layer.height) * SmoothStep(layer.growthFrom, layer.growthTo, depth);
-
-    if (height <= 0.0f) return -kFar;
-
-    const float here = RoomAt(world, layer, cutoff, seed, height);
-
-    if (layer.rubble <= 0.0f) return here * allowance;
-
-    // The floor: a point stays open only if there is still room a rubble's
-    // thickness *below* it. Where there is not, the point is within that distance
-    // of the bottom of the void and is buried.
-    //
-    // Intersecting the room with itself lifted by that much takes the band off the
-    // floor and leaves the ceiling untouched, which is the asymmetry a room needs
-    // and the one a field cannot have on its own. Y grows downward, so below is
-    // the larger number.
-    //
-    // Deliberately a hard minimum and not the blended one: this is the one place a
-    // crease is wanted, because the crease *is* the join between a wall and the
-    // floor it stands on.
-    const float below = RoomAt({world.x, world.y + layer.rubble}, layer, cutoff, seed, height);
-
-    return std::min(here, below) * allowance;
-}
-
 // How much of the cave layers the depth allows, in [0,1]. Zero within the crust,
 // full below it.
 float CrustAllowance(float depth, const CaveSettings &c) {
     return SmoothStep(c.crust, c.crust + c.crustFade, depth);
-}
-
-// How much of the entrance layer the depth allows, in [0,1].
-//
-// The one layer not held under the crust, since a cave nothing can walk into is
-// scenery. It is bounded by its own reach instead, which has to clear the crust
-// or an entrance opens onto solid rock and leads nowhere.
-float ShaftAllowance(float depth, const CaveSettings &c) {
-    if (depth < 0.0f) return 0.0f;
-
-    // Held at full width for most of its reach and pinched shut over the last
-    // third. Tapering the whole way down would leave a needle of rock-thin crack
-    // below every entrance instead of a passage that ends.
-    const float reach = std::max(c.shaftReach, 1.0f);
-
-    return 1.0f - SmoothStep(reach * 0.7f, reach, depth);
 }
 
 // Pixels of rock the wall roughness adds at a position, positive or negative.
@@ -397,17 +208,35 @@ float ShaftAllowance(float depth, const CaveSettings &c) {
 // field and a roughness that reached everywhere would leave bubbles of air deep
 // in the rock and pillars of rock in the middle of the air.
 float Roughness(Vector2 world, float solid, const RoughnessSettings &r, int seed, float allowance) {
-    if (r.amplitude <= 0.0f || allowance <= 0.0f) return 0.0f;
+    if (allowance <= 0.0f) return 0.0f;
+    if (r.amplitude <= 0.0f && r.lobeAmplitude <= 0.0f) return 0.0f;
 
     const float near = 1.0f - SmoothStep(0.0f, std::max(r.reach, 1e-3f), std::abs(solid));
     if (near <= 0.0f) return 0.0f;
 
-    // Folded, so the field creases where it crosses zero and domes where it peaks.
-    // A smooth field added to a wall would only make the wall a slightly different
-    // smooth wall; it is the creases that read as broken rock.
-    const float fold = std::abs(Signed(world, Reseed(r.shape, seed))) - r.bias;
+    float moved = 0.0f;
 
-    return fold * r.amplitude * near * allowance;
+    if (r.amplitude > 0.0f) {
+        // Folded, so the field creases where it crosses zero and domes where it
+        // peaks. A smooth field added to a wall would only make the wall a
+        // slightly different smooth wall; it is the creases that read as broken
+        // rock.
+        moved += (std::abs(Signed(world, Reseed(r.shape, seed))) - r.bias) * r.amplitude;
+    }
+
+    if (r.lobeAmplitude > 0.0f) {
+        // And the bites. Worley is zero at each cell's own feature point and
+        // rises towards the walls between them, so subtracting the *inverse* of
+        // it takes a rounded bite out of the rock centred on every feature point
+        // and leaves the rock between them standing. `lobeBite` is how far into a
+        // cell one bite reaches; past the point where neighbouring bites meet the
+        // wall is scalloped edge to edge and stops reading as rock again.
+        const float cell = Worley(world, Reseed(r.lobes, seed));
+
+        moved -= (1.0f - SmoothStep(0.0f, std::clamp(r.lobeBite, 1e-3f, 1.0f), cell)) * r.lobeAmplitude;
+    }
+
+    return moved * near * allowance;
 }
 
 } // namespace
@@ -538,14 +367,6 @@ void Calibrate(Settings &settings) {
 
     caves.calibration.regionShallow = Quantile(Reseed(caves.region, settings.seed), caves.regionCoverageShallow, centre,
                                               kSampledWidth, kSampledDepth);
-
-    caves.calibration.chamber =
-        Quantile(Reseed(caves.chambers.shape, settings.seed), caves.chambers.coverage, centre, kSampledWidth,
-                 kSampledDepth);
-
-    caves.calibration.cavern =
-        Quantile(Reseed(caves.caverns.shape, settings.seed), caves.caverns.coverage, centre, kSampledWidth,
-                 kSampledDepth);
 }
 
 float Height(float worldX, const Settings &s) {
@@ -615,119 +436,150 @@ namespace {
 // Split out so that a caller wanting both numbers pays for the surface once. The
 // depth is the whole of what Solidity needs from the surface, so handing it in is
 // the entire saving.
+// Every system that could reach a position, built once and kept.
+//
+// The memo is not state in any sense that matters: it holds the value of a pure
+// function of the cell index, and throwing it away changes nothing but the time.
+// Per thread, because the light solve runs on several and a shared one would need
+// a lock on the hottest path in the generator.
+//
+// Small on purpose. A chunk is 192 px against a cell 1600 wide, so the nine cells
+// a chunk needs are asked for over and over and then never again; a handful of
+// entries is the whole of what there is to gain, and an unbounded map would keep
+// every system the player ever walked past.
+struct Memo {
+    struct Entry {
+        std::int64_t cellX = 0;
+        std::int64_t cellY = 0;
+        int seed           = 0;
+        bool built         = false;
+        cave::System system;
+    };
+
+    static constexpr std::size_t kEntries = 32;
+
+    std::array<Entry, kEntries> entries{};
+    std::size_t next = 0;
+};
+
+// Whether a cell holds a system, and where it starts.
+//
+// The gate as well as the placement: a cell whose origin lands in the crust or
+// outside cave country holds nothing at all. Applied to the *origin* rather than
+// along the walk, so a system is one thing — a cave either is here or is not,
+// rather than fading out along its own length the way a thresholded field does.
+bool Sited(std::int64_t cellX, std::int64_t cellY, const Settings &s, Vector2 &outOrigin, float &outDepth) {
+    const CaveSettings &caves = s.caves;
+
+    if (!cave::Origin(cellX, cellY, caves.systems, s.seed, outOrigin)) return false;
+
+    outDepth = outOrigin.y - Height(outOrigin.x, s);
+    if (outDepth <= caves.crust) return false;
+
+    const float cutoff = caves.calibration.regionShallow
+                       + (caves.calibration.region - caves.calibration.regionShallow)
+                             * SmoothStep(0.0f, std::max(caves.regionDeepens, 1.0f), outDepth);
+
+    return Sample(outOrigin, Reseed(caves.region, s.seed)) > cutoff;
+}
+
+const cave::System &Systems(std::int64_t cellX, std::int64_t cellY, const Settings &s) {
+    static thread_local Memo memo;
+    static const cave::System kNone;
+
+    for (const Memo::Entry &entry : memo.entries) {
+        if (entry.built && entry.cellX == cellX && entry.cellY == cellY && entry.seed == s.seed) return entry.system;
+    }
+
+    Memo::Entry &slot = memo.entries[memo.next];
+
+    memo.next = (memo.next + 1) % Memo::kEntries;
+
+    slot.cellX  = cellX;
+    slot.cellY  = cellY;
+    slot.seed   = s.seed;
+    slot.built  = true;
+    slot.system = cave::System{};
+
+    const CaveSettings &caves = s.caves;
+
+    Vector2 origin{};
+    float depth = 0.0f;
+
+    if (!Sited(cellX, cellY, s, origin, depth)) return slot.system;
+
+    // The four neighbours, so the corridors between systems can be aimed. Each
+    // side digs to the midpoint of the two origins, so both halves meet without
+    // either having seen the other's walk.
+    cave::Neighbour around[4];
+
+    constexpr std::int64_t kStepX[4] = {-1, 1, 0, 0};
+    constexpr std::int64_t kStepY[4] = {0, 0, -1, 1};
+
+    for (int n = 0; n < 4; n++) {
+        float ignored = 0.0f;
+
+        around[n].has = Sited(cellX + kStepX[n], cellY + kStepY[n], s, around[n].origin, ignored);
+    }
+
+    // The shallowest the walks may reach, taken over the whole span a walk could
+    // cross rather than at the origin alone: the ground rises and falls, and a
+    // ceiling measured under a valley would let a walk out through the hill
+    // beside it.
+    const float bound   = cave::Reach(caves.systems);
+    const float surface = Height(origin.x, s);
+
+    float highest = surface;
+
+    for (int i = 0; i <= 8; i++) {
+        highest = std::min(highest, Height(origin.x + bound * (static_cast<float>(i) / 4.0f - 1.0f), s));
+    }
+
+    slot.system = cave::Build(cellX, cellY, caves.systems, s.seed, origin, depth,
+                              highest + caves.crust + caves.crustFade, surface, around);
+
+    return slot.system;
+}
+
+// Solidity at a position whose depth below the surface has already been found.
+//
+// Split out so that a caller wanting both numbers pays for the surface once. The
+// depth is the whole of what Solidity needs from the surface, so handing it in is
+// the entire saving.
+// Solidity at a position whose depth below the surface has already been found.
+//
+// Split out so that a caller wanting both numbers pays for the surface once. The
+// depth is the whole of what Solidity needs from the surface, so handing it in is
+// the entire saving.
 float SolidityBelow(Vector2 world, float depth, const Settings &s) {
     const CaveSettings &caves = s.caves;
 
-    // Above the ground there is nothing to carve out of, and the cave layers are
-    // what this function spends its time on. Every position in the open sky
-    // leaves here having sampled the surface alone.
+    // Above the ground there is nothing to carve out of. Every position in the
+    // open sky leaves here having sampled the surface alone.
     if (depth <= 0.0f) return depth;
 
-    float solid = depth;
+    const cave::Settings &dug = caves.systems;
 
-    // Layers are unioned with a blend rather than with a bare minimum, so a
-    // junction opens out instead of leaving a knife edge of rock in each quadrant
-    // of it. See SmoothMin.
-    const float blend = caves.blend;
+    const auto cellX = static_cast<std::int64_t>(std::floor(world.x / std::max(dug.cellSpan, 1.0f)));
+    const auto cellY = static_cast<std::int64_t>(std::floor(world.y / std::max(dug.cellRise, 1.0f)));
 
-    const auto carve = [&](float into) {
-        // A layer that is switched off here reports itself unreachably distant,
-        // and blending against that number would lose the answer to it: the
-        // subtraction inside SmoothMin has no bits left for a distance of a few
-        // pixels once one side is a thousand million of them.
-        if (into < -kFar * 0.5f) return;
+    // The nine cells around this one, and no more. A walk is hard-stopped at one
+    // cell's reach, so nothing outside them can have dug here — see cave::Reach,
+    // which is what makes that a fact rather than a hope.
+    float into = -kFar;
 
-        solid = SmoothMin(solid, -into, blend);
-    };
-
-    const float crust = CrustAllowance(depth, caves);
-
-    // Every layer below reads here rather than at `world`. The region is not
-    // warped: it decides where cave country *is*, and a region boundary that
-    // wandered would only move, not improve — while sharing the displacement with
-    // the layers would tie the two together and put a visible kink in the region
-    // edge wherever the warp is strongest.
-    const Vector2 at = Warped(world, caves, s.seed);
-
-    // How honeycombed this stretch of the underground is, which is what leaves
-    // some of it near-solid rock and the rest cave country.
-    const float country = RegionAllowance(world, depth, caves, s.seed);
-
-    // Entrances first, since they are the only layer that reaches into the crust.
-    const float reach = ShaftAllowance(depth, caves);
-
-    if (reach > 0.0f) {
-        // Gated by the region where it would break daylight, and not at all below
-        // that.
-        //
-        // The layer has two jobs and they want opposite densities. A hole in the
-        // ground should lead somewhere, and the region field is where the
-        // somewheres are — ungated, most openings led into dead rock and there was
-        // one every two hundred and seventy pixels, which is a landscape with its
-        // lid off rather than a find. A few pixels down it stops being an entrance
-        // and becomes the only thing in the world carrying a route from one depth
-        // to the next, and that has to be everywhere or the deep is sealed.
-        // Read well below the opening rather than at it, and that is the whole
-        // sense of the gate. What decides whether a hole in the ground is worth
-        // being there is not the rock it is cut in but whether there is anything
-        // under it, and cave country is scarce at the top by design — asked at the
-        // surface the question is almost always answered no, and the entrances
-        // close over an underground that is perfectly well connected to itself and
-        // sealed from the sky.
-        const float under = RegionAllowance({world.x, world.y + caves.regionDeepens},
-                                            depth + caves.regionDeepens, caves, s.seed);
-
-        // Cubed, so that an opening appears over the heart of a system and not
-        // over its edge. The region field fades over `regionFade`, and read
-        // straight that fade is wide enough that a shaft crossing the very margin
-        // of one still cracks the surface — which put an entrance every three
-        // hundred pixels, most of them onto a passage already pinching out.
-        const float heart = under * under * under;
-
-        const float floor   = std::clamp(caves.shafts.floor, 0.0f, 1.0f);
-        const float visible = 1.0f - SmoothStep(0.0f, std::max(caves.mouthDepth, 1e-3f), depth);
-        const float mouth   = 1.0f - visible * (1.0f - (floor + (1.0f - floor) * heart));
-
-        // Held back by a squeeze and not by an allowance, so that a shaft the gate
-        // turns down is closed outright rather than reduced to a slit. Scaled
-        // past one, since the swing can still open the corridor a little and the
-        // gate has to beat it: what is wanted is an entrance or no entrance, never
-        // a crack too narrow to enter that nonetheless lets the daylight in.
-        constexpr float kMouthSqueeze = 1.6f;
-
-        carve(Tunnel(at, caves.shafts, s.seed,
-                     TunnelWidth(at, caves.shafts, s.seed, depth, reach, (1.0f - mouth) * kMouthSqueeze)));
+    for (std::int64_t dy = -1; dy <= 1; dy++) {
+        for (std::int64_t dx = -1; dx <= 1; dx++) {
+            into = std::max(into, -cave::Carve(world, Systems(cellX + dx, cellY + dy, s)));
+        }
     }
 
-    if (crust <= 0.0f) return solid;
+    float solid = std::min(depth, -into);
 
-    // A layer with a floor narrows towards solid rock rather than closing, so
-    // wherever the player breaks in there is still somewhere to go.
-    const auto allowance = [&](const TunnelLayer &layer) {
-        const float floor = std::clamp(layer.floor, 0.0f, 1.0f);
-
-        return crust * (floor + (1.0f - floor) * country);
-    };
-
-    carve(Tunnel(at, caves.crawlways, s.seed,
-                 TunnelWidth(at, caves.crawlways, s.seed, depth, allowance(caves.crawlways))));
-
-    carve(Tunnel(at, caves.galleries, s.seed,
-                 TunnelWidth(at, caves.galleries, s.seed, depth, allowance(caves.galleries))));
-
-    // The rooms follow the region outright: a room in dead rock is a bubble, and
-    // what makes a room worth arriving in is the corridors that lead to it.
-    const float region = crust * country;
-
-    if (region > 0.0f) {
-        carve(Chamber(at, caves.chambers, caves.calibration.chamber, s.seed, depth, region));
-        carve(Chamber(at, caves.caverns, caves.calibration.cavern, s.seed, depth, region));
-    }
-
-    // And the wall, last, because what it roughens is the outline all of the
-    // above agreed on rather than any one of them. Held to the crust allowance so
-    // it cannot bite into the ground the player walks on.
-    return solid + Roughness(at, solid, caves.roughness, s.seed, crust);
+    // And the wall, last, because what it roughens is the outline every system
+    // agreed on rather than any one of them. Held to the crust allowance so it
+    // cannot bite into the ground the player walks on.
+    return solid + Roughness(world, solid, caves.roughness, s.seed, CrustAllowance(depth, caves));
 }
 
 } // namespace

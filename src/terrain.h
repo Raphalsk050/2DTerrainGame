@@ -1,5 +1,6 @@
 #pragma once
 
+#include "cave.h"
 #include "grid.h"
 #include "raylib.h"
 
@@ -197,84 +198,6 @@ struct SurfaceSettings {
     float warpDepth = 96.0f;
 };
 
-// One family of tunnels: a band carved around the zero set of a noise field.
-//
-// Thresholding a field gives blobs, because the region where a field exceeds a
-// value is a set of patches. The *zero set* of a field is something else
-// entirely: a family of long closed curves. Carving a band around it therefore
-// gives corridors, and two families with different shapes cross each other,
-// which is what turns corridors into a network with loops in it.
-//
-// Loops are the reason to build it this way. A loop means a route back that is
-// not the route in, and that is the difference between exploring a cave and
-// retracing one.
-struct TunnelLayer {
-    NoiseShape shape{};
-
-    // Half-width of the corridor in pixels where the layer begins, so the full
-    // opening is twice this. Zero switches the layer off.
-    float width = 0.0f;
-
-    // Half-width it approaches far underground, and the depth over which it gets
-    // there. Tunnels opening out as they descend is what makes the way down feel
-    // like a way down.
-    //
-    // Approached rather than grown into: the world has no floor, so a width that
-    // rises with depth without a limit ends up carving away everything below a
-    // certain point. Leave it at zero to keep the width constant.
-    float widthAtDepth = 0.0f;
-    float growthDepth  = 1200.0f;
-
-    // How the corridor's own width varies along its length.
-    //
-    // The band Tunnel carves is exactly `width` everywhere, by construction: it
-    // divides by the local slope precisely so that a corridor is the width it was
-    // asked for wherever it goes. What that buys in control it takes back in
-    // character, because a passage with perfectly parallel sides for its whole
-    // length is a pipe, and a network of them reads as plumbing rather than as
-    // rock. Nothing underground has a constant cross-section.
-    //
-    // So the width asked for varies from place to place, out of a field of its
-    // own. `swing` is the share of the width the modulation moves it either way,
-    // and it must be a *different* shape from `shape` and at a much lower
-    // frequency — sharing one would make the width a function of the corridor's
-    // own path, which reads as a pattern rather than as chance.
-    NoiseShape girth{};
-    float swing = 0.0f;
-
-    // Share of the width taken off everywhere, after the swing, in [0,1).
-    //
-    // Subtracted from the swing rather than scaling the result, and that is the
-    // whole point: scaling a width only makes a corridor narrow, while
-    // subtracting from it lets the corridor close *entirely* wherever the swing
-    // runs low. A network in which every passage is passable is a graph with no
-    // dead ends in it, and a cave with no dead ends is one nobody has to remember
-    // the way through. This is what puts squeezes, blind ends and rock plugs into
-    // the layer without a second field.
-    //
-    // A share and not a count of pixels, so that it commutes with `floor` below.
-    // In pixels the two compound — a layer held at a fraction of its width
-    // through dead rock had that fraction taken off an already pinched number and
-    // came out at a couple of pixels, which is to say not there at all, and the
-    // whole underground below the entrance layer's reach was sealed off.
-    float pinch = 0.0f;
-
-    // Share of its width the layer keeps where the region says solid rock, so
-    // that the layer narrows towards dead rock instead of ending on a flat wall.
-    //
-    // Exactly one layer needs this above zero, because exactly one layer has to
-    // guarantee that the underground is connected at all: without it a region
-    // border is a wall with no way past except to dig one, and a cave system with
-    // no way out of it is a cave system nobody reaches.
-    //
-    // It should be the *narrowest* layer that carries it, and that is not
-    // obvious. A wide layer held open everywhere costs its width over the whole
-    // world — measured, carrying it on the halls put a fifth of all rock into
-    // corridors nobody was meant to find, and the same connectivity on the
-    // crawlways cost a quarter of that. What the player walks through dead rock
-    // should be a squeeze, and a squeeze is cheap.
-    float floor = 0.0f;
-};
 
 // The irregularity of a cave wall.
 //
@@ -299,6 +222,31 @@ struct RoughnessSettings {
     // does. Measured, in the manner of kFbmPeak.
     float bias = 0.36f;
 
+    // The lobes, and they are a different shape of irregularity from the fold
+    // above rather than more of it.
+    //
+    // A folded fbm creases where it crosses zero, which frets the wall — it makes
+    // an edge that is everywhere slightly wrong. What it does not make is
+    // *features*: the scallops and alcoves that a real wall is built out of, each
+    // one a rounded bite of a definite size. Cellular noise is exactly that shape
+    // — it is a field of packed rounded cells, and subtracted from the rock along
+    // an outline it takes those cells out of it in bites.
+    //
+    // This is the pointwise stand-in for the cellular-automaton pass every 2D
+    // cave generator reaches for. An automaton makes an outline organic by
+    // repeatedly asking each cell what its neighbours are doing, which coalesces
+    // the edge into rounded lumps; it also needs a grid and several passes over
+    // it, and the whole generator here rests on being a pure function of one
+    // position. Worley arrives at the same rounded-lump outline in one sample,
+    // because the lumps are what its cells already are.
+    NoiseShape lobes{};
+    float lobeAmplitude = 0.0f;
+
+    // Share of a cell the lobe reaches into. Zero puts the bite at the cell's own
+    // centre and nowhere else; one has the bites meeting, and the wall is scalloped
+    // edge to edge.
+    float lobeBite = 0.5f;
+
     // Pixels either side of a surface the roughness acts over, fading to nothing.
     //
     // Bounded because the term is added to the whole field: applied everywhere it
@@ -308,185 +256,55 @@ struct RoughnessSettings {
     float reach = 20.0f;
 };
 
-// A room, and how far it opens.
+
+// What is taken out of the rock.
 //
-// Measured by how far a field is past its cutoff rather than by a distance to a
-// curve, because a room has no direction. What gives it a way in and out is the
-// tunnels crossing it.
-struct ChamberLayer {
-    NoiseShape shape{};
-
-    // Share of the eligible underground hollowed into rooms of this kind, in
-    // [0,1], measured by Calibrate in the manner of `regionCoverage`.
-    float coverage = 0.0f;
-
-    // Pixels of rock removed at the centre of a room, tapering to nothing at its
-    // edge. Sets how tall it is.
-    float height = 0.0f;
-
-    // Height it reaches far underground, and the two depths it grows between.
-    //
-    // This is the layer that makes descending mean something. A world whose caves
-    // are the same size at every depth has no reason to be deep; one where the
-    // rooms open out as you go down has the way down as its own reward, which is
-    // the arrangement both Minecraft and Terraria arrived at independently.
-    float heightAtDepth = 0.0f;
-    float growthFrom    = 0.0f;
-    float growthTo      = 1200.0f;
-
-    // Pixels of debris lying on the floor of the room.
-    //
-    // A void carved from a field alone is symmetric about its own middle, and a
-    // room with the same shape above and below reads as a bubble rather than as
-    // somewhere to stand. Real rooms have flat floors, because whatever came off
-    // the ceiling is now lying on them.
-    //
-    // Applied as an erosion upwards: a point stays open only if the point this far
-    // above it is open too, which shaves a band off the floor and leaves the
-    // ceiling untouched. Costs one more sample of the room's own field, and gives
-    // the floor for free wherever the ceiling is high.
-    float rubble = 0.0f;
-};
-
-// What is subtracted from the rock.
+// The systems themselves are `cave::Settings` — see cave.h for why they are dug
+// by a walking agent rather than thresholded out of a field. What is left here
+// is everything about *where* they are allowed to be and what their walls look
+// like once they are cut, which is this module's business rather than theirs.
 struct CaveSettings {
-    // Depth below the surface within which no cave may open at all, and the
-    // distance below that over which they ramp up to full width.
+    // Depth below the surface within which no system may lie, and the distance
+    // below that over which they come in.
     //
-    // This is what keeps the ground solid. Without it the cave layers reach the
-    // surface and leave it perforated, which is the failure the old generator
-    // was made of.
-    float crust     = 56.0f;
+    // This is what keeps the ground solid. Only an entrance may cross it, and it
+    // crosses deliberately.
+    float crust     = 110.0f;
     float crustFade = 72.0f;
 
-    // How honeycombed the underground is, region by region. Very low frequency,
-    // so a region is somewhere the player notices arriving in.
+    // The systems.
+    cave::Settings systems{};
+
+    // How honeycombed the underground is, region by region, and the share of it
+    // that has caves at all — near the surface and far below it.
+    //
+    // Two figures because rarity is only ever felt at the surface, while depth is
+    // where the volume belongs. One number cannot say both. This is Terraria's
+    // split between the Underground and the Cavern layer, and it is a decision
+    // about depth rather than about chance.
+    //
+    // It gates whether a *cell* holds a system, so a region that says no is
+    // genuinely solid rather than holding thinner caves.
     NoiseShape region{};
+    float regionCoverage        = 0.5f;
+    float regionCoverageShallow = 0.5f;
+    float regionDeepens         = 1600.0f;
 
-    // Share of the underground that has caves at all, in [0,1]. A probability,
-    // not a cutoff: the cutoff achieving it is measured from the field by
-    // Calibrate, so reshaping the region does not change how much of the world
-    // is hollow.
+    // The irregularity applied to every wall once the systems are cut.
     //
-    // Two figures, because one is the single most consequential thing the cave
-    // settings get to say and it is not the same thing at the top as at the
-    // bottom. Rarity is felt at the surface — a cave is somewhere found, and it
-    // stops being one if the ground under every hill is already hollow. Depth is
-    // where the volume belongs, and it has to be generous there or the network
-    // stops joining up: corridors only meet where they cross, so thinning them
-    // thins the crossings faster than the corridors, and past a point the
-    // underground stops being a system and becomes a set of sealed pockets.
-    //
-    // Both are wanted, and they are only in conflict if the figure is one number.
-    // This is Terraria's split between the Underground and the Cavern layer,
-    // which is a decision about depth rather than about chance.
-    float regionCoverage        = 0.5f; // Far below the surface.
-    float regionCoverageShallow = 0.5f; // Just under the crust.
-
-    // Depth over which the one becomes the other.
-    float regionDeepens = 1600.0f;
-
-    // Distance in noise units over which a region fades into solid rock.
-    // Sharpens or softens the border between cave country and dead rock.
-    float regionFade = 0.15f;
-
-    // Displacement of the position every cave layer is read at, in pixels.
-    //
-    // This is the term that decides whether the underground reads as rock or as
-    // vector art, and nothing else in the settings can stand in for it.
-    //
-    // The zero set of a smooth field is a smooth curve. A band around one is
-    // therefore a ribbon, and a network of ribbons — however its width is
-    // modulated, however its junctions are blended — still reads as a set of long
-    // clean arcs meeting at clean angles, which is a thing no rock does. The
-    // reason is that every irregularity a cave has comes from the *path* being
-    // irregular, and the path is the contour of a field that has none.
-    //
-    // Warping fixes it at the source: the field is read at a position pushed
-    // around by another field, so the contour meanders, doubles back and kinks at
-    // whatever scale the warp works at. It is Inigo Quilez's fbm-of-fbm, the
-    // standard tool for exactly this, and it costs two samples for the whole cave
-    // stack rather than two per layer, since every layer is read at the same
-    // displaced position.
-    //
-    // The amplitude wants to be a good fraction of the corridor spacing. Small and
-    // it only roughens the wall, which `roughness` already does better; too large
-    // and the layers fold back through themselves and the network stops being
-    // navigable.
-    NoiseShape warp{};
-    float warpAmplitude = 0.0f;
-
-    // Pixels over which two layers meeting are blended into one another.
-    //
-    // The layers are unioned, and the exact union of two distances is their
-    // minimum — which creases. Two corridors crossing at a minimum leave a wedge
-    // of rock with a knife edge in each quadrant of the junction, and nothing in
-    // rock erodes to a point: what a real crossing does is open out. Blending the
-    // union over a few pixels is both the better picture and the more honest one.
-    //
-    // It carves: a smooth minimum is always at or below the true one, by up to a
-    // quarter of this wherever two surfaces come close. Coverage has to be
-    // measured with it switched on.
-    float blend = 0.0f;
-
-    // The rooms, at two scales.
-    //
-    // `chambers` are the widenings the corridor network runs through — frequent,
-    // a few character-heights across, and what stops a route being one long
-    // passage. `caverns` are the rare great voids, held back until well under the
-    // surface and opening out with depth, and they are what the descent is for.
-    //
-    // Two layers rather than one with a wider range, because a single field
-    // cannot be both common and rare. This is Minecraft's split between the
-    // tunnel systems and the cheese caves, and Terraria's between the Underground
-    // and the Cavern layer: both arrived at a size that varies by *depth* rather
-    // than by chance.
-    ChamberLayer chambers{};
-    ChamberLayer caverns{};
-
-    // The irregularity applied to every wall, after the layers are unioned.
+    // A swept circle is smooth, and a corridor built out of them has an outline
+    // made of arcs. This is what breaks that up, and it is the pointwise stand-in
+    // for the cellular-automaton pass every 2D cave generator runs over its dug
+    // layout: an automaton makes an outline organic by repeatedly asking each
+    // cell what its neighbours are doing, which needs a grid and several passes
+    // over it, and this generator is a pure function of one position.
     RoughnessSettings roughness{};
 
-    // Long horizontal halls, wholly regional. Stretched sideways so they can be
-    // walked, and generous, because this is the layer a cave system is made of.
-    TunnelLayer galleries{};
-
-    // Narrow links between the halls, and the layer that carries `floor` — see
-    // TunnelLayer::floor for why the connective tissue is the thin one.
-    TunnelLayer crawlways{};
-
-    // The way in from the surface, and the way down: the only layer allowed
-    // through the crust. Stretched vertically, so it descends rather than
-    // wanders.
-    TunnelLayer shafts{};
-
-    // Depth over which a shaft has to have decided whether it breaks daylight.
-    //
-    // Within it the layer is gated by the region, so that a hole in the ground
-    // leads to a cave system rather than into dead rock; below it the layer is
-    // ungated, because down there it is not an entrance any more but the only
-    // route from one depth to the next. Short, and measured: run over the whole
-    // crust instead, the gate held every shaft to a slit for the first few
-    // hundred pixels and nothing reached the surface at all.
-    float mouthDepth = 64.0f;
-
-    // Depth a shaft reaches before it pinches shut.
-    //
-    // It has two jobs and the second sets this number. Clearing the crust makes
-    // it an entrance; carrying on down until it meets the deep is what makes the
-    // rest of the world reachable, because every other layer runs sideways and a
-    // world of horizontal halls has no way from one depth to the next. Measured:
-    // stopping this just under the crust left everything below nine hundred
-    // pixels sealed off from the sky.
-    float shaftReach = 320.0f;
-
-    // Cutoffs measured from the fields themselves so the coverage figures above
-    // mean what they say. Filled by Calibrate; never written by hand.
+    // Cutoffs measured from the region field so the coverage figures mean what
+    // they say. Filled by Calibrate; never written by hand.
     struct Calibration {
         float region        = 1.0f;
         float regionShallow = 1.0f;
-        float chamber       = 1.0f;
-        float cavern        = 1.0f;
     };
 
     Calibration calibration{};

@@ -67,6 +67,7 @@ add_executable(${PROJECT_NAME}
     src/soil.cpp
     src/sod.cpp
     src/world.cpp
+    src/cave.cpp
     src/terrain.cpp
 )
 

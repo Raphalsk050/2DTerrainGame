@@ -1366,151 +1366,100 @@ int main(int argc, char **argv) {
                 },
             .caves =
                 {
-                    // Two hundred pixels of solid ground over everything below,
-                    // which is what keeps the surface a surface.
+                    // A hundred and ten pixels of solid ground over everything
+                    // below, which is what keeps the surface a surface. Only an
+                    // entrance may cross it.
                     .crust     = 110.0f,
                     .crustFade = 72.0f,
 
+                    // The systems themselves. Every number here is a fact about a
+                    // walk rather than about a field, which is the point of the
+                    // change: a passage is twenty-four steps of six pixels because
+                    // that is how far the digger went.
+                    .systems =
+                        {
+                            // A cell is wide and short because a system is. Nine
+                            // of them are searched per query, so the shape of the
+                            // cell is what keeps that search small.
+                            .cellSpan = 800.0f,
+                            .cellRise = 400.0f,
+
+                            // Half the eligible cells hold one. With the region
+                            // gate over the top, that comes out at a system every
+                            // couple of screens near the surface and most of the
+                            // ground occupied far below.
+                            .chance = 0.9f,
+
+                            // Two hundred and forty steps of six pixels: fourteen
+                            // hundred pixels of walking, which the wander folds
+                            // into something under a thousand across. Six is the
+                            // lattice step, so the walk cannot cut a corner finer
+                            // than the world can draw.
+                            .steps      = 240,
+                            .stepLength = 6.0f,
+
+                            .wander  = 0.34f,
+                            .damping = 0.72f,
+
+                            // Two fifths of a step into the vertical, so a passage
+                            // is walked rather than fallen down.
+                            .squash = 0.42f,
+
+                            // Thirty-two pixels of headroom near the crust, opening
+                            // to forty-eight far below — comfortably over the
+                            // character's twenty-six either way, since a passage
+                            // that has to be crouched through is a crawlway and
+                            // this layer is the route.
+                            .radius        = 16.0f,
+                            .radiusAtDepth = 24.0f,
+                            .growthDepth   = 1800.0f,
+
+                            .taper = 0.16f,
+
+                            // Three branches off each trunk, at a shade over sixty
+                            // degrees: enough that a system has somewhere to go
+                            // wrong in, few enough that it still reads as one
+                            // route with sides rather than as a net.
+                            .branches     = 3,
+                            .branchLength = 0.42f,
+                            .branchAngle  = 1.05f,
+                            .branchRadius = 0.78f,
+
+                            // A room every twenty steps or so, three and a bit
+                            // times the width of the passage that leads into it —
+                            // a hundred pixels of headroom, which is four of the
+                            // character.
+                            .roomChance = 0.05f,
+                            .roomSteps  = 7,
+                            .roomSwell  = 3.2f,
+                            .roomFloor  = 0.3f,
+
+                            // Under a third of systems reach daylight, and the one
+                            // that does opens forty-four pixels wide.
+                            .entranceChance = 0.9f,
+                            .entranceRadius = 22.0f,
+                            .entranceWander = 0.16f,
+                            .entranceSteps  = 90,
+                        },
+
                     // A tenth of the ground just under the crust is cave country,
-                    // rising to half of it far below. That split is where the whole
-                    // shape of the underground comes from: near the surface, where
-                    // rarity is what is actually felt, most of the rock is rock and a
-                    // cave is somewhere found; deep down it is generous, because that
-                    // is where the volume belongs and because corridors only join
-                    // where they cross — thin them out down there and the system
-                    // stops being a system.
-                    //
-                    // Fifteen hundred pixels to go from the one to the other, which is
-                    // about two screens of descent.
+                    // rising to half of it far below. Rarity is only ever felt at
+                    // the surface; depth is where the volume belongs.
                     .region                = {.frequency = 0.6f, .octaves = 2, .seed = 4410},
-                    .regionCoverage        = 0.42f,
-                    .regionCoverageShallow = 0.10f,
+                    .regionCoverage        = 0.55f,
+                    .regionCoverageShallow = 0.35f,
                     .regionDeepens         = 1500.0f,
-                    .regionFade            = 0.08f,
 
-                    // The warp, and it is the difference between rock and vector
-                    // art. Sixty pixels is a good share of the spacing between
-                    // corridors, so a passage wanders by more than its own width
-                    // over its length instead of running an arc; one feature every
-                    // three hundred pixels, so it bends several times per screen.
-                    // Three octaves, so it kinks at more than one scale.
-                    .warp          = {.frequency = 3.2f, .octaves = 3, .seed = 4425},
-                    .warpAmplitude = 64.0f,
-
-                    // Two texels of flare where two layers meet. Enough to take the
-                    // knife edge off a junction, small against the passages it joins.
-                    .blend = 10.0f,
-
-                    // The widenings the corridors run through. A twentieth of the
-                    // eligible ground, two and a half character heights of headroom
-                    // near the surface and three and a half well below it.
-                    .chambers = {.shape         = {.frequency = 4.0f, .octaves = 2, .seed = 4411},
-                                 .coverage      = 0.050f,
-                                 .height        = 62.0f,
-                                 .heightAtDepth = 92.0f,
-                                 .growthFrom    = 300.0f,
-                                 .growthTo      = 2000.0f,
-                                 .rubble        = 14.0f},
-
-                    // The great voids, and the reason to go down. A frequency low
-                    // enough that one spans several screens, a share small enough
-                    // that finding one is an event, and no height at all until well
-                    // under the surface — the ramp is what makes the depth mean
-                    // something rather than being somewhere the same caves repeat.
-                    //
-                    // Two hundred and forty pixels is over nine character heights,
-                    // which is the point at which a room stops being a wide corridor
-                    // and starts being somewhere with a roof out of reach.
-                    .caverns = {.shape         = {.frequency = 1.1f, .octaves = 2, .seed = 4419},
-                                .coverage      = 0.014f,
-                                .height        = 0.0f,
-                                .heightAtDepth = 240.0f,
-                                .growthFrom    = 900.0f,
-                                .growthTo      = 2600.0f,
-                                .rubble        = 30.0f},
-
-                    // The wall. One feature every forty pixels or so, moving it five
-                    // pixels either way — a texel of the terrain grid, which is the
-                    // smallest thing the outline can actually be drawn with.
-                    .roughness = {.shape     = {.frequency = 24.0f, .octaves = 2, .seed = 4418},
-                                  .amplitude = 5.0f,
-                                  .bias      = 0.329f,
-                                  .reach     = 20.0f},
-
-                    // The halls: stretched three to one, so they run sideways and can
-                    // be walked rather than fallen down. Wholly regional — outside
-                    // cave country there are no halls at all, and that is where most
-                    // of the rock the old settings hollowed out has gone back.
-                    //
-                    // The width is the width *before* the pinch takes fourteen off
-                    // it, so what is carved runs from nothing where the girth field
-                    // is low to some thirty-five pixels of half-width where it is
-                    // high — a passage that closes to a squeeze in places and opens
-                    // to a hall in others, rather than the parallel-sided pipe a
-                    // single number gives. The girth field is stretched less than the
-                    // halls themselves, so the width changes several times along one.
-                    .galleries = {.shape        = {.frequency = 0.7f, .octaves = 3, .aspect = 3.0f, .seed = 4412},
-                                  .width        = 36.0f,
-                                  .widthAtDepth = 44.0f,
-                                  .growthDepth  = 1400.0f,
-                                  .girth        = {.frequency = 3.6f, .octaves = 2, .aspect = 2.0f, .seed = 4415},
-                                  .swing        = 0.85f,
-                                  .pinch        = 0.45f,
-                                  .floor        = 0.18f},
-
-                    // The links between the halls, and the one layer that survives
-                    // dead rock. Less stretched, so they cut across the halls instead
-                    // of running alongside them.
-                    //
-                    // At a floor of nearly half, a crawlway between two systems comes
-                    // out around fourteen pixels of headroom — the character's
-                    // crouched height exactly, so the way between one cave and the
-                    // next is a squeeze on hands and knees. That is the cheapest
-                    // connectivity there is: measured, the same guarantee carried on
-                    // the halls cost four times the rock.
-                    .crawlways = {.shape        = {.frequency = 1.4f, .octaves = 3, .aspect = 1.5f, .seed = 4413},
-                                  .width        = 26.0f,
-                                  .widthAtDepth = 32.0f,
-                                  .growthDepth  = 1400.0f,
-                                  .girth        = {.frequency = 5.0f, .octaves = 2, .aspect = 1.5f, .seed = 4416},
-                                  .swing        = 0.80f,
-                                  .pinch        = 0.28f,
-                                  .floor        = 0.42f},
-
-                    // The way in, and the way down. Stretched the other way, so it
-                    // descends, and rare: roughly one mouth per screen and a half of
-                    // travel. Rarity comes from the frequency and the aspect
-                    // together, since a vertically stretched field has one curve per
-                    // band of horizontal distance.
-                    //
-                    // It widens as it falls rather than narrowing, which is the one
-                    // layer that does: a fissure is worked open from the bottom by
-                    // whatever ran down it. Swung hard and not pinched at all — an
-                    // entrance that closes partway down is an entrance to nothing,
-                    // and this is the one layer whose whole job is to arrive
-                    // somewhere.
-                    //
-                    // Stretched two and a half to one and no further, with an octave
-                    // more than the layers it crosses. Pushed past that the field's
-                    // zero set straightens into a set of near-parallel lines a fixed
-                    // distance apart, and what the underground reads as then is not a
-                    // cave system but a row of bars — the same fault as a corridor of
-                    // constant width, stood on end.
-                    .shafts = {.shape        = {.frequency = 0.40f, .octaves = 3, .aspect = 0.40f, .seed = 4414},
-                               .width        = 22.0f,
-                               .widthAtDepth = 26.0f,
-                               .growthDepth  = 1800.0f,
-                               .girth        = {.frequency = 2.5f, .octaves = 2, .aspect = 0.5f, .seed = 4417},
-                               .swing        = 0.55f,
-                               .floor        = 0.20f},
-
-                    // Far past the crust, because clearing it is only half of what a
-                    // shaft is for. Every other layer runs sideways, so this is the
-                    // only thing in the world that carries a route from one depth to
-                    // the next, and it has to reach the deep or the deep is sealed.
-                    .mouthDepth = 96.0f,
-
-                    .shaftReach = 4400.0f,
+                    // The wall: a fret over the whole of it, and rounded bites
+                    // taken out of it. A swept circle is smooth, and this is what
+                    // stops a corridor being an outline made of arcs.
+                    .roughness = {.shape         = {.frequency = 24.0f, .octaves = 2, .seed = 4418},
+                                  .amplitude     = 5.0f,
+                                  .bias          = 0.329f,
+                                  .lobes         = {.frequency = 20.0f, .octaves = 1, .seed = 4427},
+                                  .lobeAmplitude = 9.0f,
+                                  .lobeBite      = 0.62f,
+                                  .reach         = 22.0f},
                 },
 
             // The groundwater. A sixth of the open rock is under it, and all of
@@ -1938,26 +1887,25 @@ int main(int argc, char **argv) {
         // two knobs and a row of bare numbers is unreadable a day later.
         terrain::CaveSettings &c = tuned.caves;
 
-        const std::array<std::pair<const char *, float *>, 34> knobs = {{
-            {"region", &c.regionCoverage},        {"shallow", &c.regionCoverageShallow},
-            {"deepens", &c.regionDeepens},         {"fade", &c.regionFade},
-            {"blend", &c.blend},                  {"crust", &c.crust},
-            {"warp", &c.warpAmplitude},           {"warpfreq", &c.warp.frequency},
-            {"gwidth", &c.galleries.width},       {"gdeep", &c.galleries.widthAtDepth},
-            {"gpinch", &c.galleries.pinch},       {"gswing", &c.galleries.swing},
-            {"gfloor", &c.galleries.floor},       {"gfreq", &c.galleries.shape.frequency},
-            {"gaspect", &c.galleries.shape.aspect},
-            {"cwidth", &c.crawlways.width},       {"cdeep", &c.crawlways.widthAtDepth},
-            {"cpinch", &c.crawlways.pinch},       {"cswing", &c.crawlways.swing},
-            {"cfloor", &c.crawlways.floor},       {"cfreq", &c.crawlways.shape.frequency},
-            {"caspect", &c.crawlways.shape.aspect},
-            {"swidth", &c.shafts.width},          {"sdeep", &c.shafts.widthAtDepth},
-            {"sfloor", &c.shafts.floor},
-            {"sfreq", &c.shafts.shape.frequency}, {"saspect", &c.shafts.shape.aspect},
-            {"reach", &c.shaftReach},             {"mouth", &c.mouthDepth},
-            {"chamber", &c.chambers.coverage},
-            {"cavern", &c.caverns.coverage},      {"rough", &c.roughness.amplitude},
-            {"wdepth", &tuned.aquifer.depth},     {"wswing", &tuned.aquifer.swing},
+        const std::array<std::pair<const char *, float *>, 18> knobs = {{
+            {"region", &c.regionCoverage},
+            {"shallow", &c.regionCoverageShallow},
+            {"deepens", &c.regionDeepens},
+            {"crust", &c.crust},
+            {"chance", &c.systems.chance},
+            {"span", &c.systems.cellSpan},
+            {"rise", &c.systems.cellRise},
+            {"step", &c.systems.stepLength},
+            {"wander", &c.systems.wander},
+            {"squash", &c.systems.squash},
+            {"radius", &c.systems.radius},
+            {"deep", &c.systems.radiusAtDepth},
+            {"room", &c.systems.roomChance},
+            {"swell", &c.systems.roomSwell},
+            {"floor", &c.systems.roomFloor},
+            {"mouth", &c.systems.entranceChance},
+            {"fret", &c.roughness.amplitude},
+            {"lobe", &c.roughness.lobeAmplitude},
         }};
 
         for (int a = 6; a < argc; a++) {
