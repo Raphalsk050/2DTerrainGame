@@ -740,15 +740,20 @@ void Sky::DrawStars(Rectangle view, const Ground &ground) const {
     // Three reasons there is nothing to draw, all of them decided before a single
     // star is placed: the sun is up, the deck is closed over them, or the view is
     // under the ground.
+    //
+    // The cover is read through a curve rather than straight. A cloud that is
+    // actually in front of a star hides it below, one star at a time; this is only
+    // for the sky a closed deck seals over, and it has to stay out of the way until
+    // the sky really is closed or a fair night comes out as an overcast one.
     const float dark  = 1.0f - today_.light;
-    const float open  = 1.0f - std::clamp(now_.cover * stars.hidden, 0.0f, 1.0f);
+    const float open  = 1.0f - SmoothStep(stars.hideFrom, stars.hideAt, now_.cover);
     const float shown = dark * open;
 
     if (shown <= 0.004f) return;
 
     const float parallax = std::clamp(stars.parallax, 0.01f, 1.0f);
     const float step     = std::max(stars.spacing, 4.0f) * parallax;
-    const float pixel    = std::max(config::kPixelSize, 1.0f);
+    const float grain    = std::max(stars.size, 1.0f);
 
     // The field's own frame: the world scaled about the horizon, so the horizon
     // stays put and everything above it draws in towards it. That is what distance
@@ -797,50 +802,63 @@ void Sky::DrawStars(Rectangle view, const Ground &ground) const {
             // the same one the rain lands on.
             if (world.y > GroundAt(ground, world.x, terrain_)) continue;
 
-            // And behind a cloud, for the same reason and read the same way: out of
-            // the field at the star's own position, which is exactly what being
-            // covered by the cloud would have meant.
+            // And behind a cloud, read out of the field at the star's own position,
+            // which is exactly what being covered by the cloud would have meant.
+            //
+            // Faded across the outline rather than cut at it. The cloud on screen is
+            // rasterised from a lattice twelve pixels across and interpolated
+            // between, so its drawn edge and the field's exact edge disagree over
+            // about one cell in fifty — and every one of those is a star left
+            // burning on the rim of a cloud, which is precisely where it is noticed.
+            // Fading over a band swallows the disagreement, and it is what a star
+            // going behind the thin edge of a cloud does in any case.
+            float behind = 0.0f;
+
             if (world.y > ceiling && world.y < base) {
                 if (!asked) {
                     column = ColumnAt(world.x);
                     asked  = true;
                 }
 
-                if (MarginAt(world, column) > kCloudEdge) continue;
+                behind = SmoothStep(-stars.cloudEdge, stars.cloudEdge, MarginAt(world, column));
+                if (behind >= 0.996f) continue;
             }
 
-            // Put out by the air it has to shine through. The same airmass that
-            // whitens the horizon, which is why there are none down there and plenty
-            // overhead — and it thins them out gradually rather than ending the field
-            // on a line.
+            // Put out by the air it has to shine through, which near the ground is
+            // all of it. Nothing at the horizon, rising to full over `rise`, so the
+            // field ends well clear of the land instead of running down into it.
             const float altitude = std::max(air.horizon - world.y, 0.0f);
-            const float airmass  = air.thickness * std::exp(-altitude / std::max(air.scaleHeight, 1.0f));
 
-            const float through = std::exp(-stars.haze * airmass);
+            const float through = SmoothStep(0.0f, std::max(stars.rise, 1.0f), altitude);
 
             // Its own brightness, and the waver of the air in front of it.
             //
-            // The floor is high on purpose. A star is one square, and a square at a
-            // fifth alpha is the sky with a slightly lighter square in it — the mark
-            // has to carry its own colour or the whole field greys out.
-            const float magnitude = 0.55f + 0.45f * Hash(cell + 2);
+            // A narrow range on purpose, and the floor is high. Given the full range
+            // the field reads as noise rather than as a sky — the eye finds the
+            // scatter before it finds the pattern — and a mark this small at a low
+            // alpha is the sky with a slightly paler square in it, which carries no
+            // colour at all. The variety is in the colour instead.
+            const float magnitude = 1.0f - stars.spread * Hash(cell + 2);
 
-            const float waver =
-                1.0f - stars.twinkle * 0.5f *
-                           (1.0f + std::sin(time_ * stars.twinkleRate + Hash(cell + 3) * 2.0f * kPi));
+            const float waver = 1.0f - stars.twinkle * 0.5f *
+                                           (1.0f + std::sin(time_ * stars.twinkleRate + Hash(cell + 3) * 2.0f * kPi));
 
-            const float alpha = shown * through * magnitude * waver;
+            const float alpha = shown * through * magnitude * waver * (1.0f - behind);
             if (alpha <= 0.01f) continue;
 
             // Its temperature, which is the whole of its colour: blue-white at one
-            // end, amber at the other, most of them somewhere between.
-            const Color colour = Mix(stars.cool, stars.hot, Hash(cell + 4));
+            // end, amber at the other, and `tint` deciding how far the two ends
+            // actually run apart.
+            const float heat = 0.5f + (Hash(cell + 4) - 0.5f) * std::clamp(stars.tint, 0.0f, 1.0f);
 
-            // One square of the world's own lattice, like everything else drawn here.
-            const auto m = static_cast<int>(std::floor(world.x / pixel));
-            const auto n = static_cast<int>(std::floor(world.y / pixel));
+            const Color colour = Mix(stars.cool, stars.hot, heat);
 
-            DrawRectangleRec({static_cast<float>(m) * pixel, static_cast<float>(n) * pixel, pixel, pixel},
+            // Snapped to its own grain rather than the world's, since it is smaller
+            // than one of the world's pixels and has to sit still as the view moves.
+            const auto m = static_cast<int>(std::floor(world.x / grain));
+            const auto n = static_cast<int>(std::floor(world.y / grain));
+
+            DrawRectangleRec({static_cast<float>(m) * grain, static_cast<float>(n) * grain, grain, grain},
                              Fade(colour, alpha));
         }
     }

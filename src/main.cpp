@@ -432,24 +432,47 @@ int main() {
                 // rather than grain.
                 .spacing = 70.0f,
 
+                // Under the world's own pixel, which is five. A star at the size of
+                // a terrain tile reads as a tile rather than as a light, and it is
+                // the one thing here that is allowed off that lattice — nothing else
+                // in the world is a point at an unreachable distance.
+                .size = 3.0f,
+
                 // A seventh of the world's motion. Enough that walking a screen
                 // moves them a little and they sit behind the landscape rather than
                 // on it; little enough that they are plainly a long way off.
                 .parallax = 0.14f,
 
-                // Gentle. The air genuinely does put out everything near the horizon,
-                // but a strong figure here takes the whole field down with it, and
-                // the complaint about the first version of this was that the stars
-                // were too faint rather than too many.
-                .haze = 0.30f,
+                // Swept clean for the first three hundred pixels above the ground.
+                // A star sitting just over the treeline reads as a hole in the
+                // picture rather than as a sky, and it is the first thing the eye
+                // goes to because it is the part of the sky nearest the land.
+                .rise = 320.0f,
 
-                // A full sky has no stars in it at all, which is what a storm looks
-                // like from underneath.
-                .hidden = 1.0f,
+                // Untouched through a clear or a fair sky — the clouds that are
+                // there already hide what is behind them — and gone entirely by the
+                // time the deck is closed, which is what a storm looks like from
+                // underneath.
+                .hideFrom = 0.55f,
+                .hideAt   = 0.95f,
 
-                // Present but not restless. A quarter of the brightness, wavering a
-                // little under twice a second.
-                .twinkle     = 0.25f,
+                // Faded across a cloud's outline rather than cut at it. The cloud is
+                // rasterised from a lattice a dozen pixels across, so its drawn edge
+                // and the field's exact one disagree over about a fiftieth of it —
+                // and every one of those is a star left burning on the rim, which is
+                // exactly where it gets noticed.
+                .cloudEdge = 0.09f,
+
+                // A fifth between the brightest and the faintest, and colour doing
+                // the rest of the work. The full range reads as noise: the eye finds
+                // the scatter before it finds the sky.
+                .spread = 0.22f,
+                .tint   = 0.70f,
+
+                // Present but not restless. A seventh of the brightness, wavering a
+                // little under twice a second — enough to be alive, little enough
+                // that the field does not shimmer.
+                .twinkle     = 0.15f,
                 .twinkleRate = 1.7f,
 
                 // Two ends of a colour temperature rather than one white, and both

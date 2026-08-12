@@ -212,6 +212,14 @@ struct Stars {
     // sky; below about forty they stop reading as points and start reading as noise.
     float spacing = 70.0f;
 
+    // How big one is, in world pixels.
+    //
+    // Smaller than `config::kPixelSize`, and the only thing in the world drawn off
+    // that lattice. Everything else is a surface standing in the world and belongs
+    // to its grid; a star is a point at an unreachable distance, and at the world's
+    // own pixel size it reads as a tile of something rather than as a light.
+    float size = 3.0f;
+
     // Share of the world's own motion the field takes as the view moves.
     //
     // Zero pins them to the screen, which reads as dust on the glass; one puts them
@@ -222,21 +230,57 @@ struct Stars {
     // in towards it — which is what distance does.
     float parallax = 0.14f;
 
-    // How hard the air puts them out, read against the same airmass that whitens the
-    // horizon.
+    // Height above the horizon over which they come in, in pixels: nothing at the
+    // ground, full above it.
     //
-    // This is why there are none low in the sky and plenty overhead: light from a
-    // star near the horizon has the whole thickness of the air to cross and does not
-    // arrive. The fact that makes the horizon pale, seen from the other side.
-    float haze = 0.30f;
+    // The air low in the sky is thick enough to put out anything shining through it
+    // — the same fact that makes the horizon pale, seen from the other side — and it
+    // has to bite hard. Stars that run all the way down to the treeline read as
+    // holes punched in the picture rather than as a sky.
+    //
+    // Written as a height rather than as an airmass on purpose. Airmass only varies
+    // fivefold across the whole visible sky, so a coefficient strong enough to clear
+    // the horizon takes the top of the screen down with it; a height saturates, so
+    // the ground can be swept clean while everything above stays at full strength.
+    float rise = 320.0f;
 
-    // How far a fully overcast sky puts them out. At one a storm has no stars in it
-    // at all, which is what a storm looks like.
-    float hidden = 1.0f;
+    // The cover at which a sky begins putting its own stars out, and the cover at
+    // which it has finished.
+    //
+    // Not a straight share of the cover, and the difference is the whole of how a
+    // clear night looks. The clouds that are actually there already hide the stars
+    // behind them, one at a time and exactly; this is only for the sky a closed deck
+    // seals over, where there is no cloud at that point to ask. Dimming everything in
+    // proportion to a cover of a third would count it twice and leave a fair night
+    // reading as an overcast one.
+    float hideFrom = 0.55f;
+    float hideAt   = 0.95f;
+
+    // How far either side of a cloud's own outline a star behind it is faded out,
+    // in field units.
+    //
+    // Not a hard test against the outline, for two reasons. The cloud on screen is
+    // rasterised from a lattice a dozen pixels across and interpolated between, so
+    // its drawn edge and the field's exact edge disagree by up to a cell — and a
+    // star left shining on the rim of a cloud is the one place the eye goes. And an
+    // edge is where a cloud is thinnest, so something dimming as it passes behind
+    // one is what it should do anyway.
+    float cloudEdge = 0.09f;
+
+    // How much brighter the brightest star is than the faintest.
+    //
+    // Small. A field with the full range in it reads as noise rather than as a sky —
+    // the eye finds the scatter before it finds the pattern. What carries the
+    // variety is the colour.
+    float spread = 0.22f;
+
+    // How far apart in colour the two ends actually run, of the range `hot` and
+    // `cool` describe. One takes the pair as written; a half keeps them nearer white.
+    float tint = 0.70f;
 
     // How much a star's brightness wavers, and how quickly. Air moving in front of
     // it; the reason a star twinkles and a planet does not.
-    float twinkle     = 0.25f;
+    float twinkle     = 0.15f;
     float twinkleRate = 1.7f;
 
     // The two ends of the colour a star can be, drawn between per star.

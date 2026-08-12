@@ -913,7 +913,72 @@ midnight holds back 11.7% instead of 78%, and the ground under it exposes to 23
 against 26 in the open — darker, and still readable. At noon the taper is exactly 1
 and a daytime storm is untouched.
 
-### 6.9 Humidity, with a memory and no state
+### 6.9 Stars, and why they are the one thing drawn outside the light
+
+Scattered, not placed: one to a cell of a coarse lattice, each one's position,
+brightness, colour and twinkle hashed out of the cell it is in — the same trick the
+rain uses on its drops. Nothing is stored.
+
+**They are drawn *after* `lights.Compose()`, and they are the only part of the world
+that is.** The first version had them under it, between the air and the cloud, which
+is where they belong by layering. It does not work, and the arithmetic says exactly
+why: the multiply caps everything at the light's own value, and at midnight that is
+`[27,32,46]`. So the brightest possible star was `[27,32,46]` on a `[2,5,14]` sky —
+and worse, its *colour* went with its brightness. An amber star came out `[22,20,21]`,
+which is grey. **A star is a light, not a lit surface**, and the multiply cannot say
+that. Outside it the same star is `[217,159,111]`.
+
+The price is that the two things that should hide a star no longer do it by being
+drawn on top of it, so both are asked instead:
+
+- **The ground** comes in as the same `weather::Ground` the rain lands on — the
+  world's real surface, edits and all. `World::GroundUnder` now serves both.
+- **The cloud** is read out of the field at the star's own position, which is exactly
+  what being covered by it would have meant. Only for stars inside the band, and the
+  `ColumnAt` is hoisted per lattice column, so most stars cost nothing.
+
+Not paid for: a sprite drawn before the multiply and standing against the sky — the
+player in mid-air — can have a star in front of it. One square, and about one star in
+sixteen frames by area, so it is left.
+
+#### Two fades, and the mistake of having both do the same job
+
+- **The cover fade is read through a curve, not straight.** With a straight
+  `1 − cover`, a fair sky at 0.34 cover dimmed *every* star by a third — on top of the
+  per-star occlusion already hiding the ones actually behind a cloud. Counted twice,
+  and a fair night read as an overcast one. Now `smoothstep(0.55, 0.95, cover)`: clear
+  and fair nights keep **100%** of their stars, overcast 39%, a storm 0.2%. The
+  per-star test does the real work; this is only for the sky a closed deck seals over,
+  where there is no cloud at that point to ask.
+- **The ground fade is a height, not an airmass.** Airmass only varies about fivefold
+  across the whole visible sky, so a coefficient strong enough to clear the horizon
+  takes the top of the screen down with it — the first attempt left 35% of a star's
+  brightness sitting on the treeline, which reads as holes punched in the picture. A
+  `smoothstep(0, rise, altitude)` saturates: 0% at the ground, 9% at 60 px, full above
+  320 px.
+- **The cloud edge is faded across, not cut at.** The cloud on screen is rasterised
+  from a lattice twelve pixels across and interpolated between, so its drawn edge and
+  the field's exact edge disagree — measured, over **2.2% of the cloud area**. Every
+  one of those is a star left burning on the rim of a cloud, which is exactly where
+  the eye goes. `smoothstep(−cloudEdge, +cloudEdge, margin)` swallows the
+  disagreement, and a star dimming as it passes behind the thin edge of a cloud is
+  what it should do anyway.
+
+#### Small, and nearly all the same brightness
+
+Two things that had to be tuned against what they look like rather than derived:
+
+- **Three world pixels, not five.** A star is the only thing in the world drawn off
+  `config::kPixelSize`. Everything else is a surface standing in the world and
+  belongs to its grid; a star is a point at an unreachable distance, and at the size
+  of a terrain tile it reads as a tile. It keeps its own grain so it still sits still
+  as the view moves.
+- **A fifth between the brightest and the faintest**, down from a half. With the full
+  range the field reads as noise rather than as a sky — the eye finds the scatter
+  before it finds the pattern. The variety moved into the colour instead, and even
+  there the two ends are pulled 30% back towards each other.
+
+### 6.10 Humidity, with a memory and no state
 
 `Climate::humidity` was a static function of X with one consumer, and
 `Climate::temperature` had none at all. Both are now read by a number a game rule can
