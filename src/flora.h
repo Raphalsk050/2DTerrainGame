@@ -136,6 +136,21 @@ struct SpeciesShape {
 
     Crown crown = Crown::Clump;
 
+    // How wide one mass of foliage is, as a share of the reach of the tier it
+    // sits in.
+    //
+    // Per species because it trades against `tiers` and the two have to be set
+    // together. A mass has to be at least as tall as the gap to the tier above it
+    // or the crown opens into stripes; but it also has to be tall enough to carry
+    // a light crest, a middle and a shaded belly, which is about nine texels. Few
+    // tiers of large masses gives that. Many tiers of small ones — which is what
+    // a conifer needs for its notched outline — gives a mass the size of the leaf
+    // texture itself, and the two collide.
+    //
+    // The masses are set apart by whatever is left of the tier, so the canopy
+    // width in the table stays the width the crown comes out.
+    float mass = 0.42f;
+
     // How ragged the edge of the foliage is, as a share of a mass's own radius,
     // and how deep the gaps torn out of the middle of a crown go.
     //
@@ -259,16 +274,17 @@ inline constexpr SpeciesDef kSpecies[] = {
                 // A crown held well clear of the ground on a leaning trunk, and
                 // tiers that barely shrink towards the top: the rounded mass of
                 // the broadleaf.
-                .clearance  = 0.46f,
-                .trunkReach = 0.66f,
+                .clearance  = 0.40f,
+                .trunkReach = 0.64f,
                 .trunkWidth = 0.15f,
                 .trunkTaper = 0.58f,
                 .lean       = 0.85f,
-                .tiers       = 7,
-                .reach       = 1.0f,
+                .tiers       = 5,
+                .reach       = 1.04f,
                 .taper       = 0.82f,
-                .jitter      = 0.26f,
+                .jitter      = 0.15f,
                 .crown       = Crown::Clump,
+                .mass        = 0.56f,
                 .ragged      = 0.15f,
                 .gaps        = 0.20f,
                 .branchReach = 0.94f,
@@ -329,10 +345,11 @@ inline constexpr SpeciesDef kSpecies[] = {
                 .trunkTaper = 0.34f,
                 .lean       = 0.12f,
                 .tiers       = 10,
-                .reach       = 1.28f,
+                .reach       = 1.05f,
                 .taper       = 0.44f,
                 .jitter      = 0.12f,
                 .crown       = Crown::Frond,
+                .mass        = 0.55f,
 
                 // Few gaps: a conifer's holes are the spaces *between* its
                 // tiers, which the stack leaves on its own, not tears in the
@@ -395,16 +412,17 @@ inline constexpr SpeciesDef kSpecies[] = {
         .shape =
             {
                 // Slender and upright, with a narrow crown high on a pale trunk.
-                .clearance  = 0.48f,
-                .trunkReach = 0.78f,
+                .clearance  = 0.38f,
+                .trunkReach = 0.72f,
                 .trunkWidth = 0.11f,
                 .trunkTaper = 0.62f,
                 .lean       = 0.45f,
-                .tiers       = 7,
-                .reach       = 1.02f,
+                .tiers       = 5,
+                .reach       = 1.07f,
                 .taper       = 0.78f,
-                .jitter      = 0.22f,
+                .jitter      = 0.13f,
                 .crown       = Crown::Clump,
+                .mass        = 0.56f,
                 .ragged      = 0.14f,
                 .gaps        = 0.18f,
                 .branchReach = 0.92f,
@@ -460,16 +478,17 @@ inline constexpr SpeciesDef kSpecies[] = {
             {
                 // Short, broad and low-crowned: an orchard tree, and the one a
                 // player can reach the fruit of without climbing anything.
-                .clearance  = 0.48f,
-                .trunkReach = 0.68f,
+                .clearance  = 0.42f,
+                .trunkReach = 0.64f,
                 .trunkWidth = 0.16f,
                 .trunkTaper = 0.62f,
                 .lean       = 1.0f,
-                .tiers       = 6,
-                .reach       = 1.0f,
+                .tiers       = 4,
+                .reach       = 1.14f,
                 .taper       = 0.86f,
-                .jitter      = 0.30f,
+                .jitter      = 0.16f,
                 .crown       = Crown::Clump,
+                .mass        = 0.58f,
                 .ragged      = 0.15f,
                 .gaps        = 0.18f,
                 .branchReach = 0.88f,

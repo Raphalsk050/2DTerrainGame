@@ -109,6 +109,15 @@ float WidestCanopy(Layer layer) {
 // made, since it is the ceiling of exactly that expression.
 inline constexpr float kLargestScale = 1.14f;
 
+// Share of a mass's radius that is actually drawn.
+//
+// The rasteriser lays a mass down as 1 − d² and cuts it at a half, so foliage
+// stops at d = 1/√2 and a mass is visibly seventy-one per cent of the radius it
+// is given. Anything sized against a radius has to allow for it or it is out by
+// a factor of 1.41 — which is how every canopy came out narrower than the table
+// said, by an amount that grew with the masses.
+inline constexpr float kVisibleRadius = 0.7071f;
+
 // Horizontal position of the trunk at a height, for hanging the crown off.
 float TrunkAt(const Skeleton &skeleton, float y) {
     if (y <= skeleton.trunk[0].y) return skeleton.trunk[0].x;
@@ -431,13 +440,18 @@ Skeleton Build(Species species, Stage stage, std::int64_t seed, float scale) {
 
             Lobe &lobe = skeleton.lobes[skeleton.lobeCount++];
 
-            // Set apart by rather more than they are wide, so neighbouring
-            // masses meet at their edges instead of merging. Packed tightly the
-            // crown came out as one smooth blob with no structure in it at all,
-            // which is the opposite failure from the spray of separate leaves it
-            // replaced — what is wanted is bunches that touch.
-            lobe.at     = {axis + side * reach * 0.58f + wobbleX, y + wobbleY};
-            lobe.radius = reach * (0.42f + 0.09f * Roll(key, salt * 2 + 57, 0));
+            // Set apart by whatever the mass does not take, so the two together
+            // reach exactly the tier's own half width and the canopy width in the
+            // table stays the width the crown comes out at, whatever `mass` is.
+            //
+            // Against the *visible* radius, not the nominal one. A mass is laid
+            // down as 1 − d² and cut at a half, so foliage only reaches d = 1/√2
+            // and the drawn radius is seventy-one per cent of the one written
+            // here. Budgeting the full radius quietly spent width that never
+            // arrived: every crown in the table came out an eighth narrower than
+            // it asked for, and the shortfall grew as the masses did.
+            lobe.at     = {axis + side * reach * (1.0f - art.mass * kVisibleRadius) + wobbleX, y + wobbleY};
+            lobe.radius = reach * art.mass * (0.90f + 0.20f * Roll(key, salt * 2 + 57, 0));
             lobe.flatten = flatten;
             lobe.salt    = salt;
 

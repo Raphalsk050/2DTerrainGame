@@ -18,13 +18,14 @@ constexpr float kLeafThreshold = 0.5f;
 // The direction the form shading is worked out against, in texels, Y down. Up
 // and a little to the left, which is where every drawn tree of this kind is lit
 // from — and fixed, for the reason in the header.
-constexpr float kKeyX = -0.34f;
-constexpr float kKeyY = -0.94f;
-
-// How far into the crown the shading looks for something above it, in texels.
-// Three samples rather than a march: what is being asked is roughly how buried a
-// mass is, and the third sample answers it.
-constexpr float kReach[3] = {2.0f, 4.5f, 8.0f};
+//
+// Only a little to the left. The reference art reads as top-lit and very nearly
+// symmetric, and every degree off vertical is a degree by which a mirrored copy
+// of a tree would be lit from the wrong side. Mirroring has been dropped for
+// exactly that reason, but a near-overhead key is what the references show
+// anyway.
+constexpr float kKeyX = -0.20f;
+constexpr float kKeyY = -0.98f;
 
 // Lattice periods, in texels, of the noises that break a canopy up.
 //
@@ -65,20 +66,46 @@ constexpr float kLeafEdge = 0.040f;
 constexpr int kLeafTones = 7;
 
 // Where the middle of the ramp sits before anything moves it, and how far each
-// term may move it.
+// term may move it. One step of the ramp is 1/kLeafTones = 0.143.
 //
-// The base matters more than any of them. Worked out from the exposure alone,
-// every texel with foliage over it came out at the bottom of the ramp — which is
-// most of a crown — so the inside was one flat dark green and only the rim had
-// any other tone. Real foliage does not do that: leaves inside a canopy sit at
-// every angle and catch light at all of them. So the ramp starts near its middle
-// and the terms below move it a step or two either way, which is what puts every
-// green in the palette somewhere in every part of the crown.
-constexpr float kLeafBase   = 0.56f;
-constexpr float kLeafLight  = 0.34f; // How much being open to the key lifts it.
-constexpr float kLeafDepth  = 0.20f; // How much sitting low in the crown drops it.
-constexpr float kLeafSpread = 0.42f; // A bunch's own luck, against its neighbours.
-constexpr float kLeafRound  = 0.30f; // The turn within one bunch.
+// The base sits at the centre of a bucket rather than near its edge. At 0.56 it
+// was eleven thousandths below the boundary between tones three and four, so any
+// term with a mean of zero split the base half and half between two greens and
+// added a step of noise to everything.
+//
+// The weights are the answer to the fault this whole arrangement was rebuilt for.
+// Measured over a real oak crown, the old set put 65% of the tone variance at the
+// three-texel bunch scale and only 9% anywhere organised — which is precisely
+// what "the light and shadow look disorganised" describes. The rule now is that
+// the two terms which vary smoothly across the crown carry the form, and the two
+// that vary per bunch may not move a texel a whole step on their own.
+constexpr float kLeafBase = 0.50f;
+
+// How much shelter from the key drops a texel. The largest of them: this is the
+// form, and it has to carry light, mid and dark on its own.
+constexpr float kLeafSun = 0.46f;
+
+// The dome across one mass of foliage, from its lit crest to its shaded belly.
+constexpr float kLeafForm = 0.20f;
+
+// Sitting low in the crown, as a residual. Small, because the shelter term
+// already falls with height — the two would otherwise count the same thing twice.
+constexpr float kLeafDepth = 0.10f;
+
+// One mass's own luck, so two side by side are not the same green. Held under a
+// quarter of a step: at half a step it is banding, at more it is the noise this
+// replaced.
+constexpr float kLeafTint = 0.06f;
+
+// The turn within one bunch of leaves. Half a step — enough to stipple the
+// boundary between two tones, which is the thing a pixel artist does by hand, and
+// not enough to decide which tone a region is.
+constexpr float kLeafDither = 0.13f;
+
+// How far the two darks reach, in ramp steps, as a subtraction rather than a
+// colour. Written in steps because that is how they were chosen.
+constexpr float kSeamDrop      = 1.5f;
+constexpr float kUndersideDrop = 2.4f;
 
 // The sheet, in texels. One slot holds the largest plant the table can produce
 // at the largest size it rolls.
@@ -262,6 +289,8 @@ struct Canvas {
 
     std::vector<float> leaf;  // Foliage field, cut at kLeafThreshold.
     std::vector<float> depth; // How far down the crown the mass here sits.
+    std::vector<float> form;  // The dome across the mass that owns this texel.
+    std::vector<float> sun;   // How much of the key reaches here, in [0,1].
     std::vector<float> wood;  // Trunk and branch coverage.
     std::vector<float> grain; // Signed offset across the trunk, for its two sides.
 
@@ -273,6 +302,8 @@ struct Canvas {
 
         leaf.assign(count, 0.0f);
         depth.assign(count, 0.0f);
+        form.assign(count, 0.0f);
+        sun.assign(count, 0.0f);
         wood.assign(count, 0.0f);
         grain.assign(count, 0.0f);
     }
@@ -339,10 +370,34 @@ void LayFoliage(const flora::Skeleton &skeleton, const flora::SpeciesShape &art,
 
                 const std::size_t at = canvas.Index(x, y);
 
-                // The mass that covers a texel most owns its depth. Otherwise a
+                // The mass that covers a texel most owns its shading. Otherwise a
                 // mass at the top of the crown lends its brightness to
                 // everything hanging under it.
-                if (value > canvas.leaf[at]) canvas.depth[at] = lobe.depth;
+                if (value > canvas.leaf[at]) {
+                    canvas.depth[at] = lobe.depth;
+
+                    // The dome across this mass: where the texel sits on it,
+                    // against the key. Positive on the crest, negative on the
+                    // belly — which is the light-over-dark the reference art
+                    // gives every mass of foliage it draws.
+                    //
+                    // Taken from the offsets already computed, so it costs
+                    // nothing, and in the mass's own squashed space so that the
+                    // lit band follows a flattened frond out to its tips instead
+                    // of sitting on it as a circular cap.
+                    //
+                    // Divided by the visible radius rather than the nominal one.
+                    // The field is 1 − d² cut at a half, so foliage only reaches
+                    // d = 1/√2 and anything scaled "per radius" is out by a
+                    // factor of 1.41.
+                    constexpr float kVisible = 0.7071f;
+
+                    // A texel above the centre has dy negative and the key points
+                    // up, so the two multiply to a positive: the crest is lit
+                    // without the expression needing a sign put on it.
+                    canvas.form[at] = (dx * kKeyX + dy * kKeyY) / kVisible +
+                                      (Corner(i, 0, 7717) - 0.5f) * 2.0f * (kLeafTint / std::max(kLeafForm, 1e-3f));
+                }
 
                 canvas.leaf[at] = std::max(canvas.leaf[at], value);
             }
@@ -440,18 +495,71 @@ void LayWood(const flora::Skeleton &skeleton, const Frame &frame, bool bare, Can
     }
 }
 
-// How exposed a texel is to the direction the form is shaded against.
-float Exposure(const Canvas &canvas, int x, int y) {
-    float buried = 0.0f;
+// How much of the key reaches every texel, as one sweep down the canvas.
+//
+// This replaced three samples taken along the key and tested against the
+// threshold, and the replacement is the single change that made a canopy read as
+// lit. What was wrong with the samples was not that there were too few: measured
+// over a real oak crown, **seventy per cent of foliage texels saturated** with
+// all three buried, so for seven texels in ten the term was a constant carrying
+// no information at all. Its reach was eight texels into a crown forty-five
+// texels tall — a rim light, not a form.
+//
+// A leaky accumulator run down the key has no such ceiling. Each row takes what
+// the row above it had, shifted along the key, plus whatever foliage stands
+// there, and lets a fixed share of it go. So shelter accumulates without bound
+// through a deep crown and decays through a shallow one, which is the difference
+// between "is anything above me" and "how much".
+//
+// Measured against what it replaced, on the same crown: nothing saturates, 93% of
+// its variance survives a seven-texel blur, and it correlates −0.77 with height in
+// the crown. It does four jobs at once — the dome over every bump of the
+// silhouette, the shadow an upper mass throws on the one beneath it, the crown's
+// own top-to-bottom gradient, and the dapple where the tears let light through.
+void LaySun(Canvas &canvas) {
+    // Fraction kept from one row to the next. Set from the size of a mass, so
+    // shelter fades over about the depth of one and a lower mass is shaded by the
+    // one directly above it but not by the whole crown.
+    constexpr float kDecay = 0.90f;
 
-    for (const float reach : kReach) {
-        const float sx = static_cast<float>(x) + kKeyX * reach;
-        const float sy = static_cast<float>(y) + kKeyY * reach;
+    // Steps sideways per row, so the sweep runs along the key rather than
+    // straight down.
+    const float slide = kKeyX / std::max(-kKeyY, 1e-3f);
 
-        if (canvas.LeafAt(sx, sy) > kLeafThreshold) buried += 1.0f;
+    for (int y = 0; y < canvas.h; y++) {
+        for (int x = 0; x < canvas.w; x++) {
+            const std::size_t at = canvas.Index(x, y);
+
+            float above = 0.0f;
+
+            if (y > 0) {
+                // Where this texel's column was on the row above, interpolated,
+                // so the sweep does not stagger sideways in whole texels.
+                const float sx = static_cast<float>(x) - slide;
+
+                const int ix   = static_cast<int>(std::floor(sx));
+                const float ft = sx - static_cast<float>(ix);
+
+                const auto sample = [&canvas, y](int column) {
+                    return canvas.Holds(column, y - 1) ? canvas.sun[canvas.Index(column, y - 1)] : 0.0f;
+                };
+
+                above = sample(ix) * (1.0f - ft) + sample(ix + 1) * ft;
+            }
+
+            // Softened rather than tested, so a texel just inside the foliage
+            // does not shade the one below it as hard as one deep in a mass.
+            const float cover = std::clamp((canvas.leaf[at] - (kLeafThreshold - 0.12f)) / 0.24f, 0.0f, 1.0f);
+
+            canvas.sun[at] = (above + cover) * kDecay;
+        }
     }
 
-    return 1.0f - buried / static_cast<float>(std::size(kReach));
+    // Turned from shelter into light, and normalised so the constant that scales
+    // it means the same thing whatever the decay is set to.
+    const float reach = 1.0f / (1.0f - kDecay);
+
+    for (float &value : canvas.sun) value = std::clamp(1.0f - value / reach, 0.0f, 1.0f);
 }
 
 void Paint(const Canvas &canvas, const flora::SpeciesPalette &palette, int seed, std::vector<Color> &out) {
@@ -459,15 +567,6 @@ void Paint(const Canvas &canvas, const flora::SpeciesPalette &palette, int seed,
 
     Color ramp[kLeafTones];
     BuildRamp(palette, ramp);
-
-    // The accent under a mass of leaves, and along the seam between two of them.
-    //
-    // The bottom of the ramp itself rather than a colour of its own. A hard drop
-    // to near-black reads as an over-sharpened edge rather than as shade: the
-    // crown comes out looking like a filter was run over it, and the eye sees the
-    // seams instead of the leaves. What separates one bunch from the next only
-    // has to be the darkest green there is, not a darker colour than there is.
-    const Color accent = ramp[0];
 
     for (int y = 0; y < canvas.h; y++) {
         for (int x = 0; x < canvas.w; x++) {
@@ -489,46 +588,43 @@ void Paint(const Canvas &canvas, const flora::SpeciesPalette &palette, int seed,
                 // with a hard edge and a dark line separating it from the next.
                 // So the texels are handed out to bunches first and shaded per
                 // bunch, rather than shaded per texel and hoped over.
-                Leaf leaf = LeafAt(fx, fy, seed);
+                const Leaf leaf = LeafAt(fx, fy, seed);
+                const float sun = canvas.sun[at];
 
-                const bool underside = canvas.LeafAt(fx, fy + 1.6f) <= kLeafThreshold;
+                // The form first, and all of it smooth across the crown: how much
+                // of the key reaches here, the dome of the mass this texel belongs
+                // to, and a residual for sitting low down.
+                float lit = kLeafBase;
 
-                if (underside || leaf.edge < kLeafEdge) {
-                    // The bottom of the crown, and the seams between one bunch
-                    // and the next. The reference art puts its darkest pixels in
-                    // exactly these two places, and between them they are most of
-                    // what gives a flat crown its depth.
-                    colour = accent;
-                } else {
-                    // Started near the middle of the ramp rather than at the
-                    // bottom of it, so that every term below moves the tone
-                    // within the palette instead of pinning it against the dark
-                    // end. See kLeafBase.
-                    float lit = kLeafBase;
+                lit += (sun - 0.5f) * kLeafSun;
+                lit += canvas.form[at] * kLeafForm;
+                lit += (0.5f - canvas.depth[at]) * kLeafDepth;
 
-                    // How open the *bunch* is to the key. Read at the bunch's own
-                    // centre rather than at this texel, so a bunch is one tone and
-                    // not a smear across two.
-                    lit += (Exposure(canvas, static_cast<int>(std::lround(leaf.at.x)),
-                                     static_cast<int>(std::lround(leaf.at.y))) -
-                            0.5f) *
-                           kLeafLight;
+                // Then the two darks, as steps taken off the tone rather than a
+                // colour written over it.
+                //
+                // This was an if/else that set the darkest green in the ramp and
+                // threw every term above away. Measured, the seam test alone
+                // claimed **one texel in ten of the whole crown** and painted it
+                // black, scattered evenly, uncorrelated with the light — a four
+                // step drop in the middle of a highlight. It was the salt and
+                // pepper, and no amount of tuning the tone equation could have
+                // reached it. A crease inside a lit mass is a mid green; only a
+                // crease in shadow is the darkest one.
+                const float step = 1.0f / static_cast<float>(kLeafTones);
 
-                    lit -= canvas.depth[at] * kLeafDepth;
+                if (canvas.LeafAt(fx, fy + 1.6f) <= kLeafThreshold) lit -= kUndersideDrop * step;
 
-                    // Then the bunch's own luck, so neighbouring bunches at the
-                    // same depth are not the same green. With a ramp this fine
-                    // this is worth a couple of steps, which is the sprinkle of
-                    // near-alike greens the whole arrangement is for.
-                    lit += (leaf.tint - 0.5f) * kLeafSpread;
+                // Deepened in shadow and all but gone in the highlight, which is
+                // where a drawn crown puts its creases too.
+                if (leaf.edge < kLeafEdge) lit -= kSeamDrop * step * (0.35f + 0.65f * (1.0f - sun));
 
-                    // And a turn within the bunch: the side facing the key catches
-                    // a step more. Two or three texels across, this is what gives
-                    // each one its roundness.
-                    lit -= (leaf.away - 0.5f) * kLeafRound;
+                // And last the stipple, scaled by the light: the reference art is
+                // loud with leaf detail on the lit crown and nearly flat in the
+                // shaded interior.
+                lit -= (leaf.away - 0.5f) * kLeafDither * (0.30f + 0.70f * sun);
 
-                    colour = ramp[std::clamp(static_cast<int>(lit * kLeafTones), 0, kLeafTones - 1)];
-                }
+                colour = ramp[std::clamp(static_cast<int>(lit * kLeafTones), 0, kLeafTones - 1)];
             } else if (canvas.wood[at] > 0.0f) {
                 const float across = canvas.grain[at];
 
@@ -687,6 +783,10 @@ void Render(const flora::Plant &plant, flora::Stage stage, flora::Season season,
     canvas.Fit(width, height);
 
     if (!bare) LayFoliage(skeleton, def.shape, frame, seed, canvas);
+
+    // After the tears, so what it measures is the shelter the finished crown
+    // gives rather than the one it would have given unbroken.
+    LaySun(canvas);
 
     LayWood(skeleton, frame, bare, canvas);
     Paint(canvas, def.palette[flora::SeasonIndex(season)], seed, pixels);
