@@ -60,16 +60,10 @@ void Step(Buffer &buffer, const Settings &settings) {
 
             // Downwards, up to what the cell below can hold once compression is
             // taken into account.
-            // True when nothing underneath can take the liquid, so it has to
-            // find its way out sideways instead of falling.
-            bool restingOnSolid = true;
-
             if (buffer.InBounds(i, j + 1)) {
                 const int below = buffer.Index(i, j + 1);
 
                 if (buffer.blocked[below] == 0) {
-                    restingOnSolid = false;
-
                     float flow = StableState(remaining + buffer.mass[below]) - buffer.mass[below];
                     flow *= std::clamp(settings.fallRate, 0.0f, 1.0f);
 

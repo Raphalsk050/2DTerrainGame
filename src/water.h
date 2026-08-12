@@ -32,8 +32,10 @@ inline constexpr float kDryMass = 0.0001f;
 // Behaviour of the liquid.
 struct Settings {
     // Fraction of the available downward transfer applied per step, on top of
-    // the standard damping. Lower values make the liquid fall lazily.
-    float fallRate = 10.0f;
+    // the standard damping. Lower values make the liquid fall lazily, and one is
+    // as fast as the lattice allows: it is read as a share and clamped to it, so
+    // nothing above one means anything.
+    float fallRate = 1.0f;
 
     // Resistance to spreading sideways, in [0,1]. At 0 a surface levels as fast
     // as the lattice allows; at 1 horizontal flow stops entirely and the liquid

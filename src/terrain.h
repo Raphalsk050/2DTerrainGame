@@ -224,6 +224,128 @@ struct TunnelLayer {
     // certain point. Leave it at zero to keep the width constant.
     float widthAtDepth = 0.0f;
     float growthDepth  = 1200.0f;
+
+    // How the corridor's own width varies along its length.
+    //
+    // The band Tunnel carves is exactly `width` everywhere, by construction: it
+    // divides by the local slope precisely so that a corridor is the width it was
+    // asked for wherever it goes. What that buys in control it takes back in
+    // character, because a passage with perfectly parallel sides for its whole
+    // length is a pipe, and a network of them reads as plumbing rather than as
+    // rock. Nothing underground has a constant cross-section.
+    //
+    // So the width asked for varies from place to place, out of a field of its
+    // own. `swing` is the share of the width the modulation moves it either way,
+    // and it must be a *different* shape from `shape` and at a much lower
+    // frequency — sharing one would make the width a function of the corridor's
+    // own path, which reads as a pattern rather than as chance.
+    NoiseShape girth{};
+    float swing = 0.0f;
+
+    // Share of the width taken off everywhere, after the swing, in [0,1).
+    //
+    // Subtracted from the swing rather than scaling the result, and that is the
+    // whole point: scaling a width only makes a corridor narrow, while
+    // subtracting from it lets the corridor close *entirely* wherever the swing
+    // runs low. A network in which every passage is passable is a graph with no
+    // dead ends in it, and a cave with no dead ends is one nobody has to remember
+    // the way through. This is what puts squeezes, blind ends and rock plugs into
+    // the layer without a second field.
+    //
+    // A share and not a count of pixels, so that it commutes with `floor` below.
+    // In pixels the two compound — a layer held at a fraction of its width
+    // through dead rock had that fraction taken off an already pinched number and
+    // came out at a couple of pixels, which is to say not there at all, and the
+    // whole underground below the entrance layer's reach was sealed off.
+    float pinch = 0.0f;
+
+    // Share of its width the layer keeps where the region says solid rock, so
+    // that the layer narrows towards dead rock instead of ending on a flat wall.
+    //
+    // Exactly one layer needs this above zero, because exactly one layer has to
+    // guarantee that the underground is connected at all: without it a region
+    // border is a wall with no way past except to dig one, and a cave system with
+    // no way out of it is a cave system nobody reaches.
+    //
+    // It should be the *narrowest* layer that carries it, and that is not
+    // obvious. A wide layer held open everywhere costs its width over the whole
+    // world — measured, carrying it on the halls put a fifth of all rock into
+    // corridors nobody was meant to find, and the same connectivity on the
+    // crawlways cost a quarter of that. What the player walks through dead rock
+    // should be a squeeze, and a squeeze is cheap.
+    float floor = 0.0f;
+};
+
+// The irregularity of a cave wall.
+//
+// The zero set of a smooth field is a smooth curve and the band around it is a
+// smooth tube, so a corridor built from one alone has the walls of a cast pipe —
+// which is what the eye reads as procedural even when the route itself is good.
+//
+// Folding a field puts a crease wherever it crosses zero and a dome wherever it
+// peaks, so adding a folded high-frequency field back into the rock gnaws the
+// wall into alcoves and nubs. Cheap, and it is the one term that acts on every
+// layer at once, because it is applied to the finished distance rather than to
+// any one of them.
+struct RoughnessSettings {
+    NoiseShape shape{};
+
+    // Pixels the wall moves either way at full strength.
+    float amplitude = 0.0f;
+
+    // Value of the folded field the wall sits at, so that as much of it is bitten
+    // out as is left standing. Not derivable: the mean of a folded sum of octaves
+    // is not the mean of one, and the analytic figure is well off what the field
+    // does. Measured, in the manner of kFbmPeak.
+    float bias = 0.36f;
+
+    // Pixels either side of a surface the roughness acts over, fading to nothing.
+    //
+    // Bounded because the term is added to the whole field: applied everywhere it
+    // would put pockets of air in the middle of solid rock and pillars of rock in
+    // the middle of open air. What it is for is the outline, and the outline is
+    // only ever a few pixels wide.
+    float reach = 20.0f;
+};
+
+// A room, and how far it opens.
+//
+// Measured by how far a field is past its cutoff rather than by a distance to a
+// curve, because a room has no direction. What gives it a way in and out is the
+// tunnels crossing it.
+struct ChamberLayer {
+    NoiseShape shape{};
+
+    // Share of the eligible underground hollowed into rooms of this kind, in
+    // [0,1], measured by Calibrate in the manner of `regionCoverage`.
+    float coverage = 0.0f;
+
+    // Pixels of rock removed at the centre of a room, tapering to nothing at its
+    // edge. Sets how tall it is.
+    float height = 0.0f;
+
+    // Height it reaches far underground, and the two depths it grows between.
+    //
+    // This is the layer that makes descending mean something. A world whose caves
+    // are the same size at every depth has no reason to be deep; one where the
+    // rooms open out as you go down has the way down as its own reward, which is
+    // the arrangement both Minecraft and Terraria arrived at independently.
+    float heightAtDepth = 0.0f;
+    float growthFrom    = 0.0f;
+    float growthTo      = 1200.0f;
+
+    // Pixels of debris lying on the floor of the room.
+    //
+    // A void carved from a field alone is symmetric about its own middle, and a
+    // room with the same shape above and below reads as a bubble rather than as
+    // somewhere to stand. Real rooms have flat floors, because whatever came off
+    // the ceiling is now lying on them.
+    //
+    // Applied as an erosion upwards: a point stays open only if the point this far
+    // above it is open too, which shaves a band off the floor and leaves the
+    // ceiling untouched. Costs one more sample of the room's own field, and gives
+    // the floor for free wherever the ceiling is high.
+    float rubble = 0.0f;
 };
 
 // What is subtracted from the rock.
@@ -245,55 +367,168 @@ struct CaveSettings {
     // not a cutoff: the cutoff achieving it is measured from the field by
     // Calibrate, so reshaping the region does not change how much of the world
     // is hollow.
-    float regionCoverage = 0.5f;
+    //
+    // Two figures, because one is the single most consequential thing the cave
+    // settings get to say and it is not the same thing at the top as at the
+    // bottom. Rarity is felt at the surface — a cave is somewhere found, and it
+    // stops being one if the ground under every hill is already hollow. Depth is
+    // where the volume belongs, and it has to be generous there or the network
+    // stops joining up: corridors only meet where they cross, so thinning them
+    // thins the crossings faster than the corridors, and past a point the
+    // underground stops being a system and becomes a set of sealed pockets.
+    //
+    // Both are wanted, and they are only in conflict if the figure is one number.
+    // This is Terraria's split between the Underground and the Cavern layer,
+    // which is a decision about depth rather than about chance.
+    float regionCoverage        = 0.5f; // Far below the surface.
+    float regionCoverageShallow = 0.5f; // Just under the crust.
+
+    // Depth over which the one becomes the other.
+    float regionDeepens = 1600.0f;
 
     // Distance in noise units over which a region fades into solid rock.
     // Sharpens or softens the border between cave country and dead rock.
     float regionFade = 0.15f;
 
-    // The rooms. Isotropic and low frequency, since a chamber has no direction;
-    // what gives it a way in and out is the tunnels crossing it.
-    NoiseShape chamber{};
+    // Pixels over which two layers meeting are blended into one another.
+    //
+    // The layers are unioned, and the exact union of two distances is their
+    // minimum — which creases. Two corridors crossing at a minimum leave a wedge
+    // of rock with a knife edge in each quadrant of the junction, and nothing in
+    // rock erodes to a point: what a real crossing does is open out. Blending the
+    // union over a few pixels is both the better picture and the more honest one.
+    //
+    // It carves: a smooth minimum is always at or below the true one, by up to a
+    // quarter of this wherever two surfaces come close. Coverage has to be
+    // measured with it switched on.
+    float blend = 0.0f;
 
-    // Share of the eligible underground hollowed into chambers, in [0,1], on
-    // the same measured basis as `regionCoverage`.
-    float chamberCoverage = 0.0f;
+    // The rooms, at two scales.
+    //
+    // `chambers` are the widenings the corridor network runs through — frequent,
+    // a few character-heights across, and what stops a route being one long
+    // passage. `caverns` are the rare great voids, held back until well under the
+    // surface and opening out with depth, and they are what the descent is for.
+    //
+    // Two layers rather than one with a wider range, because a single field
+    // cannot be both common and rare. This is Minecraft's split between the
+    // tunnel systems and the cheese caves, and Terraria's between the Underground
+    // and the Cavern layer: both arrived at a size that varies by *depth* rather
+    // than by chance.
+    ChamberLayer chambers{};
+    ChamberLayer caverns{};
 
-    // Pixels of rock removed at the centre of a chamber, tapering to nothing at
-    // its edge. Sets how tall a room is.
-    float chamberDepth = 48.0f;
+    // The irregularity applied to every wall, after the layers are unioned.
+    RoughnessSettings roughness{};
 
-    // Long horizontal halls. Stretched sideways so they can be walked.
+    // Long horizontal halls, wholly regional. Stretched sideways so they can be
+    // walked, and generous, because this is the layer a cave system is made of.
     TunnelLayer galleries{};
 
-    // Share of their width the halls keep where the region says solid rock.
-    //
-    // Deliberately not zero. The halls are the only layer that guarantees the
-    // underground is connected at all, so a route has to survive even the
-    // stretches that are mostly rock; at zero, a region border becomes a wall
-    // there is no way past except to dig one.
-    float galleryFloor = 0.45f;
-
-    // Narrow links between the halls. Regional, so their density varies.
+    // Narrow links between the halls, and the layer that carries `floor` — see
+    // TunnelLayer::floor for why the connective tissue is the thin one.
     TunnelLayer crawlways{};
 
-    // The way in from the surface: the only layer allowed through the crust.
-    // Stretched vertically, so it descends rather than wanders.
+    // The way in from the surface, and the way down: the only layer allowed
+    // through the crust. Stretched vertically, so it descends rather than
+    // wanders.
     TunnelLayer shafts{};
 
-    // Depth a shaft reaches before it pinches shut. Has to clear
-    // crust + crustFade, or an entrance opens onto solid rock and leads
-    // nowhere.
+    // Depth over which a shaft has to have decided whether it breaks daylight.
+    //
+    // Within it the layer is gated by the region, so that a hole in the ground
+    // leads to a cave system rather than into dead rock; below it the layer is
+    // ungated, because down there it is not an entrance any more but the only
+    // route from one depth to the next. Short, and measured: run over the whole
+    // crust instead, the gate held every shaft to a slit for the first few
+    // hundred pixels and nothing reached the surface at all.
+    float mouthDepth = 64.0f;
+
+    // Depth a shaft reaches before it pinches shut.
+    //
+    // It has two jobs and the second sets this number. Clearing the crust makes
+    // it an entrance; carrying on down until it meets the deep is what makes the
+    // rest of the world reachable, because every other layer runs sideways and a
+    // world of horizontal halls has no way from one depth to the next. Measured:
+    // stopping this just under the crust left everything below nine hundred
+    // pixels sealed off from the sky.
     float shaftReach = 320.0f;
 
     // Cutoffs measured from the fields themselves so the coverage figures above
     // mean what they say. Filled by Calibrate; never written by hand.
     struct Calibration {
-        float region  = 1.0f;
-        float chamber = 1.0f;
+        float region        = 1.0f;
+        float regionShallow = 1.0f;
+        float chamber       = 1.0f;
+        float cavern        = 1.0f;
     };
 
     Calibration calibration{};
+};
+
+// Groundwater.
+//
+// Water underground is not a scattering of pools, it is a *level*. A stretch of
+// world has a height its groundwater stands at, and what is wet is whatever cave
+// space lies below that height — which is why one cave is flooded to a flat
+// surface and the next one along is bone dry, and why neither has a puddle
+// hanging halfway up a wall.
+//
+// Built this way it is also already in equilibrium, and that is not a detail. A
+// pool placed as a blob of mass is a shape the liquid automaton immediately
+// tears down, so it collapses the moment it is simulated, again every time the
+// chunk is rebuilt — which is the whole of why water appeared to move about when
+// the player walked back into a place. Water generated below a level has nowhere
+// to fall to, so it arrives settled and comes back identical.
+struct AquiferSettings {
+    // Where the table stands: this far below the nominal surface level, moved up
+    // or down by `swing` from a field of its own.
+    //
+    // Absolute rather than measured from the ground overhead, because a surface
+    // that followed the hills would not be level either.
+    //
+    // There is no second field deciding *whether* a stretch of world has an
+    // aquifer, and that absence is the design. Anything that switches the water
+    // off over one stretch and on over the next puts a boundary somewhere, and a
+    // boundary that falls inside a cave is a vertical wall of water with nothing
+    // holding it up — which the automaton pulls down the instant it runs, which is
+    // the very fault this replaced. A table that is always present and merely
+    // sometimes deeper than the deepest cave has no boundary to fall anywhere.
+    //
+    // `level.frequency` therefore has a hard requirement on it, and it is not a
+    // matter of taste: the table has to be flat over the width of a cave. The
+    // field moves `swing` pixels in half a feature, so the surface tilts by about
+    // `2 * swing / (kFeatureSpan / frequency)` pixels per pixel travelled, and
+    // over a few hundred pixels of cave that has to come to less than the lattice
+    // step or the water arrives sloped and immediately flows. In practice this
+    // means a feature tens of thousands of pixels across — which is what a
+    // regional water table is: it varies between one part of a country and
+    // another, not between one end of a cave and the other. `--caves` measures
+    // the tilt and prints it.
+    NoiseShape level{};
+    float depth = 1400.0f;
+    float swing = 1000.0f;
+
+    // Height the table is snapped to a multiple of, in pixels.
+    //
+    // This is what actually makes it level, and the frequency above is what makes
+    // the snapping cheap. A continuous field cannot be both varying and flat: to
+    // move `swing` pixels it has to slope somewhere, and any slope at all puts the
+    // whole surface out of equilibrium along its length. Snapping removes the
+    // slope outright — the table is exactly constant, and changes by a whole step
+    // at the few places the field underneath crosses a boundary.
+    //
+    // Those crossings are the one bad case, since a step falling inside a cave is
+    // a ledge in the water. They are as rare as the field is slow: at a tilt of a
+    // hundredth of a pixel per pixel a step of this size turns up once every few
+    // thousand, so the odds of one landing in any given cave are small and the
+    // fault when it does is one step and not a wall. `--caves` prints the tilt.
+    float step = 48.0f;
+};
+
+// The groundwater over a stretch of world.
+struct WaterTable {
+    float level = 0.0f; // World Y its surface stands at. Open space below is wet.
 };
 
 // The climate of a place: the two axes a biome will be chosen on.
@@ -331,6 +566,7 @@ struct Climate {
 struct Settings {
     SurfaceSettings surface{};
     CaveSettings caves{};
+    AquiferSettings aquifer{};
     ClimateSettings climate{};
 
     // Added to every layer's own seed, so one number reseeds the entire world
@@ -349,6 +585,13 @@ float Height(float worldX, const Settings &s);
 
 // Climate of a column, elevation included.
 Climate ClimateAt(float worldX, const Settings &s);
+
+// The groundwater over the span a position falls in.
+//
+// A function of the horizontal position alone, like the surface itself, and for
+// the same kind of reason: a level has one value per place, and anything that
+// varied with height would not be one.
+WaterTable TableAt(float worldX, const Settings &s);
 
 // Signed distance below the surface in pixels, fold included: positive
 // underground, negative in the open air.
@@ -374,6 +617,18 @@ float Density(Vector2 world, const Settings &s);
 struct Ground {
     float density; // Rock density in [0,1], exactly as Density reports it.
     float depth;   // Signed distance below the surface in pixels, fold included.
+
+    // Signed distance into the rock in pixels, caves subtracted: what the density
+    // is made from, before it is mapped into [0,1] and clamped there.
+    //
+    // Carried because the clamp destroys it. The field only has to resolve the
+    // few pixels either side of a contour, so kDensitySpan is small and the
+    // density saturates about thirteen pixels inside the rock — which is fine for
+    // drawing an edge and useless for any question about how deep in the rock
+    // something is. Anything that wants that distance has to read it here.
+    //
+    // Free: SolidityBelow computed it on the way to the density.
+    float solid;
 };
 
 Ground SampleGround(Vector2 world, const Settings &s);

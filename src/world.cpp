@@ -212,9 +212,11 @@ void World::CalibrateSpawn() {
         const ElementSpawn &spawn = kElements[e].spawn;
 
         // Nothing clears a cutoff of one, which is the right answer for a
-        // material that is not generated from its own noise at all.
+        // material that is not generated from its own noise at all — the covers,
+        // which are measured from the surface, and the liquids, which stand at a
+        // level the aquifer settings give them.
         spawnCutoff_[e] = 1.0f;
-        if (spawn.generator != Generator::Vein && spawn.generator != Generator::Pool) continue;
+        if (spawn.generator != Generator::Vein) continue;
 
         const float probability = std::clamp(spawn.probability, 0.0f, 1.0f);
         if (probability <= 0.0f) continue;
@@ -233,9 +235,16 @@ void World::CalibrateSpawn() {
             for (int j = 0; j < perAxis; j++) {
                 const Vector2 p = {(i - perAxis / 2) * feature * kStrideX, kSampledTop + j * feature * kStrideY};
 
-                if (!SpawnEligible(spawn, p, terrain::Density(p, settings_))) continue;
+                const terrain::Ground rock = terrain::SampleGround(p, settings_);
+                if (!SpawnEligible(spawn, p, rock.density)) continue;
 
-                values.push_back(terrain::Sample(p, SpawnNoise(spawn)));
+                // The wall lift is part of what the cutoff will be compared
+                // against, so it has to be part of what the cutoff is measured
+                // from. Measured without it, biasing a vein towards the cave walls
+                // would not move the ore there — it would simply add ore, and the
+                // probability in the table would quietly stop being the share it
+                // says it is.
+                values.push_back(terrain::Sample(p, SpawnNoise(spawn)) + WallLift(spawn, rock.solid));
             }
         }
 
@@ -282,8 +291,10 @@ float World::GeneratedValue(Element element, Vector2 world, const terrain::Groun
         // distance from its peak and survives outside its band only where its
         // noise happened to run high, which arrives as the occasional small
         // pocket a long way from home — the thing a hard edge made impossible.
-        float value = terrain::Sample(world, SpawnNoise(spawn)) - spawnCutoff_[ElementIndex(element)]
-                    - BandPenalty(spawn, world, ground.depth) + def.threshold;
+        // Lifted towards the wall of a cave, which is what makes exploring one
+        // pay better than digging through the rock beside it. See WallLift.
+        float value = terrain::Sample(world, SpawnNoise(spawn)) + WallLift(spawn, ground.solid)
+                    - spawnCutoff_[ElementIndex(element)] - BandPenalty(spawn, world, ground.depth) + def.threshold;
 
         // Bounded against the ground, so a vein ends on the terrain's own
         // contour rather than a fraction of a cell past it, hanging in the air
@@ -319,20 +330,42 @@ float World::GeneratedValue(Element element, Vector2 world, const terrain::Groun
         return value;
     }
 
-    case Generator::Pool:
-        // A liquid field holds mass, not the distance to a surface, so a vertex
-        // is filled or it is not and the automaton takes it from there. Fading
-        // it across the band edge would lay down a sheet of half-filled cells
-        // that drains the moment the world starts, which is not what a still
-        // water table looks like.
+    case Generator::Pool: {
+        // Groundwater, and so a level rather than a scattering: what is wet is the
+        // open space below the water table over this stretch of world, and nothing
+        // above it. See terrain::AquiferSettings for why it has to be built that
+        // way — a liquid placed as anything other than its own resting state is a
+        // shape the automaton immediately pulls down, and it does it again every
+        // time the chunk is rebuilt.
         //
-        // Its band is tested outright for the same reason: unlike an ore, a water
-        // table has a real top and bottom, and one that merely became less likely
-        // with depth would be a mist rather than a surface.
-        if (BandAbundance(spawn, world, ground.depth) <= 0.0f) return 0.0f;
+        // The element's own spawn noise is not consulted at all. A field of mass
+        // scattered through a cave is not what water does; it is what a water
+        // table looked like before there was one.
         if (!SpawnEligible(spawn, world, ground.density)) return 0.0f;
 
-        return (terrain::Sample(world, SpawnNoise(spawn)) > spawnCutoff_[ElementIndex(element)]) ? water::kMaxMass : 0.0f;
+        const terrain::WaterTable table = terrain::TableAt(world.x, settings_);
+
+        // Cells of water standing over this vertex.
+        const float under = (world.y - table.level) / static_cast<float>(spacing_);
+        if (under <= 0.0f) return 0.0f;
+
+        // The one vertex the surface passes through carries the share of its cell
+        // that lies under the waterline. That fraction is what the contour
+        // interpolates through, so the water is drawn level rather than stepping
+        // down the lattice a cell at a time.
+        //
+        // And below it the column is *compressed*, which is the part that cannot
+        // be left out. A settled column in this automaton is not uniform: two
+        // stacked cells come to rest with the lower holding kMaxCompress more
+        // than the upper, so equilibrium is a gradient and not a fill. Laying the
+        // water down at full mass all the way down instead looks right and is
+        // not: it is a column with too little at the bottom and too much at the
+        // top, so the whole surface sinks the moment it is simulated. Measured, a
+        // third of the water in a deep region moved. Written this way, none of it
+        // does — which is the entire point of describing the water as a level,
+        // and it is undone by getting the shape of the level wrong.
+        return std::min(under, 1.0f) * water::kMaxMass + std::max(under - 1.0f, 0.0f) * water::kMaxCompress;
+    }
     }
 
     return 0.0f;
@@ -958,13 +991,28 @@ void World::StepWater(Rectangle active) {
     int maxCy = 0;
     ChunkRange(active, minCx, minCy, maxCx, maxCy);
 
-    // Widened by one chunk because a write to a vertex on the region's border
-    // also lands in the chunk before it. Without the margin such a chunk would
-    // keep a stale flag and stay pinned in memory after draining.
-    for (int cx = minCx - 1; cx <= maxCx + 1; cx++) {
-        for (int cy = minCy - 1; cy <= maxCy + 1; cy++) {
+    // Only the chunks the region covers *whole*, and that restriction is the
+    // point of the loop rather than a detail of it.
+    //
+    // The flag says a chunk holds liquid the noise cannot reproduce, and clearing
+    // it un-pins the chunk. A chunk the region only partly covers has liquid this
+    // pass never looked at, so the write-back below cannot speak for it: clearing
+    // it there dropped the chunks along the edge of the simulated band from the
+    // long pinned distance to the short unpinned one, and what that looked like
+    // was water that moved every time the player walked into a new chunk.
+    for (int cx = minCx; cx <= maxCx; cx++) {
+        for (int cy = minCy; cy <= maxCy; cy++) {
             const auto it = chunks_.find(Key(cx, cy));
-            if (it != chunks_.end()) it->second.holdsLiquid = false;
+            if (it == chunks_.end()) continue;
+
+            const float span = ChunkSpan();
+            const float left = static_cast<float>(cx) * span;
+            const float top  = static_cast<float>(cy) * span;
+
+            const bool whole = left >= active.x && top >= active.y && left + span <= active.x + active.width
+                            && top + span <= active.y + active.height;
+
+            if (whole) it->second.holdsLiquid = false;
         }
     }
 

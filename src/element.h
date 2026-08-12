@@ -248,6 +248,28 @@ struct ElementSpawn {
 
     DepthBand band{};
 
+    // How much more likely the material is against the wall of a cave than in the
+    // middle of the rock, and how far from a wall that pull reaches, in pixels.
+    //
+    // The bias is added to the noise before it meets its cutoff, so it lowers the
+    // bar rather than placing anything: the veins are still the veins, there are
+    // simply more of them where the rock is open. A reach of a few tens of pixels
+    // is a seam in a cave wall; hundreds would be a district, which is a different
+    // idea and belongs to a field of its own.
+    //
+    // It exists because ore spread evenly through the rock rewards digging blind
+    // exactly as much as exploring, and a cave that pays no better than the rock
+    // beside it is scenery with a draught. Pulling the seams onto the walls is
+    // what makes walking a passage worth more than tunnelling, and it is the same
+    // move Minecraft makes with its copper and iron veins and Terraria with the
+    // ore it leaves showing in a cavern wall.
+    //
+    // `World::CalibrateSpawn` measures the cutoff with this included, so the
+    // probability above still means what it says: the material is not made more
+    // common by being biased, it is moved.
+    float wallBias  = 0.0f;
+    float wallReach = 40.0f;
+
     // How thick a cover lies where its climate suits it best, in pixels, and how
     // much its own noise thickens and thins that along the way.
     //
@@ -594,6 +616,13 @@ inline constexpr ElementDef kElements[] = {
                 // Shallow: the first thing dug up, thinning out well before the
                 // depths the later ores belong to.
                 .band = {.top = 200.0f, .bottom = 1600.0f, .peak = 480.0f, .scarcity = 0.17f, .jitter = 48.0f},
+
+                // Drawn onto the cave walls. See ElementSpawn::wallBias: the ore
+                // is moved rather than added, since the cutoff is measured with
+                // this in it, so what the bias buys is a reason to walk a passage
+                // instead of tunnelling past it.
+                .wallBias    = 0.200f,
+                .wallReach = 48.0f,
             },
         .light = {.opacity = 1.0f},
     },
@@ -617,6 +646,9 @@ inline constexpr ElementDef kElements[] = {
                 .veinCells   = 6.5f,
                 .space       = SpawnSpace::InsideGround,
                 .band        = {.top = 220.0f, .bottom = 1800.0f, .peak = 560.0f, .scarcity = 0.18f, .jitter = 44.0f},
+
+                .wallBias    = 0.170f,
+                .wallReach   = 48.0f,
             },
         .light = {.opacity = 1.0f},
     },
@@ -640,6 +672,9 @@ inline constexpr ElementDef kElements[] = {
                 .veinCells   = 6.0f,
                 .space       = SpawnSpace::InsideGround,
                 .band        = {.top = 400.0f, .bottom = 3200.0f, .peak = 1500.0f, .scarcity = 0.16f, .jitter = 56.0f},
+
+                .wallBias    = 0.100f,
+                .wallReach   = 48.0f,
             },
         .light = {.opacity = 1.0f},
     },
@@ -663,6 +698,9 @@ inline constexpr ElementDef kElements[] = {
                 .veinCells   = 3.5f,
                 .space       = SpawnSpace::InsideGround,
                 .band        = {.top = 700.0f, .bottom = 3400.0f, .peak = 1800.0f, .scarcity = 0.20f, .jitter = 64.0f},
+
+                .wallBias    = 0.130f,
+                .wallReach   = 48.0f,
             },
         .light = {.opacity = 1.0f},
     },
@@ -689,6 +727,9 @@ inline constexpr ElementDef kElements[] = {
                 .space       = SpawnSpace::InsideGround,
                 .band =
                     {.top = 1100.0f, .bottom = kUnboundedDepth, .peak = 2400.0f, .scarcity = 0.22f, .jitter = 72.0f},
+
+                .wallBias    = 0.180f,
+                .wallReach = 48.0f,
             },
         .light = {.opacity = 1.0f},
     },
@@ -715,6 +756,9 @@ inline constexpr ElementDef kElements[] = {
                 .veinCells   = 3.0f,
                 .space       = SpawnSpace::InsideGround,
                 .band        = {.top = 170.0f, .bottom = 1100.0f, .peak = 320.0f, .scarcity = 0.24f, .jitter = 40.0f},
+
+                .wallBias    = 0.035f,
+                .wallReach   = 48.0f,
             },
         .light = {.opacity = 1.0f},
     },
@@ -738,28 +782,23 @@ inline constexpr ElementDef kElements[] = {
                     .strata = 0.00f},
         .contour = {56, 152, 236, 255},
         .rules   = {.flows = true, .buoyancy = 1.0f},
+        // The only row whose extent this table does not describe.
+        //
+        // Everything else here is a field thresholded against a depth band, and
+        // that is the wrong shape for a liquid: a share of the cavities scattered
+        // through a band is not water, it is a mist of it, hanging at whatever
+        // height the noise happened to clear its cutoff. Water stands at a level.
+        // So `Generator::Pool` reads terrain::TableAt instead, and neither the
+        // shape, the probability nor the band below is consulted — `space` is the
+        // whole of what it takes from here, and it says the obvious thing, that
+        // water goes where the rock is not.
+        //
+        // See terrain::AquiferSettings for the level itself and for why placing a
+        // liquid anywhere but at its own resting height cannot be made to work.
         .spawn =
             {
-                // Lower than the ores by an order of magnitude: a flooded
-                // cavern is a place, not a pocket, and at the ores' frequency
-                // the water table would break into puddles the size of a vein.
                 .generator = Generator::Pool,
-                .shape     = {.frequency = 2.2f, .octaves = 2, .seed = 8102},
-
-                // Only part of the underground is wet. At a probability of one, every
-                // cavity in the band floods, which leaves nowhere to walk.
-                .probability = 0.30f,
-                .space       = SpawnSpace::OpenSpace,
-
-                // Below the surface: an underground water table, not rain.
-                // Standing water on open ground would be a separate band with
-                // its own top at the surface.
-                //
-                // A liquid is the one thing here that keeps a hard edge, so the
-                // peak sits midway and the scarcity is zero: a water table that
-                // thinned out with depth instead of ending would be a mist rather
-                // than a surface.
-                .band = {.top = 340.0f, .bottom = 2600.0f, .peak = 1470.0f, .scarcity = 0.0f, .jitter = 40.0f},
+                .space     = SpawnSpace::OpenSpace,
             },
 
         // Dims light rather than stopping it, so a pool reads as deep by
@@ -790,6 +829,29 @@ consteval bool PrecedencesAreDistinct() {
 }
 
 static_assert(PrecedencesAreDistinct(), "every occupying element needs its own precedence");
+
+// How much a vein's field is lifted for being near the wall of a cave, in the
+// units the field itself is measured in.
+//
+// terrain::Ground carries the answer already, in `solid`: the signed distance
+// into the rock in pixels, worked out on the way to the density and kept because
+// the density itself cannot answer this. So the term costs no samples at all.
+//
+// Read from `solid` and not from the density, and that is not interchangeable —
+// the density is clamped into [0,1] over kDensitySpan pixels, so it saturates
+// about thirteen pixels inside the rock and every seam in the world would think
+// it was against a wall.
+//
+// Smoothstepped rather than linear, so a seam thins away from the wall instead
+// of ending on a line parallel to it.
+inline float WallLift(const ElementSpawn &spawn, float solid) {
+    if (spawn.wallBias <= 0.0f) return 0.0f;
+
+    const float reach = std::max(spawn.wallReach, 1e-3f);
+    const float t     = std::clamp(solid / reach, 0.0f, 1.0f);
+
+    return spawn.wallBias * (1.0f - t * t * (3.0f - 2.0f * t));
+}
 
 // A cover reaching past the crust would meet the cave layers, and the first thing
 // it produced would be soil hanging from the roof of a gallery. The thickest a

@@ -18,6 +18,8 @@
 #include <array>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -43,7 +45,16 @@ constexpr float kMaxAccumulated = 0.25f;
 
 // Liquid is simulated over a band wider than the view, so that what happens
 // just off screen has already settled by the time it scrolls in.
-constexpr float kSimulationMargin = 128.0f;
+//
+// Wider than a chunk, which is what the promise above actually requires and what
+// a hundred and twenty-eight pixels did not deliver: a chunk is a hundred and
+// ninety-two, so at the old figure a chunk could be created and scroll into view
+// without a single vertex of it ever having been stepped.
+//
+// It also has to stay inside the band World::Update generates, or StepWater reads
+// through to freshly generated noise for the parts outside it — see the reserve
+// there, which is sized against this.
+constexpr float kSimulationMargin = 256.0f;
 
 // The lantern as linear light, at a given strength.
 light::Radiance Lantern(float strength) {
@@ -534,6 +545,532 @@ void ReportSurface(const terrain::Settings &settings, float fromX, float toX) {
     }
 }
 
+// What the cave settings actually carve, measured rather than argued.
+//
+// Four questions, and each is a way the underground can be wrong without looking
+// wrong in any one picture:
+//
+//  - **How much of the rock is gone.** Every layer adds into the same union and
+//    none of them can see the others, so the total is the one figure no single
+//    setting is responsible for and the one easiest to move by accident.
+//  - **How much of it can be reached from the sky.** The one that matters most
+//    and the one that cannot be seen from inside the game: a sealed pocket looks
+//    exactly like a cave right up until there is no way out of it, and the rarer
+//    the caves are the more each sealed one costs.
+//  - **How tall the passages are.** The character is 26 px standing and 14
+//    crouched, so a passage is walked, crawled, or is scenery — and which of the
+//    three cannot be read off a width setting, because a corridor's own width is
+//    measured across the corridor and not against gravity.
+//  - **How often the surface opens.** An entrance nobody finds is the same as no
+//    cave at all.
+//
+// Sampled on the lattice the world is stored on, because that is the grid the
+// contour is drawn from: anything finer would report passages the marching
+// squares cannot represent, and anything coarser would miss the ones it can.
+void ReportCaves(const terrain::Settings &settings, Rectangle region) {
+    const float step = static_cast<float>(config::kResolution);
+
+    const int cols = static_cast<int>(region.width / step);
+    const int rows = static_cast<int>(region.height / step);
+
+    if (cols < 2 || rows < 2) {
+        std::printf("region too small: %d x %d cells\n", cols, rows);
+        return;
+    }
+
+    const auto count = static_cast<std::size_t>(cols) * static_cast<std::size_t>(rows);
+    const auto index = [cols](int i, int j) { return static_cast<std::size_t>(j) * cols + i; };
+
+    // The whole region held at once. The flood fill has to see it as one
+    // connected thing, and a streaming version would have to keep the frontier
+    // anyway, which is most of the memory with none of the simplicity.
+    std::vector<unsigned char> solid(count);
+    std::vector<float> depth(count);
+
+    for (int j = 0; j < rows; j++) {
+        for (int i = 0; i < cols; i++) {
+            const Vector2 at = {region.x + static_cast<float>(i) * step, region.y + static_cast<float>(j) * step};
+
+            // Both numbers from one call, since the surface is much the most
+            // expensive part of either and SampleGround already pays for it once.
+            const terrain::Ground ground = terrain::SampleGround(at, settings);
+
+            depth[index(i, j)] = ground.depth;
+            solid[index(i, j)] = (ground.density > terrain::kSurfaceLevel) ? 1 : 0;
+        }
+    }
+
+    // Volume, in bands measured from the surface rather than from an absolute Y.
+    // Depth is what every cave layer is written against, and a band of absolute
+    // height would mix the underside of a mountain with the open air beside it.
+    constexpr int kBands      = 8;
+    constexpr float kBandSpan = 450.0f;
+
+    std::array<long, kBands> bandRock{};
+    std::array<long, kBands> bandVoid{};
+    std::array<long, kBands> bandOpen{};
+
+    const auto bandOf = [&](std::size_t c) { return std::min(static_cast<int>(depth[c] / kBandSpan), kBands - 1); };
+
+    for (std::size_t c = 0; c < count; c++) {
+        if (depth[c] <= 0.0f) continue;
+
+        if (solid[c] != 0) {
+            bandRock[bandOf(c)]++;
+        } else {
+            bandVoid[bandOf(c)]++;
+        }
+    }
+
+    // Then what the sky can get to, by flooding from the open air above the
+    // ground rather than from the top edge of the region. Seeding from the edge
+    // would call a cave unreachable purely because the rectangle was cropped
+    // above the hill it opens on.
+    std::vector<unsigned char> reached(count, 0);
+    std::vector<int> frontier;
+
+    for (int j = 0; j < rows; j++) {
+        for (int i = 0; i < cols; i++) {
+            const std::size_t c = index(i, j);
+
+            if (solid[c] != 0 || depth[c] > 0.0f || reached[c] != 0) continue;
+
+            reached[c] = 1;
+            frontier.push_back(static_cast<int>(c));
+        }
+    }
+
+    const auto spread = [&](std::vector<int> &stack, std::vector<unsigned char> &seen, unsigned char mark) {
+        long size = 0;
+
+        while (!stack.empty()) {
+            const int c = stack.back();
+            stack.pop_back();
+            size++;
+
+            const int i = c % cols;
+            const int j = c / cols;
+
+            const auto visit = [&](int ni, int nj) {
+                if (ni < 0 || ni >= cols || nj < 0 || nj >= rows) return;
+
+                const std::size_t n = index(ni, nj);
+                if (solid[n] != 0 || seen[n] != 0) return;
+
+                seen[n] = mark;
+                stack.push_back(static_cast<int>(n));
+            };
+
+            visit(i - 1, j);
+            visit(i + 1, j);
+            visit(i, j - 1);
+            visit(i, j + 1);
+        }
+
+        return size;
+    };
+
+    spread(frontier, reached, 1);
+
+    for (std::size_t c = 0; c < count; c++) {
+        if (depth[c] > 0.0f && solid[c] == 0 && reached[c] != 0) bandOpen[bandOf(c)]++;
+    }
+
+    // Whatever open rock the sky never arrived at is a pocket. Their sizes are
+    // worth more than their number: a hundred single cells left by the roughness
+    // term are noise, and one pocket the size of a room is a cave nobody can
+    // enter.
+    std::vector<unsigned char> pocket(count, 0);
+    std::vector<long> pockets;
+
+    long sealed = 0;
+
+    for (std::size_t c = 0; c < count; c++) {
+        if (solid[c] != 0 || reached[c] != 0 || pocket[c] != 0 || depth[c] <= 0.0f) continue;
+
+        pocket[c] = 1;
+
+        std::vector<int> stack{static_cast<int>(c)};
+        const long size = spread(stack, pocket, 1);
+
+        sealed += size;
+        pockets.push_back(size);
+    }
+
+    // Size a sealed void stops being a fault in the field and starts being a cave
+    // nobody can enter.
+    //
+    // A cave network in two dimensions cannot be both sparse and wholly connected
+    // — corridors only join where they happen to cross, and thinning them thins
+    // the crossings faster than the corridors. So the figure worth holding is not
+    // how much of the void the sky reaches but how much of it is *worth* reaching
+    // and does not: a hundred cells of blind crack behind a wall is rock with a
+    // hole in it, and two thousand cells is a hall the player will never see.
+    //
+    // Two hundred cells is about eight hundred pixels across if it were square,
+    // which is a screen's width of cave.
+    constexpr long kWorthFinding = 200;
+
+    long lost      = 0;
+    long lostCount = 0;
+    long largest   = 0;
+
+    for (const long size : pockets) {
+        largest = std::max(largest, size);
+
+        if (size < kWorthFinding) continue;
+
+        lost += size;
+        lostCount++;
+    }
+
+    long undergroundVoid = 0;
+    long undergroundRock = 0;
+
+    for (int band = 0; band < kBands; band++) {
+        undergroundVoid += bandVoid[band];
+        undergroundRock += bandRock[band];
+    }
+
+    // Clearance, per unbroken vertical run of open cells. Per run and not per
+    // cell, because what decides whether a passage is walked is the height of the
+    // passage, and a tall chamber would otherwise vote once for every cell in it.
+    //
+    // Only runs wholly under the crust are counted. A run that reaches open air
+    // has no ceiling, and averaging the sky into the passage heights is how a
+    // world of crawlways reports itself as walkable.
+    std::vector<float> runs;
+
+    for (int i = 0; i < cols; i++) {
+        int open      = 0;
+        bool grounded = true;
+
+        for (int j = 0; j < rows; j++) {
+            const std::size_t c = index(i, j);
+            const bool air      = solid[c] == 0;
+
+            if (air && depth[c] > settings.caves.crust) {
+                open++;
+                continue;
+            }
+
+            // A run ends at rock, and is thrown away if it ended by running out
+            // of crust instead — that one is a cave mouth, not a passage.
+            if (open > 0 && grounded) runs.push_back(static_cast<float>(open) * step);
+
+            grounded = !air;
+            open     = 0;
+        }
+    }
+
+    std::sort(runs.begin(), runs.end());
+
+    const auto share = [](long part, long whole) { return 100.0 * static_cast<double>(part) / std::max(whole, 1L); };
+
+    std::printf("region %.0f x %.0f px at (%.0f, %.0f)   %d x %d cells of %.0f px\n\n", region.width, region.height,
+                region.x, region.y, cols, rows, step);
+
+    std::printf("volume\n");
+    std::printf("%14s %9s %12s %12s\n", "depth", "void", "of it open", "cells");
+
+    for (int band = 0; band < kBands; band++) {
+        const long total = bandRock[band] + bandVoid[band];
+        if (total == 0) continue;
+
+        const auto from = static_cast<int>(band * kBandSpan);
+
+        if (band == kBands - 1) {
+            std::printf("%9d+     %8.1f%% %11.1f%% %12ld\n", from, share(bandVoid[band], total),
+                        share(bandOpen[band], bandVoid[band]), total);
+        } else {
+            std::printf("%9d-%-5d %8.1f%% %11.1f%% %12ld\n", from, static_cast<int>((band + 1) * kBandSpan),
+                        share(bandVoid[band], total), share(bandOpen[band], bandVoid[band]), total);
+        }
+    }
+
+    std::printf("%14s %8.1f%% %11.1f%% %12ld\n\n", "all rock", share(undergroundVoid, undergroundVoid + undergroundRock),
+                share(undergroundVoid - sealed, undergroundVoid), undergroundVoid + undergroundRock);
+
+    std::printf("connectivity\n");
+    std::printf("  reachable from the sky  %6.1f%% of the void\n", share(undergroundVoid - sealed, undergroundVoid));
+    std::printf("  sealed                  %6.1f%% in %zu pockets, largest %ld cells (%.0f px across if square)\n",
+                share(sealed, undergroundVoid), pockets.size(), largest,
+                std::sqrt(static_cast<double>(largest)) * step);
+    std::printf("  caves lost              %6.1f%% of the void in %ld sealed voids over %ld cells\n\n",
+                share(lost, undergroundVoid), lostCount, kWorthFinding);
+
+    if (runs.empty()) {
+        std::printf("clearance\n  no passages under the crust\n\n");
+    } else {
+        double sum   = 0.0;
+        long upright = 0;
+        long crouch  = 0;
+
+        // Counted by area as well as by passage, because the two answer different
+        // questions and the first is easy to read as the second. Half the passages
+        // being too low to stand in sounds like a world of crawlways, but a
+        // passage is a run of any length and the roughness leaves a great many
+        // slivers a texel deep in the wall of a hall. What the player is actually
+        // in most of the time is the share of the *space* that is stand-up-able.
+        double standing = 0.0;
+        double stooped  = 0.0;
+
+        for (const float height : runs) {
+            sum += height;
+
+            if (height >= player_config::kHeight) {
+                upright++;
+                standing += height;
+            }
+
+            if (height >= player_config::kCrouchHeight) {
+                crouch++;
+                stooped += height;
+            }
+        }
+
+        std::printf("clearance          (character %.0f px standing, %.0f crouched)\n", player_config::kHeight,
+                    player_config::kCrouchHeight);
+        std::printf("  %zu passages   median %.0f px   mean %.0f   tallest %.0f\n", runs.size(),
+                    runs[runs.size() / 2], sum / static_cast<double>(runs.size()), runs.back());
+        std::printf("  by passage: upright %5.1f%%  crouchable %5.1f%%\n",
+                    share(upright, static_cast<long>(runs.size())), share(crouch, static_cast<long>(runs.size())));
+        std::printf("  by space:   upright %5.1f%%  crouchable %5.1f%%\n\n", 100.0 * standing / std::max(sum, 1e-9),
+                    100.0 * stooped / std::max(sum, 1e-9));
+    }
+
+    // The groundwater, on the same footing as the rock: what share of the open
+    // space is under water, and how far the table tilts.
+    //
+    // The tilt is the figure that decides whether any of this works. A water
+    // surface only stays where it is put if it is level, so the table has to move
+    // by less than a lattice step across the width of a cave — measured here over
+    // the widest passage found above, since that is the worst case in this world
+    // rather than an assumed one.
+    {
+        // Width to judge the table's flatness over: a wide chamber, so the figure
+        // is the worst a real cave would see rather than an average.
+        constexpr float kCaveWidth = 300.0f;
+
+        long wet     = 0;
+        long steps   = 0;
+        float across = 0.0f;
+
+        for (int i = 0; i < cols; i++) {
+            const float x                   = region.x + static_cast<float>(i) * step;
+            const terrain::WaterTable table = terrain::TableAt(x, settings);
+
+            if (i > 0 && table.level != terrain::TableAt(x - step, settings).level) steps++;
+
+            // How far the surface moves across the width of a cave, which is the
+            // whole of what decides whether it is level enough to stay put.
+            across = std::max(across, std::fabs(table.level - terrain::TableAt(x - kCaveWidth, settings).level));
+
+            for (int j = 0; j < rows; j++) {
+                const std::size_t c = index(i, j);
+
+                if (solid[c] == 0 && depth[c] > 0.0f && region.y + static_cast<float>(j) * step > table.level) wet++;
+            }
+        }
+
+        std::printf("water\n");
+        std::printf("  %.1f%% of the void is under the table   moves %.0f px across a %.0f px cave, worst\n",
+                    share(wet, undergroundVoid), across, kCaveWidth);
+        std::printf("  a step of %.0f px every %.0f px   (the lattice is %.0f)\n\n", settings.aquifer.step,
+                    (steps > 0) ? region.width / static_cast<double>(steps) : region.width, step);
+    }
+
+    // The roughness field's own mid-point, which is the number RoughnessSettings
+    // has to be told and cannot work out: the mean of a folded sum of octaves is
+    // not the mean of one of them, and the analytic figure is well off what the
+    // field does. Authoring it away from this puts every wall in the world that
+    // many pixels out in the same direction.
+    {
+        const terrain::NoiseShape shape = settings.caves.roughness.shape;
+
+        double folded = 0.0;
+        long taken    = 0;
+
+        for (int j = 0; j < rows; j += 3) {
+            for (int i = 0; i < cols; i += 3) {
+                folded += std::fabs(terrain::Signed({region.x + static_cast<float>(i) * step,
+                                                     region.y + static_cast<float>(j) * step},
+                                                    shape));
+                taken++;
+            }
+        }
+
+        std::printf("wall\n  folded roughness averages %.3f — RoughnessSettings::bias is authored at %.3f\n\n",
+                    folded / std::max(taken, 1L), settings.caves.roughness.bias);
+    }
+
+    // And the mouths: columns where the sky itself reaches into the rock.
+    //
+    // Air within a short depth is not enough on its own, and the difference is
+    // exactly what the entrance gate is for — a shaft held shut for its first
+    // stretch and open below leaves a void under an unbroken lid, which is a cave
+    // with no way in and reads on this test as a mouth unless the flood fill is
+    // consulted. Asking whether the sky got there answers what is actually being
+    // counted.
+    const float lid = 40.0f;
+
+    long mouthColumns = 0;
+    long mouths       = 0;
+    long widest       = 0;
+    long run          = 0;
+
+    for (int i = 0; i < cols; i++) {
+        bool open = false;
+
+        for (int j = 0; j < rows && !open; j++) {
+            const std::size_t c = index(i, j);
+            open = solid[c] == 0 && reached[c] != 0 && depth[c] > 0.0f && depth[c] <= lid;
+        }
+
+        if (open) {
+            mouthColumns++;
+            run++;
+            widest = std::max(widest, run);
+            continue;
+        }
+
+        if (run > 0) mouths++;
+        run = 0;
+    }
+
+    if (run > 0) mouths++;
+
+    std::printf("mouths             (sky reaching within %.0f px of the surface)\n", lid);
+
+    if (mouths == 0) {
+        std::printf("  none over %.0f px — the underground has no way in\n\n", region.width);
+    } else {
+        std::printf("  %ld over %.0f px, one every %.0f px   mean %.0f px wide, widest %.0f\n\n", mouths, region.width,
+                    region.width / static_cast<double>(mouths), static_cast<double>(mouthColumns) / mouths * step,
+                    static_cast<double>(widest) * step);
+    }
+}
+
+// What exploring a cave is worth against digging blind, measured.
+//
+// The claim ElementSpawn::wallBias makes is that a passage pays better than the
+// rock beside it, and that is a ratio between two numbers neither of which can
+// be read off a setting: the share of the rock near a cave wall that holds a
+// material, against the share of the rock well away from one. Both are wanted —
+// too small a ratio and the caves are scenery, too large and the rock between
+// them is not worth a pickaxe.
+//
+// Sampled through World::SpawnValue, which reproduces the whole chunk pipeline
+// one vertex at a time, contest included. Anything cheaper would be measuring a
+// different world from the one generated.
+void ReportOre(const World &world, const terrain::Settings &settings, Rectangle region) {
+    const float step = static_cast<float>(config::kResolution);
+
+    std::array<long, kElementCount> nearWall{};
+    std::array<long, kElementCount> deepRock{};
+
+    long near = 0;
+    long deep = 0;
+
+    for (float y = region.y; y < region.y + region.height; y += step) {
+        for (float x = region.x; x < region.x + region.width; x += step) {
+            const Vector2 at = {x, y};
+
+            const terrain::Ground ground = terrain::SampleGround(at, settings);
+            if (ground.depth <= 0.0f || ground.density <= terrain::kSurfaceLevel) continue;
+
+            // How far into the rock this is, in the pixels the bias is written
+            // in. The reach is read from the table rather than assumed, since it
+            // is the distance the claim is about.
+            const bool wall = ground.solid <= kElements[ElementIndex(Element::Coal)].spawn.wallReach;
+
+            if (wall) {
+                near++;
+            } else {
+                deep++;
+            }
+
+            for (std::size_t e = 0; e < kElementCount; e++) {
+                if (kElements[e].spawn.generator != Generator::Vein) continue;
+                if (world.SpawnValue(static_cast<Element>(e), at) <= kElements[e].threshold) continue;
+
+                if (wall) {
+                    nearWall[e]++;
+                } else {
+                    deepRock[e]++;
+                }
+            }
+        }
+    }
+
+    std::printf("%ld cells of rock within reach of a wall, %ld well inside it\n\n", near, deep);
+    std::printf("%-9s %10s %12s %10s %8s\n", "", "bias", "at a wall", "in rock", "times");
+
+    for (std::size_t e = 0; e < kElementCount; e++) {
+        const ElementSpawn &spawn = kElements[e].spawn;
+        if (spawn.generator != Generator::Vein) continue;
+
+        const double atWall = 100.0 * nearWall[e] / std::max(near, 1L);
+        const double inRock = 100.0 * deepRock[e] / std::max(deep, 1L);
+
+        std::printf("%-9s %10.3f %11.3f%% %9.3f%% %8.1f\n", kElements[e].name, spawn.wallBias, atWall, inRock,
+                    (inRock > 0.0) ? atWall / inRock : 0.0);
+    }
+}
+
+// How far the liquid moves after being generated, which is the whole of whether
+// the world describes water at rest or water about to fall.
+//
+// A pool laid down as a shape the automaton disagrees with collapses the moment
+// it is stepped, and it does it again every time the chunk is rebuilt — so what
+// the player sees is water that has moved every time they walk back into a
+// place. The fix is not to hold the liquid in memory; it is for the generated
+// state to be the settled one. This measures whether it is.
+//
+// Reported as mass moved against mass present, so it reads as a share and does
+// not depend on how much water the region happened to contain.
+void ReportSettling(World &world, Rectangle region, int steps) {
+    world.Update(region);
+
+    const float before = world.TotalWater(region);
+
+    // A snapshot of every vertex, so that movement can be measured rather than
+    // inferred from the total — the automaton conserves mass exactly, so the
+    // total is unchanged whether nothing moved or everything did.
+    const float span = static_cast<float>(config::kResolution);
+
+    std::vector<float> was;
+
+    for (float y = region.y; y < region.y + region.height; y += span) {
+        for (float x = region.x; x < region.x + region.width; x += span) {
+            was.push_back(world.ValueAt(Element::Water, {x, y}));
+        }
+    }
+
+    for (int i = 0; i < steps; i++) world.StepWater(region);
+
+    double moved = 0.0;
+    double held  = 0.0;
+
+    std::size_t k = 0;
+
+    for (float y = region.y; y < region.y + region.height; y += span) {
+        for (float x = region.x; x < region.x + region.width; x += span, k++) {
+            const float now = world.ValueAt(Element::Water, {x, y});
+
+            moved += std::fabs(now - was[k]);
+            held += was[k];
+        }
+    }
+
+    std::printf("region %.0f x %.0f at (%.0f, %.0f), %d steps\n\n", region.width, region.height, region.x, region.y,
+                steps);
+    std::printf("water present   %.1f units over %zu vertices\n", before, was.size());
+    std::printf("water moved     %.1f units, %.2f%% of what was there\n", moved, 100.0 * moved / std::max(held, 1e-9));
+    std::printf("total after     %.1f units   (the automaton conserves mass, so this is a check on itself)\n",
+                world.TotalWater(region));
+}
+
 void Draw(const World &world, const Grove &grove, const Harvest &gathered, const Player &player,
           const Hotbar &hotbar, const Editor &editor, const LiquidLayer &liquids, const LightLayer &lights,
           const Camera2D &camera, const debug_view::Toggles &debug, float lantern, const char *notice,
@@ -751,9 +1288,23 @@ int main(int argc, char **argv) {
     // ReportColumn.
     const bool reading = argc >= 5 && TextIsEqual(argv[1], "--column");
 
+    // `--caves x y w h` measures what the cave settings carve over a region. See
+    // ReportCaves.
+    const bool digging = argc >= 6 && TextIsEqual(argv[1], "--caves");
+
+    // `--ore x y w h` measures what a cave wall is worth against blind rock. See
+    // ReportOre.
+    const bool assaying = argc >= 6 && TextIsEqual(argv[1], "--ore");
+
+    // `--settle x y w h [steps]` measures how far generated liquid moves once it
+    // is simulated. See ReportSettling.
+    const bool settling = argc >= 6 && TextIsEqual(argv[1], "--settle");
+
     // Resizable, with a floor under it: below the minimum the hotbar is wider than
     // the frame and the head-up display runs off the side of it.
-    SetConfigFlags((probing || counting || weighing || reading) ? FLAG_WINDOW_HIDDEN : FLAG_WINDOW_RESIZABLE);
+    SetConfigFlags((probing || counting || weighing || reading || digging || assaying || settling)
+                       ? FLAG_WINDOW_HIDDEN
+                       : FLAG_WINDOW_RESIZABLE);
 
     InitWindow(config::kScreenWidth, config::kScreenHeight, "marching squares");
     SetWindowMinSize(config::kMinScreenWidth, config::kMinScreenHeight);
@@ -817,62 +1368,171 @@ int main(int argc, char **argv) {
                 {
                     // Two hundred pixels of solid ground over everything below,
                     // which is what keeps the surface a surface.
-                    .crust     = 56.0f,
+                    .crust     = 110.0f,
                     .crustFade = 72.0f,
 
-                    // Roughly half the underground is cave country, with a fairly
-                    // sharp border, so arriving in it is noticeable.
-                    .region         = {.frequency = 0.6f, .octaves = 2, .seed = 4410},
-                    .regionCoverage = 0.55f,
-                    .regionFade     = 0.12f,
+                    // A tenth of the ground just under the crust is cave country,
+                    // rising to half of it far below. That split is where the whole
+                    // shape of the underground comes from: near the surface, where
+                    // rarity is what is actually felt, most of the rock is rock and a
+                    // cave is somewhere found; deep down it is generous, because that
+                    // is where the volume belongs and because corridors only join
+                    // where they cross — thin them out down there and the system
+                    // stops being a system.
+                    //
+                    // Fifteen hundred pixels to go from the one to the other, which is
+                    // about two screens of descent.
+                    .region                = {.frequency = 0.6f, .octaves = 2, .seed = 4410},
+                    .regionCoverage        = 0.50f,
+                    .regionCoverageShallow = 0.10f,
+                    .regionDeepens         = 1500.0f,
+                    .regionFade            = 0.08f,
 
-                    // The rooms. A twelfth of the eligible ground, opening to about
-                    // four times the character's height at the middle, which is what
-                    // gives the corridors a change of scale to lead into.
-                    .chamber         = {.frequency = 4.0f, .octaves = 2, .seed = 4411},
-                    .chamberCoverage = 0.070f,
-                    .chamberDepth    = 58.0f,
+                    // Two texels of flare where two layers meet. Enough to take the
+                    // knife edge off a junction, small against the passages it joins.
+                    .blend = 10.0f,
+
+                    // The widenings the corridors run through. A twentieth of the
+                    // eligible ground, two and a half character heights of headroom
+                    // near the surface and three and a half well below it.
+                    .chambers = {.shape         = {.frequency = 4.0f, .octaves = 2, .seed = 4411},
+                                 .coverage      = 0.050f,
+                                 .height        = 62.0f,
+                                 .heightAtDepth = 92.0f,
+                                 .growthFrom    = 300.0f,
+                                 .growthTo      = 2000.0f,
+                                 .rubble        = 14.0f},
+
+                    // The great voids, and the reason to go down. A frequency low
+                    // enough that one spans several screens, a share small enough
+                    // that finding one is an event, and no height at all until well
+                    // under the surface — the ramp is what makes the depth mean
+                    // something rather than being somewhere the same caves repeat.
+                    //
+                    // Two hundred and forty pixels is over nine character heights,
+                    // which is the point at which a room stops being a wide corridor
+                    // and starts being somewhere with a roof out of reach.
+                    .caverns = {.shape         = {.frequency = 1.1f, .octaves = 2, .seed = 4419},
+                                .coverage      = 0.014f,
+                                .height        = 0.0f,
+                                .heightAtDepth = 240.0f,
+                                .growthFrom    = 900.0f,
+                                .growthTo      = 2600.0f,
+                                .rubble        = 30.0f},
+
+                    // The wall. One feature every forty pixels or so, moving it five
+                    // pixels either way — a texel of the terrain grid, which is the
+                    // smallest thing the outline can actually be drawn with.
+                    .roughness = {.shape     = {.frequency = 24.0f, .octaves = 2, .seed = 4418},
+                                  .amplitude = 5.0f,
+                                  .bias      = 0.329f,
+                                  .reach     = 20.0f},
 
                     // The halls: stretched three to one, so they run sideways and can
-                    // be walked rather than fallen down. Thirty-four pixels of
-                    // headroom where they start, opening out to forty-six well
-                    // underground — still comfortably over the character's height,
-                    // since a hall that has to be crouched through is a crawlway.
-                    .galleries = {.shape        = {.frequency = 2.2f, .octaves = 2, .aspect = 3.0f, .seed = 4412},
-                                  .width        = 16.0f,
-                                  .widthAtDepth = 21.0f,
-                                  .growthDepth  = 1400.0f},
-
-                    // Kept a little under half where the region says solid rock, so
-                    // that dead rock is somewhere to squeeze through rather than
-                    // somewhere the world ends.
-                    .galleryFloor = 0.45f,
-
-                    // The links between the halls, at the height a character has to
-                    // crouch to pass. Less stretched, so they cut across the halls
-                    // instead of running alongside them.
+                    // be walked rather than fallen down. Wholly regional — outside
+                    // cave country there are no halls at all, and that is where most
+                    // of the rock the old settings hollowed out has gone back.
                     //
-                    // Thinned by frequency rather than by width when there are too
-                    // many of them: a narrower crawlway stops being passable at all,
-                    // and a passage that cannot be used is worse than one that is not
-                    // there.
-                    .crawlways = {.shape        = {.frequency = 3.0f, .octaves = 2, .aspect = 1.5f, .seed = 4413},
-                                  .width        = 10.0f,
-                                  .widthAtDepth = 13.0f,
-                                  .growthDepth  = 1400.0f},
+                    // The width is the width *before* the pinch takes fourteen off
+                    // it, so what is carved runs from nothing where the girth field
+                    // is low to some thirty-five pixels of half-width where it is
+                    // high — a passage that closes to a squeeze in places and opens
+                    // to a hall in others, rather than the parallel-sided pipe a
+                    // single number gives. The girth field is stretched less than the
+                    // halls themselves, so the width changes several times along one.
+                    .galleries = {.shape        = {.frequency = 0.7f, .octaves = 2, .aspect = 3.0f, .seed = 4412},
+                                  .width        = 30.0f,
+                                  .widthAtDepth = 38.0f,
+                                  .growthDepth  = 1400.0f,
+                                  .girth        = {.frequency = 3.6f, .octaves = 2, .aspect = 2.0f, .seed = 4415},
+                                  .swing        = 0.85f,
+                                  .pinch        = 0.45f,
+                                  .floor        = 0.18f},
 
-                    // The way in. Stretched the other way, so it descends, and rare:
-                    // roughly one mouth per screen and a half of travel. Rarity comes
-                    // from the frequency and the aspect together, since a vertically
-                    // stretched field has one curve per band of horizontal distance.
-                    // Three times the character's width, so the descent is a passage
-                    // and not a squeeze.
-                    .shafts = {.shape = {.frequency = 0.18f, .octaves = 2, .aspect = 0.22f, .seed = 4414},
-                               .width = 18.0f},
+                    // The links between the halls, and the one layer that survives
+                    // dead rock. Less stretched, so they cut across the halls instead
+                    // of running alongside them.
+                    //
+                    // At a floor of nearly half, a crawlway between two systems comes
+                    // out around fourteen pixels of headroom — the character's
+                    // crouched height exactly, so the way between one cave and the
+                    // next is a squeeze on hands and knees. That is the cheapest
+                    // connectivity there is: measured, the same guarantee carried on
+                    // the halls cost four times the rock.
+                    .crawlways = {.shape        = {.frequency = 1.4f, .octaves = 2, .aspect = 1.5f, .seed = 4413},
+                                  .width        = 22.0f,
+                                  .widthAtDepth = 28.0f,
+                                  .growthDepth  = 1400.0f,
+                                  .girth        = {.frequency = 5.0f, .octaves = 2, .aspect = 1.5f, .seed = 4416},
+                                  .swing        = 0.80f,
+                                  .pinch        = 0.28f,
+                                  .floor        = 0.42f},
 
-                    // Clears the crust with room to spare, so a mouth at the surface
-                    // always reaches the halls rather than stopping in rock.
-                    .shaftReach = 340.0f,
+                    // The way in, and the way down. Stretched the other way, so it
+                    // descends, and rare: roughly one mouth per screen and a half of
+                    // travel. Rarity comes from the frequency and the aspect
+                    // together, since a vertically stretched field has one curve per
+                    // band of horizontal distance.
+                    //
+                    // It widens as it falls rather than narrowing, which is the one
+                    // layer that does: a fissure is worked open from the bottom by
+                    // whatever ran down it. Swung hard and not pinched at all — an
+                    // entrance that closes partway down is an entrance to nothing,
+                    // and this is the one layer whose whole job is to arrive
+                    // somewhere.
+                    //
+                    // Stretched two and a half to one and no further, with an octave
+                    // more than the layers it crosses. Pushed past that the field's
+                    // zero set straightens into a set of near-parallel lines a fixed
+                    // distance apart, and what the underground reads as then is not a
+                    // cave system but a row of bars — the same fault as a corridor of
+                    // constant width, stood on end.
+                    .shafts = {.shape        = {.frequency = 0.50f, .octaves = 3, .aspect = 0.40f, .seed = 4414},
+                               .width        = 22.0f,
+                               .widthAtDepth = 26.0f,
+                               .growthDepth  = 1800.0f,
+                               .girth        = {.frequency = 2.5f, .octaves = 2, .aspect = 0.5f, .seed = 4417},
+                               .swing        = 0.55f,
+                               .floor        = 0.20f},
+
+                    // Far past the crust, because clearing it is only half of what a
+                    // shaft is for. Every other layer runs sideways, so this is the
+                    // only thing in the world that carries a route from one depth to
+                    // the next, and it has to reach the deep or the deep is sealed.
+                    .mouthDepth = 96.0f,
+
+                    .shaftReach = 4400.0f,
+                },
+
+            // The groundwater. A sixth of the open rock is under it, and all of
+            // that is deep: the halls the player first walks into are dry, and
+            // meeting water is arriving somewhere rather than the state of the
+            // underground.
+            .aquifer =
+                {
+                    // One feature spans some hundred and seventy thousand pixels,
+                    // which is what a regional water table is — it stands higher in
+                    // one part of a country than in another and is level everywhere
+                    // in between. The slowness is not a style: it is what makes the
+                    // snapping below rare, and the snapping is what makes the
+                    // surface flat.
+                    //
+                    // Three thousand pixels down at the middle and twelve hundred of
+                    // swing either way, so it runs between about eighteen hundred
+                    // below the ground and four thousand. Over that range it crosses
+                    // the caves at every height, which is the case worth having: a
+                    // chamber with its floor under water and its roof in the air.
+                    //
+                    // Twelve pixels to the step — two of the lattice. Measured, one
+                    // turns up every seven hundred pixels or so, and what a cave
+                    // unlucky enough to contain one gets is a two-cell ledge in its
+                    // surface, which settles in a few frames and is not visible
+                    // doing it. Snapping to a coarser figure would put them four
+                    // times further apart and make each one a waterfall.
+                    .level = {.frequency = 0.006f, .octaves = 1, .seed = 4430},
+                    .depth = 3000.0f,
+                    .swing = 1200.0f,
+                    .step  = 12.0f,
                 },
 
             // Nothing about the shape of the world reads these yet. The sky does, and
@@ -1233,6 +1893,91 @@ int main(int argc, char **argv) {
     if (counting) {
         ReportCovers(settings, static_cast<float>(std::atof(argv[2])), static_cast<float>(std::atof(argv[3])),
                      static_cast<float>(std::atof(argv[4])));
+
+        CloseWindow();
+        return 0;
+    }
+
+    if (settling) {
+        ReportSettling(world,
+                       {static_cast<float>(std::atof(argv[2])), static_cast<float>(std::atof(argv[3])),
+                        static_cast<float>(std::atof(argv[4])), static_cast<float>(std::atof(argv[5]))},
+                       (argc >= 7) ? std::atoi(argv[6]) : 600);
+
+        CloseWindow();
+        return 0;
+    }
+
+    if (assaying) {
+        ReportOre(world, world.Settings(),
+                  {static_cast<float>(std::atof(argv[2])), static_cast<float>(std::atof(argv[3])),
+                   static_cast<float>(std::atof(argv[4])), static_cast<float>(std::atof(argv[5]))});
+
+        CloseWindow();
+        return 0;
+    }
+
+    if (digging) {
+        // The world's own settings and not the ones written above, because the
+        // coverage cutoffs are measured into them by the constructor and an
+        // uncalibrated copy carves nothing at all.
+        terrain::Settings tuned = world.Settings();
+
+        // Any cave setting, overridden as `name=value` after the region, so that
+        // finding a set of them is a loop in a shell rather than a rebuild for
+        // every value. Named rather than positional because a sweep usually moves
+        // two knobs and a row of bare numbers is unreadable a day later.
+        terrain::CaveSettings &c = tuned.caves;
+
+        const std::array<std::pair<const char *, float *>, 32> knobs = {{
+            {"region", &c.regionCoverage},        {"shallow", &c.regionCoverageShallow},
+            {"deepens", &c.regionDeepens},         {"fade", &c.regionFade},
+            {"blend", &c.blend},                  {"crust", &c.crust},
+            {"gwidth", &c.galleries.width},       {"gdeep", &c.galleries.widthAtDepth},
+            {"gpinch", &c.galleries.pinch},       {"gswing", &c.galleries.swing},
+            {"gfloor", &c.galleries.floor},       {"gfreq", &c.galleries.shape.frequency},
+            {"gaspect", &c.galleries.shape.aspect},
+            {"cwidth", &c.crawlways.width},       {"cdeep", &c.crawlways.widthAtDepth},
+            {"cpinch", &c.crawlways.pinch},       {"cswing", &c.crawlways.swing},
+            {"cfloor", &c.crawlways.floor},       {"cfreq", &c.crawlways.shape.frequency},
+            {"caspect", &c.crawlways.shape.aspect},
+            {"swidth", &c.shafts.width},          {"sdeep", &c.shafts.widthAtDepth},
+            {"sfloor", &c.shafts.floor},
+            {"sfreq", &c.shafts.shape.frequency}, {"saspect", &c.shafts.shape.aspect},
+            {"reach", &c.shaftReach},             {"mouth", &c.mouthDepth},
+            {"chamber", &c.chambers.coverage},
+            {"cavern", &c.caverns.coverage},      {"rough", &c.roughness.amplitude},
+            {"wdepth", &tuned.aquifer.depth},     {"wswing", &tuned.aquifer.swing},
+        }};
+
+        for (int a = 6; a < argc; a++) {
+            const char *split = std::strchr(argv[a], '=');
+
+            const auto knob = (split != nullptr)
+                                ? std::find_if(knobs.begin(), knobs.end(),
+                                               [&](const auto &k) {
+                                                   return std::strncmp(k.first, argv[a],
+                                                                       static_cast<std::size_t>(split - argv[a])) == 0
+                                                          && k.first[split - argv[a]] == '\0';
+                                               })
+                                : knobs.end();
+
+            if (knob == knobs.end()) {
+                std::printf("unknown setting '%s'\n", argv[a]);
+
+                CloseWindow();
+                return 1;
+            }
+
+            *knob->second = static_cast<float>(std::atof(split + 1));
+        }
+
+        // Recalibrated after the overrides, since three of them are coverages and
+        // a coverage is only a share once its cutoff has been measured.
+        terrain::Calibrate(tuned);
+
+        ReportCaves(tuned, {static_cast<float>(std::atof(argv[2])), static_cast<float>(std::atof(argv[3])),
+                            static_cast<float>(std::atof(argv[4])), static_cast<float>(std::atof(argv[5]))});
 
         CloseWindow();
         return 0;

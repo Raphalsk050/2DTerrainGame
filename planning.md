@@ -259,14 +259,29 @@ because the number says 40.
   Depth(x, y) = y - Height(warp(x, y))                 warp folds the surface into overhangs
 
   Caves, each a signed band, subtracted from Depth:
-      chambers   isotropic, low frequency        the rooms
-      galleries  stretched horizontally          long walkable corridors
-      crawlways  narrow, tighter                 links between galleries
-      shafts     stretched vertically            the way in from the surface
+      shafts     stretched vertically      the way in, and the only way down
+      crawlways  narrow, carries `floor`   links, and the one layer in dead rock
+      galleries  stretched horizontally    long walkable halls, wholly regional
+      chambers   isotropic, low frequency  the widenings, with rubble floors
+      caverns    very low frequency        the great voids, grown in by depth
 
-  Solidity(x, y) = min(Depth, -chambers, -galleries, -crawlways, -shafts)
+  Each corridor's width varies along it (girth) and closes where it runs low
+  (pinch); each room is intersected with itself lifted by `rubble` to give it a
+  floor; the union is a smooth minimum, so junctions flare instead of creasing.
+
+  Solidity(x, y) = smin(Depth, -shafts, -crawlways, -galleries, -rooms) + roughness
   Density(x, y)  = kSurfaceLevel + Solidity / kDensitySpan      -> [0, 1]
+  Ground carries Solidity unclamped, since the density saturates 13 px in.
+
+  Water(x, y)    = the open space below terrain::TableAt(x), compressed  (§4.6)
 ```
+
+How much of any of it exists at a position is decided by three gates, all in
+[0,1] and all multiplied into the layer's width: the **crust**, which keeps
+everything but the shafts well under the ground; the **region**, whose coverage
+runs from a tenth just under the crust to half far below; and, for the shafts
+alone over their first hundred pixels, a **mouth** gate that asks whether there is
+cave country a long way *underneath* the opening.
 
 ### 4.2 The decisions that matter
 
@@ -325,6 +340,71 @@ near-solid rock and cave country, while a connected backbone always exists to
 travel through. Regional pinch-outs also read as natural cave ends, which a flat
 wall does not.
 
+**A corridor of constant width is a pipe.** `Tunnel` carves a band of exactly the
+half-width it is handed — the local-slope division above is what guarantees it —
+and what that control costs is character, because nothing underground has a
+constant cross-section. So the width handed in varies, out of a low-frequency
+field of its own (`TunnelLayer::girth`), and a share of it is subtracted
+everywhere (`pinch`) so that the corridor closes *entirely* where the swing runs
+low. The closures are as valuable as the widenings: a network in which every
+passage is open is a graph with no dead ends, and a cave with no dead ends is one
+nobody has to learn. This is Minecraft's `spaghetti_2d_thickness`.
+
+**The pinch is a share and the region floor is a factor, and they have to
+commute.** Written in pixels the two compounded: a layer held to a fraction of its
+width through dead rock had that fraction taken off an already-pinched number,
+came out at two pixels, and the entire underground below the entrance layer's
+reach was sealed off from the sky. Measured, not reasoned about — it looked
+perfectly plausible in the settings.
+
+**The wall is roughened after the layers are unioned, not before.** One folded
+high-frequency field added to the finished distance, faded out a few pixels either
+side of a surface. It has to be bounded: applied everywhere it leaves bubbles of
+air deep in the rock and pillars of rock in mid-air. This is
+`spaghetti_roughness`.
+
+**Layers are unioned with a smooth minimum.** The exact union is `min`, and `min`
+creases: two corridors crossing leave a wedge of rock with a knife edge in each
+quadrant. Nothing in rock erodes to a point. Blending over ten pixels is both the
+better picture and the truer one — and it carves, by up to a quarter of the blend,
+so coverage has to be measured with it on.
+
+**A room needs a floor, and a field cannot give it one.** A void carved from a
+threshold is symmetric about its own middle, which reads as a bubble. Intersecting
+the room with itself lifted by `rubble` pixels shaves a band off the *bottom* and
+leaves the ceiling alone — one extra sample, and rooms get flat debris floors and
+domed roofs.
+
+**The connective tissue is the narrowest layer, not the widest.** Exactly one
+layer needs `floor` above zero, or a region border is a wall. Carrying it on the
+halls put a fifth of all rock into corridors nobody was meant to find; the same
+guarantee on the crawlways cost a quarter of that. What the player crosses dead
+rock through should be a squeeze, and a squeeze is cheap.
+
+**Rarity is a fact about depth, not about chance.** `regionCoverage` is two
+figures: a tenth of the ground just under the crust and half of it far below.
+Rarity is only ever *felt* at the surface, and depth is where the volume belongs
+and where the network has to be dense enough to join up at all. One number cannot
+say both. This is Terraria's split between the Underground and the Cavern layer.
+
+**The entrance layer has two jobs that want opposite densities.** Above, a hole in
+the ground should be a find and should lead somewhere. Below, it is the only thing
+in the world carrying a route from one depth to the next, since every other layer
+runs sideways — measured, stopping the shafts just under the crust sealed
+everything below 900 px off from the sky. So it is gated only over the first
+`mouthDepth` pixels, gated on the region *well below the opening* rather than at
+it, and gated through the pinch rather than through an allowance, so a shaft the
+gate turns down is closed outright instead of reduced to a slit that still lets
+the daylight in.
+
+**Water is a level, not a scattering.** See §4.6.
+
+**Ore is pulled onto the cave walls.** One term added to the vein's field before it
+meets its cutoff, from `terrain::Ground::solid` — which is why `Ground` carries the
+unclamped distance at all, the density having saturated thirteen pixels in. The
+cutoff is measured *with* the term included, so the ore is moved rather than
+added and `probability` still means what it says.
+
 **Coverage figures are measured, not guessed.** `regionCoverage` and
 `chamberCoverage` are shares in [0, 1]. `terrain::Calibrate` samples the field
 and takes the quantile that achieves them, so reshaping the noise does not
@@ -333,23 +413,52 @@ already uses for ore veins in `World::CalibrateSpawn`.
 
 ### 4.3 What it measures
 
-Numbers from the offline probe, over 24 000 px of surface and a 6000 × 4200 px
-flood fill, with the settings as authored in `main.cpp`:
+`--caves x y w h` is the probe, and it is in the binary rather than beside it, so
+what it measures is the world these settings describe and not a copy of them kept
+in step by hand. It takes `name=value` overrides for every cave setting, so a
+sweep is a shell loop. `--ore` and `--settle` answer the other two questions
+below. Over 8000 × 4200 px with the settings as authored:
 
 | | |
 | --- | --- |
 | Relief | 271 px, about 90 px of swing per screen of travel |
 | Mean surface slope | 10°, steepest single step 14 px (a terrace riser) |
-| Open ground | 5.7% of columns; one cave mouth every ~680 px, ~38 px wide |
-| Cave volume | 15% of the rock just under the crust, rising to ~27% at 3500 px; 21% overall |
-| Reachable from the sky | 97.8% of all open space, without digging |
-| Sealed pockets | 2.2% of open space, largest 531 lattice cells |
-| Vertical clearance | median 36 px; 67% of runs walkable upright, 96% crouchable |
+| Cave volume | 12% of the rock just under the crust, 25% at 2000 px; 18.7% overall |
+| Reachable from the sky | 83.3% of all open space, without digging |
+| Caves lost | 11.0% of the void, in 28 sealed voids over 200 cells |
+| Vertical clearance | median 36 px; 90% of the *space* is walkable upright, 96% crouchable |
+| Cave mouths | one every 470 px, 52 px wide |
+| Water | 24% of the void under the table, which moves 12 px at worst across a cave |
+| Ore at a cave wall | 2.2× to 3.0× what the blind rock holds, per `--ore` |
+| Liquid movement after generating | 0.2–0.7% of the water present, over 600 steps |
 
-The last two rows are the ones worth watching when the settings change.
-Connectivity is what makes the caves explorable, and clearance is what makes them
-walkable — the character is 26 px tall and 14 px crouched, so a median of 36 px
-means most passages are walked and the crawlways are genuinely crawled.
+Four of those want reading carefully.
+
+**Reachable is 83% and not 98%, and lower is the price of rarer.** A cave network
+in two dimensions cannot be both sparse and wholly connected: corridors only join
+where they cross, and thinning them thins the crossings faster than the corridors
+themselves. Three dimensions hide this — Minecraft's caves can pass over and under
+each other — and a side-scroller cannot. So the figure to hold is not how much of
+the void the sky reaches but how much of it is *worth* reaching and does not: a
+hundred cells of blind crack behind a wall is rock with a hole in it, and two
+thousand is a hall nobody will see. That is the **caves lost** row, and it is the
+one to watch.
+
+**Clearance is quoted by space and not by passage.** Under half the *passages* are
+tall enough to stand in, which sounds like a world of crawlways and is not: a
+passage is any unbroken vertical run, and the wall roughness leaves a great many
+slivers a texel deep in the side of a hall. Nine tenths of the space the player is
+actually in is stand-up height.
+
+**Ore is measured as a ratio, not a share.** The claim `wallBias` makes is that
+walking a passage pays better than tunnelling past it, and that is two numbers.
+Between two and three is the band that was aimed at: below it the caves are
+scenery, above it the rock between them is not worth a pickaxe.
+
+**Liquid movement is the direct test of the water.** Generated water that is not
+already at rest collapses the moment it is stepped and does it again every time
+the chunk is rebuilt, which is what "the water moves when I walk back" is. Under
+one per cent is the automaton's own noise against the region border.
 
 ### 4.4 Cost
 
@@ -421,6 +530,51 @@ zero chunks remain pinned, walked back — 84 vertices and the same pit, the sam
 still clears everything.
 
 ---
+
+### 4.6 Water is a level, not a scattering
+
+The old water was a share of the cave vertices in a depth band, filled to full
+mass wherever the noise cleared its cutoff. Two things were wrong with it and only
+one of them was the amount.
+
+**A blob of mass is not a shape water can hold.** The liquid automaton settles a
+column into a *gradient* — two stacked cells come to rest with the lower holding
+`kMaxCompress` more than the upper — so anything laid down flat is out of
+equilibrium by construction and falls the moment it is stepped. And because
+liquid is deliberately not journalled, it falls again every time the chunk is
+rebuilt. That is the whole of "the water moves when I walk back into a place": not
+a chunk bug, a statement about the world that was never true.
+
+So the water is now the open space below a **water table** — `terrain::TableAt`,
+a function of the horizontal position alone, exactly like the surface and the
+climate. Everything follows from that:
+
+- **The table is snapped to a multiple of `step`.** A continuous field cannot be
+  both varying and flat: to move `swing` pixels it has to slope somewhere, and any
+  slope at all is a surface out of equilibrium along its whole length. Snapping
+  removes the slope; the frequency being very low — one feature spans some 170 000
+  px — is what makes the steps rare. Measured: a 12 px step every 730 px, so the
+  worst a cave sees is a two-cell ledge that settles in a few frames.
+- **There is no field deciding *whether* a stretch has water.** Anything that
+  switches the table off puts a boundary somewhere, and a boundary falling inside a
+  cave is a vertical wall of water with nothing holding it up. A table always
+  present and merely sometimes deeper than the deepest cave has no boundary to
+  fall anywhere. Rarity comes from the depth instead.
+- **The column is generated compressed.** `min(under, 1) * kMaxMass + max(under -
+  1, 0) * kMaxCompress`. Filling at full mass all the way down looks right and is
+  not — it is a column with too little at the bottom and too much at the top.
+  Measured with `--settle`: a third of the water in a deep region moved before this
+  and under one per cent after it.
+
+Where the table crosses a cave is the case worth having, and it is common because
+the table sweeps 2400 px across the world: a chamber with its floor under water and
+its roof in the air.
+
+Two chunk-lifecycle faults went with it. `StepWater` cleared `holdsLiquid` over a
+range a chunk wider than the one it wrote back, so chunks along the edge of the
+simulated band lost their pin and were dropped at 384 px instead of 2304. And
+`kSimulationMargin` was 128 px against a 192 px chunk, so a chunk could be created
+and scroll into view without a single vertex of it ever having been stepped.
 
 ## 5. Ores
 
@@ -1085,20 +1239,14 @@ in the manner of `kElements`, each row a set of `SurfaceSettings` and
 neighbours over a border band. Blending is the hard part — a hard switch puts a
 cliff on every biome border. Blend the *parameters*, not the resulting heights.
 
-**Aquifers.** Water currently spawns from one global band with a fixed top. A
-per-region water table — its own low-frequency field giving a local surface
-level — is what makes one cave flooded and the next one dry, and it is how
-Minecraft avoids a world where every cave below y is full.
-
 **Ravines.** Long narrow vertical gashes breaking the surface. Cheap: the shaft
 layer with a much lower frequency, much greater reach and a width that grows
 downward instead of shrinking.
 
-**Ore districts, and ore that follows the caves.** Veins know their depth band and
-nothing else. Minecraft's `vein_toggle` ties them to a second low-frequency field
-so ore arrives in rich districts rather than evenly. Better still for gameplay:
-bias veins *towards* cave walls, so exploring pays more than tunnelling blind.
-Both are one more term in `World::GeneratedValue`.
+**Ore districts.** Veins know their depth band and their distance from a cave wall,
+and nothing else. Minecraft's `vein_toggle` ties them to a second low-frequency
+field so ore arrives in rich districts rather than evenly. One more term in
+`World::GeneratedValue`, on the model of the wall bias already there.
 
 **Emerald needs biomes to mean anything.** It is in as the shallowest and rarest
 ore, which keeps the shape of the idea, but the rule behind it — mountains only,
@@ -1123,9 +1271,10 @@ in `World`, not in `terrain`, to keep the generator stateless. Note that it is
 only valid while `warpAmplitude` is zero, since the fold makes `Height` depend on
 the height it is read at.
 
-**Inspecting it from inside the game.** There is an offline probe (statistics and
-one-pixel-per-world-pixel renders) that was written to tune this and is not in the
-repository. What the game itself now has: `F` for free flight, which suspends
+**Inspecting it from inside the game.** The offline probes are now in the binary —
+`--probe`, `--caves`, `--ore`, `--settle`, `--covers`, `--column`, `--surface`,
+`--sun`, `--tones` — so they measure the world these settings describe rather than
+a copy kept in step by hand. What the game itself has: `F` for free flight, which suspends
 gravity and collision so a cave system can be followed through the rock; `F6` to
 skip the light multiply so the world can be read unlit; `F7` to run the weather and
 the day forty times over; and `F8` to run the day on to its next quarter, eased in
