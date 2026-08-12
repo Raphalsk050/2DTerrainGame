@@ -167,7 +167,7 @@ void DrawBrushMode(const Editor &editor) {
 // doing and what the light is doing to it are two questions, and answering them
 // together is how a palette gets tuned against a time of day.
 void DrawProbe(World &world, Grove &grove, Harvest &gathered, Rectangle strip, const char *path, int zoom,
-               float seconds, bool plants, bool lit) {
+               float seconds, bool plants, int lit) {
     // Run the clock on before drawing, so a still picture can be taken of a world
     // that has been blowing for a while. The sway and the gust are both pure
     // functions of this clock, so two probes a second apart are two frames of the
@@ -217,12 +217,26 @@ void DrawProbe(World &world, Grove &grove, Harvest &gathered, Rectangle strip, c
     // about how dark something came out: what a material's own tones do and what
     // the multiply does to them are two answers, and tuning either while looking
     // at both together is how a palette ends up fighting a time of day.
-    if (lit) {
+    if (lit != 0) {
+        // The canopies first, exactly as the frame does it. Shade is re-offered
+        // every frame and is gone the moment nobody offers it, so a probe that
+        // skipped this would be measuring a world with no woods in it.
+        if (plants) grove.Shade(world, world.Sky().Time());
+
         world.StepLight(strip);
 
-        LightLayer probeLight;
-        probeLight.Update(world.Light());
-        probeLight.Compose();
+        // One draws the world as it is seen; the other draws the light on its
+        // own, one flat block per probe. The second is the one to reach for when
+        // the question is where the light is rather than what it is doing to a
+        // palette, because a picture of the two multiplied together cannot answer
+        // either of them on its own.
+        if (lit == 2) {
+            debug_view::DrawLight(world, strip);
+        } else {
+            LightLayer probeLight;
+            probeLight.Update(world.Light());
+            probeLight.Compose();
+        }
     }
 
     EndMode2D();
@@ -430,6 +444,93 @@ void ReportColumn(const World &world, const terrain::Settings &settings, float w
         }
 
         std::printf("\n");
+    }
+}
+
+// The daylight reckoning down a run of columns.
+//
+// Prints, for each probe column, the first solid probe and what the two terms of
+// the spread are giving it. What this is for is telling apart the two things that
+// look identical on screen: a column the sun term never reached, and one it
+// reached with a dark answer.
+void ReportSun(const World &world, Rectangle region) {
+    const light::Field &field = world.Light();
+
+    std::printf("%6s %6s %8s %8s %8s\n", "col", "row", "solid", "depth", "sunlit");
+
+    for (int i = 0; i < field.Cols(); i++) {
+        int first = -1;
+
+        for (int j = 0; j < field.Rows(); j++) {
+            if (field.SolidAt(i, j) > 0.0f) {
+                first = j;
+                break;
+            }
+        }
+
+        if (first < 0) continue;
+
+        const Vector2 at = field.ProbePosition(i, first);
+        if (at.x < region.x || at.x > region.x + region.width) continue;
+
+        std::printf("%6.0f %6.0f %8.2f %8.1f %8.3f\n", at.x, at.y, field.SolidAt(i, first),
+                    field.SunDepthAt(i, first), light::Luminance(field.SunlitAt(i, first)));
+    }
+}
+
+// The surface, column by column, and how much it moves between one and the next.
+//
+// What this is looking for is roughness at the scale of a lattice column. The
+// light is solved one probe per column, so a surface that jumps between
+// neighbouring columns is a surface the light cannot follow smoothly however the
+// solve is written — the spikes arrive already in the ground.
+void ReportSurface(const terrain::Settings &settings, float fromX, float toX) {
+    const float step = static_cast<float>(config::kResolution);
+
+    double total = 0.0;
+    int steps    = 0;
+
+    float worst  = 0.0f;
+    float wheres = 0.0f;
+
+    int spikes = 0;
+
+    float previous = terrain::Height(fromX, settings);
+
+    for (float x = fromX + step; x <= toX; x += step, steps++) {
+        const float here = terrain::Height(x, settings);
+        const float move = std::fabs(here - previous);
+
+        total += move;
+
+        if (move > worst) {
+            worst  = move;
+            wheres = x;
+        }
+
+        // A step taller than one terrain texel is one the eye reads as an edge
+        // rather than as a slope.
+        if (move > config::kPixelSize) spikes++;
+
+        previous = here;
+    }
+
+    std::printf("%d columns of %.0f px\n", steps, step);
+    std::printf("mean step %.2f px   worst %.1f px at x %.0f   over one texel: %.1f%%\n", total / std::max(steps, 1),
+                worst, wheres, 100.0 * spikes / std::max(steps, 1));
+
+    // Then a run of them, so the shape of the roughness can be read rather than
+    // summarised.
+    std::printf("\n%8s %9s %8s\n", "x", "height", "step");
+
+    previous = terrain::Height(fromX, settings);
+
+    for (float x = fromX + step; x <= fromX + step * 40.0f; x += step) {
+        const float here = terrain::Height(x, settings);
+
+        std::printf("%8.0f %9.2f %8.2f\n", x, here, here - previous);
+
+        previous = here;
     }
 }
 
@@ -700,6 +801,10 @@ int main(int argc, char **argv) {
                     // rather than a ramp.
                     .terrace     = 0.45f,
                     .terraceStep = 24.0f,
+
+                    // How steep the climb between two ledges is. Measured against
+                    // the roughness of the ground itself — see the declaration.
+                    .terraceSharp = 2.0f,
 
                     // Overhangs, off by default. It is the one layer that can put a
                     // hole back in open ground, so it is turned up by eye and left
@@ -1086,6 +1191,38 @@ int main(int argc, char **argv) {
     grove.Configure({.seed = settings.seed}, settings, world.Sky());
 
 
+    if (argc >= 4 && TextIsEqual(argv[1], "--sun")) {
+        const float x = static_cast<float>(std::atof(argv[2]));
+        const float y = static_cast<float>(std::atof(argv[3]));
+
+        const Rectangle region = {x, y, 900.0f, 400.0f};
+
+        world.StepWeather(1.0f / 60.0f);
+        for (int step = 0; step < 400 * 60; step++) world.StepWeather(1.0f / 60.0f);
+
+        world.Update(region);
+        world.StepLight(region);
+
+        ReportSun(world, region);
+
+        CloseWindow();
+        return 0;
+    }
+
+    if (argc >= 4 && TextIsEqual(argv[1], "--surface")) {
+        terrain::Settings tuned = settings;
+
+        // The knob under test, overridable from the command line so a sweep is a
+        // loop in a shell rather than a rebuild each time.
+        if (argc >= 5) tuned.surface.terraceSharp = static_cast<float>(std::atof(argv[4]));
+        if (argc >= 6) tuned.surface.terrace = static_cast<float>(std::atof(argv[5]));
+
+        ReportSurface(tuned, static_cast<float>(std::atof(argv[2])), static_cast<float>(std::atof(argv[3])));
+
+        CloseWindow();
+        return 0;
+    }
+
     if (weighing) {
         ReportTones();
 
@@ -1124,7 +1261,7 @@ int main(int argc, char **argv) {
         DrawProbe(world, grove, probed, strip, argv[6], (argc >= 8) ? std::atoi(argv[7]) : 1,
                   (argc >= 9) ? static_cast<float>(std::atof(argv[8])) : 0.0f,
                   (argc >= 10) ? (std::atoi(argv[9]) != 0) : true,
-                  (argc >= 11) ? (std::atoi(argv[10]) != 0) : false);
+                  (argc >= 11) ? std::atoi(argv[10]) : 0);
 
         CloseWindow();
         return 0;

@@ -153,6 +153,34 @@ struct SurfaceSettings {
     float terrace     = 0.0f;
     float terraceStep = 32.0f;
 
+    // How hard the snap is, as the steepness of the riser between two ledges.
+    //
+    // One leaves the slope untouched however high `terrace` is set; larger
+    // numbers flatten the ledges and steepen the climb between them, and in the
+    // limit it is the hard staircase that rounding to the nearest ledge gives.
+    //
+    // It exists because rounding is a step function, and a step function has no
+    // width. The surface is read one lattice column at a time by everything that
+    // stands on it or lights it, and a riser crossed between two columns is a
+    // vertical cliff to all of them: measured over six and a half thousand
+    // columns the ground moved 1.1 px from one to the next on average and then
+    // jumped **thirteen** at a ledge, with one column in twenty-two doing it. What
+    // that drew was a sawtooth of black wedges along the underside of the daylight,
+    // because the light is solved per column and cannot follow a surface that is
+    // not there.
+    //
+    // A riser has to be climbed over a few columns rather than none. That is the
+    // whole of what this does.
+    //
+    // Two, measured. Over the same six and a half thousand columns: the ground's
+    // own roughness with no terrace at all peaks at 6.5 px between neighbours and
+    // clears a texel in one column in five hundred, and that is the floor nothing
+    // can go below. At two the terrace costs 8.3 px and one in two hundred and
+    // fifty; at four it costs 10.7 px and one in fifty-five. Past about two and a
+    // half the ledges stop being worth what the risers do to everything reading
+    // the surface a column at a time.
+    float terraceSharp = 2.0f;
+
     // Horizontal displacement of the position the surface is read at, taken
     // from a field that varies with depth as well as with distance. Because the
     // displacement differs from one height to the next, the surface folds, and

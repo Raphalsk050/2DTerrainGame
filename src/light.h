@@ -114,6 +114,20 @@ struct Medium {
     // Left empty, nothing shades the sky.
     std::vector<float> cover;
 
+    // How deep the daylight carries into the ground at full strength, in world
+    // units, one per column.
+    //
+    // A property of what the ground is made of and not of the light, which is why
+    // it arrives from outside: the world lays a cover of soil, sand or snow over
+    // the rock and the generator decides how thick it is column by column. The
+    // daylight should reach the bottom of that cover and start to fail in the rock
+    // under it — and a constant would be wrong in both directions at once, cutting
+    // the band short wherever the cover ran deep and lighting bare stone wherever
+    // it ran thin.
+    //
+    // Left empty, Settings::sunDepth answers for every column.
+    std::vector<float> sunDepth;
+
     void Resize(int cols, int rows);
     void Clear();
 
@@ -233,17 +247,49 @@ struct Settings {
     // sweep already carried there and then discounted for a distance the face has
     // not actually travelled.
     //
-    // Set from what the ground is made of rather than from the light. The cover
-    // over the rock is some forty pixels of soil, and a sunlit meadow whose earth
-    // reads as dusk two pixels down is not a lit surface — it is a lit line with a
-    // shadow under it. This carries the daylight through the whole of the cover
-    // and starts the falloff in the rock below, where a darkness that deepens is
-    // what should be happening.
+    // One probe's width, and it cannot usefully be less: the field is solved one
+    // probe per lattice cell and drawn as flat blocks, so anything under that is
+    // a fraction of a block nothing can express.
+    float surfaceLip = 6.0f;
+
+    // How deep the open sky carries into the ground straight below it, in world
+    // units, at full strength.
     //
-    // `surfaceReach` still measures the run after this, so the two together are
-    // how far light works into a material and this alone is how much of that run
-    // is spent at full strength.
-    float surfaceLip = 44.0f;
+    // Measured downward and not as a distance to the nearest open space, and that
+    // distinction is the whole of this. The sweep above takes the *nearest* open
+    // probe, which is right for a wall and wrong for the ground: a ledge with a
+    // cave under it has its lower half nearer the cave than the sky, so the lit
+    // band stopped partway down and then stopped at a different height in the next
+    // stretch of country. What that drew was daylight that did not follow the
+    // surface — bright over the deep ground, black over the thin, changing
+    // abruptly wherever the cave below happened to come close.
+    //
+    // Straight down, it is the same depth everywhere and the band follows the
+    // ground the way daylight does.
+    //
+    // Only used where the medium has nothing to say about a column — bare rock
+    // with no cover on it at all. Where there is a cover, Medium::sunDepth is
+    // what answers, because the depth the day should reach is a property of the
+    // ground rather than a number chosen here.
+    float sunDepth = 12.0f;
+
+    // How far the daylight is averaged sideways before it is carried down, in
+    // probes either side.
+    //
+    // The measurement that asked for it: along one stretch of ordinary ground the
+    // light standing over the surface read 0.36, 0.34, 0.26, **0.11**, 0.13, 0.14,
+    // 0.19 — a hole three probes wide at the inside corner of a terrace riser,
+    // where the step above shades the ground at its foot. That much is true, and a
+    // corner should be darker. What is not true is the shape it drew: carried the
+    // whole depth of the band at full strength, one dark probe became a dark slot
+    // running forty pixels down into the ground, and the band stopped following the
+    // surface.
+    //
+    // Averaged rather than taken at the maximum, so a real shadow — a cloud, a
+    // canopy, the lee of a cliff — still darkens the ground under it. Those are
+    // tens of probes across and survive a blur of three; the corner is one probe
+    // and does not.
+    int sunBlend = 3;
 
     // How conservatively a long ray reads the world, in [0,1].
     //
@@ -355,6 +401,26 @@ private:
     // add light to open space that the solve did not put there.
     void Spread();
 
+public:
+    // The daylight reckoning, for inspection.
+    //
+    // Exposed because the band it draws under the ground is the thing being
+    // tuned, and a picture of the light multiplied over the world cannot say
+    // which of the two terms produced any given patch of it.
+    float SunDepthAt(int i, int j) const {
+        return (i < 0 || j < 0 || i >= cols_ || j >= rows_) ? kUnreachable : sunDepth_[i * rows_ + j];
+    }
+
+    Radiance SunlitAt(int i, int j) const {
+        return (i < 0 || j < 0 || i >= cols_ || j >= rows_) ? Radiance{} : sunlit_[i * rows_ + j];
+    }
+
+    float SolidAt(int i, int j) const {
+        return (i < 0 || j < 0 || i >= cols_ || j >= rows_) ? 0.0f : solid_[i * rows_ + j];
+    }
+
+private:
+
     Radiance SkyAt(Vector2 world) const;
 
     // Height of the ground in the column a world position stands in.
@@ -396,12 +462,19 @@ private:
     // The medium's skyline and sky cover, kept for the length of the solve.
     std::vector<float> skyline_;
     std::vector<float> cover_;
+    std::vector<float> sunReach_;
 
     // The light each solid probe is drawing from, and how far away it is. Also
     // stands in for the state before the smoothing pass, so that it averages
     // one state rather than its own partial results.
     std::vector<Radiance> previous_;
     std::vector<float> distance_;
+
+    // The daylight reaching a solid probe from straight above it, and how far
+    // down it had to come. Kept as members rather than as locals so that the
+    // buffers are reused rather than allocated every frame.
+    std::vector<Radiance> sunlit_;
+    std::vector<float> sunDepth_;
 
     int cols_       = 0;
     int rows_       = 0;

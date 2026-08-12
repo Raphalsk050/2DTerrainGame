@@ -143,9 +143,32 @@ float Quantile(const NoiseShape &shape, float coverage, Vector2 centre, float wi
 float Terrace(float height, const SurfaceSettings &s) {
     if (s.terrace <= 0.0f || s.terraceStep <= 0.0f) return height;
 
-    const float ledge = std::round(height / s.terraceStep) * s.terraceStep;
+    const float at = height / s.terraceStep;
 
-    return height + (ledge - height) * std::min(s.terrace, 1.0f);
+    // Which ledge this is on, and how far up the riser above it.
+    const float ledge = std::floor(at);
+    const float climb = at - ledge;
+
+    // The riser, shaped rather than jumped.
+    //
+    // This was `round`, which is to say: below the halfway mark take the ledge
+    // under you, above it take the one over you. That is a step function, and a
+    // step function is crossed in no distance at all — see
+    // SurfaceSettings::terraceSharp for what a surface with no width in its risers
+    // does to everything that reads it one column at a time.
+    //
+    // The curve here is the same shape with the discontinuity taken out: flat
+    // where a ledge is, steep where the riser is, and continuous through both. At
+    // a sharpness of one it is the identity and there is no terrace at all, which
+    // is the right answer for a knob turned down.
+    const float sharp = std::max(s.terraceSharp, 1.0f);
+
+    const float up   = std::pow(climb, sharp);
+    const float down = std::pow(1.0f - climb, sharp);
+
+    const float shaped = (up + down > 1e-9f) ? up / (up + down) : climb;
+
+    return height + ((ledge + shaped) * s.terraceStep - height) * std::min(s.terrace, 1.0f);
 }
 
 // Horizontal position the surface is read at.

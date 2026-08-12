@@ -1226,6 +1226,7 @@ void World::StepLight(Rectangle region) {
     // weather is that it does.
     medium_.skyline.assign(cols, 0.0f);
     medium_.cover.assign(cols, 0.0f);
+    medium_.sunDepth.assign(cols, 0.0f);
 
     // Where the region's top edge sits. A column whose ground is above it has no
     // part of the region open to the sky.
@@ -1241,6 +1242,15 @@ void World::StepLight(Rectangle region) {
         // entire cost of the weather while the player is underground, which is most
         // of the time.
         medium_.cover[i] = (ceiling < ground) ? sky_.ShadeAt((i0 + i) * step) : 0.0f;
+
+        // And how deep the cover over the rock goes here, which is how deep the
+        // daylight should reach before it starts to fail.
+        //
+        // Walked rather than asked of the generator. What matters is the layer
+        // that is actually there — the soil a player has dug half away is half as
+        // deep, and a column that has been filled back in with rock has no cover
+        // at all and should darken from its own surface.
+        medium_.sunDepth[i] = CoverDepth((i0 + i) * step, ground);
     }
 
     for (const Spark &spark : sparks_) {
@@ -1538,6 +1548,29 @@ int World::MowGrass(Rectangle hitbox, float now) {
     for (int i = 0; i < taken; i++) mown_[cut[i]] = now;
 
     return taken;
+}
+
+float World::CoverDepth(float worldX, float surfaceY) const {
+    // Bounded by the deepest a cover may ever be, so a column of bare rock costs
+    // one lookup and stops rather than walking to the bottom of the world.
+    const int steps = static_cast<int>(std::ceil(kCoverCeiling / static_cast<float>(spacing_))) + 1;
+
+    const float step = static_cast<float>(spacing_);
+
+    float depth = 0.0f;
+
+    for (int k = 0; k < steps; k++) {
+        const std::optional<Element> here = OccupantAt({worldX, surfaceY + static_cast<float>(k) * step});
+        if (!here.has_value()) continue;
+
+        // A cover and nothing else. Rock, ore and anything the player stood there
+        // are all "not the layer over the rock", which is the whole of the test.
+        if (Def(*here).spawn.generator != Generator::Cover) break;
+
+        depth = static_cast<float>(k + 1) * step;
+    }
+
+    return depth;
 }
 
 float World::GroundValueAt(Vector2 world) const {

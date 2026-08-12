@@ -81,6 +81,7 @@ void Medium::Resize(int newCols, int newRows) {
     emission.assign(static_cast<std::size_t>(cols) * rows, Radiance{});
     skyline.assign(static_cast<std::size_t>(cols), 0.0f);
     cover.assign(static_cast<std::size_t>(cols), 0.0f);
+    sunDepth.assign(static_cast<std::size_t>(cols), 0.0f);
 }
 
 void Medium::Clear() {
@@ -448,6 +449,81 @@ void Field::Spread() {
         }
     }
 
+    // The daylight, before anything else, and straight down.
+    //
+    // One walk per column. Every time the walk is in open space it remembers what
+    // the light there is and starts counting again; every solid probe under that
+    // records how far it is below it. What comes out is a depth that follows the
+    // surface at a constant thickness however thin the ground under it happens to
+    // be — which the nearest-open-probe sweep below cannot give, because for a
+    // ledge over a cave the nearest open space is underneath.
+    sunlit_.assign(count, Radiance{});
+    sunDepth_.assign(count, kUnreachable);
+
+    for (int i = 0; i < cols_; i++) {
+        Radiance above{};
+        float depth = kUnreachable;
+
+        for (int j = 0; j < rows_; j++) {
+            const int cell = i * rows_ + j;
+
+            if (solid_[cell] <= 0.0f) {
+                // Read before the pass below overwrites the solid probes. Open
+                // ones keep what the cascades solved for them, which is the light
+                // actually standing over this column — cloud, hour and all.
+                above = probes_[cell];
+                depth = 0.0f;
+                continue;
+            }
+
+            // Nothing above it inside the region. Left unreachable, so the sweep
+            // below answers for it on its own; a column that begins underground
+            // is a column whose surface is somewhere else.
+            if (depth >= kUnreachable) continue;
+
+            depth += spacing_;
+
+            sunDepth_[cell] = depth;
+            sunlit_[cell]   = above;
+        }
+    }
+
+    // Then the same daylight averaged sideways, before anything is carried down.
+    // See Settings::sunBlend for the hole this fills in.
+    if (settings_.sunBlend > 0) {
+        previous_ = sunlit_;
+
+        for (int i = 0; i < cols_; i++) {
+            for (int j = 0; j < rows_; j++) {
+                const int cell = i * rows_ + j;
+                if (sunDepth_[cell] >= kUnreachable) continue;
+
+                Radiance total;
+                float counted = 0.0f;
+
+                for (int di = -settings_.sunBlend; di <= settings_.sunBlend; di++) {
+                    const int ni = i + di;
+                    if (ni < 0 || ni >= cols_) continue;
+
+                    const int neighbour = ni * rows_ + j;
+
+                    // Only columns that are themselves under the open sky at this
+                    // row. Reaching into one that is not would mix the daylight
+                    // with a cell that has no daylight to give, and thin the band
+                    // wherever the ground steps.
+                    if (sunDepth_[neighbour] >= kUnreachable) continue;
+
+                    total = total + sunlit_[neighbour];
+                    counted += 1.0f;
+                }
+
+                if (counted > 0.0f) previous_[cell] = total * (1.0f / counted);
+            }
+        }
+
+        sunlit_ = previous_;
+    }
+
     const float straight = spacing_;
     const float diagonal = spacing_ * 1.41421356f;
 
@@ -535,7 +611,30 @@ void Field::Spread() {
 
             const float share = std::max(0.0f, 1.0f - into / reach);
 
-            probes_[cell] = previous_[cell] * (share * share);
+            Radiance value = previous_[cell] * (share * share);
+
+            // And the daylight from straight overhead, which keeps its full
+            // strength for Settings::sunDepth and then falls off over the same
+            // run. The brighter of the two wins rather than the nearer: this one
+            // is not a guess about which open space a face is looking at, it is
+            // the sky, and the sky is over the ground whatever else is beside it.
+            if (sunDepth_[cell] < kUnreachable) {
+                // How deep the day should reach in this column: the thickness of
+                // whatever the world laid over the rock here, or the settings'
+                // own figure where it laid nothing.
+                const float carries = (i < static_cast<int>(sunReach_.size()) && sunReach_[i] > 0.0f)
+                                          ? sunReach_[i]
+                                          : settings_.sunDepth;
+
+                const float under = std::max(0.0f, sunDepth_[cell] - carries);
+                const float sun   = std::max(0.0f, 1.0f - under / reach);
+
+                const Radiance day = sunlit_[cell] * (sun * sun);
+
+                if (Luminance(day) > Luminance(value)) value = day;
+            }
+
+            probes_[cell] = value;
         }
     }
 
@@ -653,8 +752,9 @@ void Field::Solve(const Medium &medium, const Settings &settings) {
 
     BuildPyramid(medium);
 
-    skyline_ = medium.skyline;
-    cover_   = medium.cover;
+    skyline_  = medium.skyline;
+    cover_    = medium.cover;
+    sunReach_ = medium.sunDepth;
 
     const Rectangle bounds = medium.Bounds();
     const int count        = std::max(1, settings.cascades);

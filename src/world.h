@@ -468,6 +468,14 @@ private:
     // makes it cheap enough to walk a whole chunk with.
     bool SolidVertex(const Chunk &chunk, int i, int j) const;
 
+    // How deep the cover over the rock goes in a column, in world pixels, from
+    // the surface down to the first thing that is not one.
+    //
+    // Handed to the light so that daylight reaches the bottom of the soil and
+    // begins to fail in the rock underneath — a depth the generator decides, and
+    // so one the light has to be told rather than one it could choose.
+    float CoverDepth(float worldX, float surfaceY) const;
+
     // World Y of the first solid met falling down a column, or false where the
     // column holds nothing at all within reach.
     //
