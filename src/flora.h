@@ -44,7 +44,7 @@ inline constexpr float kNever = 1.0e9f;
 // empty ground around it.
 enum class Layer { Canopy, Undergrowth, Count };
 
-enum class Species { Oak, Pine, Birch, Apple, Count };
+enum class Species { Oak, Pine, Birch, Apple, Fern, Bush, Count };
 
 // How far along a plant is. Growth moves between these; the world's untouched
 // plants are all at the last one, since a wood nobody has cut is a mature wood.
@@ -61,10 +61,18 @@ inline constexpr std::size_t kSpeciesCount = static_cast<std::size_t>(Species::C
 inline constexpr std::size_t kStageCount   = static_cast<std::size_t>(Stage::Count);
 inline constexpr std::size_t kSeasonCount  = static_cast<std::size_t>(Season::Count);
 
-inline constexpr std::size_t LayerIndex(Layer layer) { return static_cast<std::size_t>(layer); }
-inline constexpr std::size_t SpeciesIndex(Species species) { return static_cast<std::size_t>(species); }
-inline constexpr std::size_t StageIndex(Stage stage) { return static_cast<std::size_t>(stage); }
-inline constexpr std::size_t SeasonIndex(Season season) { return static_cast<std::size_t>(season); }
+inline constexpr std::size_t LayerIndex(Layer layer) {
+    return static_cast<std::size_t>(layer);
+}
+inline constexpr std::size_t SpeciesIndex(Species species) {
+    return static_cast<std::size_t>(species);
+}
+inline constexpr std::size_t StageIndex(Stage stage) {
+    return static_cast<std::size_t>(stage);
+}
+inline constexpr std::size_t SeasonIndex(Season season) {
+    return static_cast<std::size_t>(season);
+}
 
 // Every plant is built from its own seed, so no two of them are the same tree.
 //
@@ -120,8 +128,8 @@ struct SpeciesShape {
 
     // Masses of foliage down the crown, and how far the widest of them reaches
     // from the axis as a share of the crown's half width.
-    int tiers    = 6;
-    float reach  = 1.0f;
+    int tiers   = 6;
+    float reach = 1.0f;
 
     // Share by which a tier's reach falls off towards the top. This one number
     // is the whole difference between the two shapes: near one the crown is a
@@ -228,9 +236,9 @@ struct SpeciesPalette {
 };
 
 struct DropRule {
-    Item item   = Item::Wood;
-    int least   = 0;
-    int most    = 0;
+    Item item    = Item::Wood;
+    int least    = 0;
+    int most     = 0;
     float chance = 0.0f;
 };
 
@@ -263,285 +271,413 @@ struct SpeciesDef {
 //
 // Sizes are in world pixels and can be read against the character, which is 26
 // tall and 12 wide: a mature oak is five of it, a mature pine is six and a half.
-inline constexpr SpeciesDef kSpecies[] = {
-    {
-        .name        = "oak",
-        .layer       = Layer::Canopy,
-        .height      = {34.0f, 78.0f, 130.0f, 158.0f},
-        .canopyWidth = {24.0f, 62.0f, 105.0f, 126.0f},
-        .shape =
+inline constexpr SpeciesDef
+    kSpecies[] =
+        {
             {
-                // A crown held well clear of the ground on a leaning trunk, and
-                // tiers that barely shrink towards the top: the rounded mass of
-                // the broadleaf.
-                .clearance  = 0.40f,
-                .trunkReach = 0.64f,
-                .trunkWidth = 0.15f,
-                .trunkTaper = 0.58f,
-                .lean       = 0.85f,
-                .tiers       = 5,
-                .reach       = 1.04f,
-                .taper       = 0.82f,
-                .jitter      = 0.15f,
-                .crown       = Crown::Clump,
-                .mass        = 0.56f,
-                .ragged      = 0.15f,
-                .gaps        = 0.20f,
-                .branchReach = 0.94f,
+                .name        = "oak",
+                .layer       = Layer::Canopy,
+                .height      = {34.0f, 78.0f, 130.0f, 158.0f},
+                .canopyWidth = {24.0f, 62.0f, 105.0f, 126.0f},
+                .shape =
+                    {
+                        // A crown held well clear of the ground on a leaning trunk, and
+                        // tiers that barely shrink towards the top: the rounded mass of
+                        // the broadleaf.
+                        .clearance   = 0.40f,
+                        .trunkReach  = 0.64f,
+                        .trunkWidth  = 0.15f,
+                        .trunkTaper  = 0.58f,
+                        .lean        = 0.85f,
+                        .tiers       = 5,
+                        .reach       = 1.04f,
+                        .taper       = 0.82f,
+                        .jitter      = 0.15f,
+                        .crown       = Crown::Clump,
+                        .mass        = 0.56f,
+                        .ragged      = 0.15f,
+                        .gaps        = 0.20f,
+                        .branchReach = 0.94f,
+                    },
+                .climate =
+                    {
+                        // Temperate and wet, and the commonest thing in that country.
+                        .temperature      = 0.56f,
+                        .temperatureWidth = 0.28f,
+                        .humidity         = 0.62f,
+                        .humidityWidth    = 0.30f,
+                        .ceiling          = 72.0f,
+                        .ceilingFade      = 96.0f,
+                        .abundance        = 1.0f,
+                    },
+                .growth = {.maturityMinutes = 6.0f,
+                           .regrowMinutes   = 12.0f,
+                           .lightNeed       = 0.55f,
+                           .waterNeed       = 0.5f,
+                           .toughness       = 5.0f},
+                .palette =
+                    {
+                        {.barkDark  = {58, 38, 22, 255},
+                         .bark      = {107, 68, 35, 255},
+                         .barkLight = {140, 94, 52, 255},
+                         .leaf = {{32, 94, 44, 255}, {58, 138, 58, 255}, {96, 182, 74, 255}, {150, 214, 102, 255}}},
+                        {.barkDark  = {58, 38, 22, 255},
+                         .bark      = {107, 68, 35, 255},
+                         .barkLight = {140, 94, 52, 255},
+                         .leaf      = {{26, 84, 40, 255}, {47, 124, 52, 255}, {79, 164, 66, 255}, {126, 198, 90, 255}}},
+                        {.barkDark  = {56, 36, 20, 255},
+                         .bark      = {102, 64, 32, 255},
+                         .barkLight = {134, 88, 48, 255},
+                         .leaf = {{104, 58, 22, 255}, {158, 96, 30, 255}, {202, 140, 44, 255}, {230, 182, 74, 255}}},
+                        {.barkDark  = {50, 34, 22, 255},
+                         .bark      = {92, 62, 36, 255},
+                         .barkLight = {122, 86, 52, 255},
+                         .leaf      = {{76, 52, 30, 255}, {104, 74, 42, 255}, {132, 98, 58, 255}, {158, 124, 78, 255}}},
+                    },
+                .drops     = {{.item = Item::Wood, .least = 4, .most = 7, .chance = 1.0f},
+                              {.item = Item::Sapling, .least = 1, .most = 2, .chance = 0.55f},
+                              {.item = Item::Fibre, .least = 1, .most = 3, .chance = 0.4f}},
+                .deciduous = true,
             },
-        .climate =
             {
-                // Temperate and wet, and the commonest thing in that country.
-                .temperature      = 0.56f,
-                .temperatureWidth = 0.28f,
-                .humidity         = 0.62f,
-                .humidityWidth    = 0.30f,
-                .ceiling          = 72.0f,
-                .ceilingFade      = 96.0f,
-                .abundance        = 1.0f,
-            },
-        .growth = {.maturityMinutes = 18.0f,
-                   .regrowMinutes   = 12.0f,
-                   .lightNeed       = 0.55f,
-                   .waterNeed       = 0.5f,
-                   .toughness       = 5.0f},
-        .palette =
-            {
-                {.barkDark = {58, 38, 22, 255},
-                 .bark     = {107, 68, 35, 255},
-                 .barkLight = {140, 94, 52, 255},
-                 .leaf = {{32, 94, 44, 255}, {58, 138, 58, 255}, {96, 182, 74, 255}, {150, 214, 102, 255}}},
-                {.barkDark = {58, 38, 22, 255},
-                 .bark     = {107, 68, 35, 255},
-                 .barkLight = {140, 94, 52, 255},
-                 .leaf = {{26, 84, 40, 255}, {47, 124, 52, 255}, {79, 164, 66, 255}, {126, 198, 90, 255}}},
-                {.barkDark = {56, 36, 20, 255},
-                 .bark     = {102, 64, 32, 255},
-                 .barkLight = {134, 88, 48, 255},
-                 .leaf = {{104, 58, 22, 255}, {158, 96, 30, 255}, {202, 140, 44, 255}, {230, 182, 74, 255}}},
-                {.barkDark = {50, 34, 22, 255},
-                 .bark     = {92, 62, 36, 255},
-                 .barkLight = {122, 86, 52, 255},
-                 .leaf = {{76, 52, 30, 255}, {104, 74, 42, 255}, {132, 98, 58, 255}, {158, 124, 78, 255}}},
-            },
-        .drops = {{.item = Item::Wood, .least = 4, .most = 7, .chance = 1.0f},
-                  {.item = Item::Sapling, .least = 1, .most = 2, .chance = 0.55f},
-                  {.item = Item::Fibre, .least = 1, .most = 3, .chance = 0.4f}},
-        .deciduous = true,
-    },
-    {
-        .name        = "pine",
-        .layer       = Layer::Canopy,
-        .height      = {38.0f, 95.0f, 170.0f, 214.0f},
-        .canopyWidth = {18.0f, 40.0f, 65.0f, 78.0f},
-        .shape =
-            {
-                // Branches carried nearly to the ground on a straight mast, and
-                // tiers that shrink hard towards the top: the stack of wedges
-                // the conifer is.
-                .clearance  = 0.32f,
-                .trunkReach = 0.84f,
-                .trunkWidth = 0.16f,
-                .trunkTaper = 0.34f,
-                .lean       = 0.12f,
-                .tiers       = 10,
-                .reach       = 1.05f,
-                .taper       = 0.44f,
-                .jitter      = 0.12f,
-                .crown       = Crown::Frond,
-                .mass        = 0.55f,
+                .name        = "pine",
+                .layer       = Layer::Canopy,
+                .height      = {38.0f, 95.0f, 170.0f, 214.0f},
+                .canopyWidth = {18.0f, 40.0f, 65.0f, 78.0f},
+                .shape =
+                    {
+                        // Branches carried nearly to the ground on a straight mast, and
+                        // tiers that shrink hard towards the top: the stack of wedges
+                        // the conifer is.
+                        .clearance  = 0.32f,
+                        .trunkReach = 0.84f,
+                        .trunkWidth = 0.16f,
+                        .trunkTaper = 0.34f,
+                        .lean       = 0.12f,
+                        .tiers      = 10,
+                        .reach      = 1.05f,
+                        .taper      = 0.44f,
+                        .jitter     = 0.12f,
+                        .crown      = Crown::Frond,
+                        .mass       = 0.55f,
 
-                // Few gaps: a conifer's holes are the spaces *between* its
-                // tiers, which the stack leaves on its own, not tears in the
-                // middle of one.
-                .ragged      = 0.16f,
-                .gaps        = 0.08f,
-                .branchReach = 0.60f,
+                        // Few gaps: a conifer's holes are the spaces *between* its
+                        // tiers, which the stack leaves on its own, not tears in the
+                        // middle of one.
+                        .ragged      = 0.16f,
+                        .gaps        = 0.08f,
+                        .branchReach = 0.60f,
+                    },
+                .climate =
+                    {
+                        // Cold, and very nearly indifferent to how wet it is. The one
+                        // species that climbs to the bare ground near the tops, which is
+                        // what the widest humidity range of the four is for: the climate
+                        // lifts humidity by 0.0016 per pixel of elevation, so the high
+                        // ground this tree is supposed to own reads as soaking, and a
+                        // range narrow enough to look reasonable on paper left the peaks
+                        // suiting nobody and therefore bare.
+                        .temperature      = 0.30f,
+                        .temperatureWidth = 0.28f,
+                        .humidity         = 0.52f,
+                        .humidityWidth    = 0.44f,
+                        .ceiling          = 8.0f,
+                        .ceilingFade      = 110.0f,
+                        .abundance        = 1.0f,
+                    },
+                .growth = {.maturityMinutes = 8.0f,
+                           .regrowMinutes   = 16.0f,
+                           .lightNeed       = 0.4f,
+                           .waterNeed       = 0.35f,
+                           .toughness       = 6.0f},
+                .palette =
+                    {
+                        {.barkDark  = {48, 30, 18, 255},
+                         .bark      = {96, 58, 32, 255},
+                         .barkLight = {126, 82, 46, 255},
+                         .leaf      = {{38, 62, 30, 255}, {62, 92, 42, 255}, {92, 124, 56, 255}, {130, 158, 74, 255}}},
+                        {.barkDark  = {48, 30, 18, 255},
+                         .bark      = {96, 58, 32, 255},
+                         .barkLight = {126, 82, 46, 255},
+                         .leaf      = {{32, 54, 26, 255}, {54, 82, 36, 255}, {82, 112, 48, 255}, {118, 146, 66, 255}}},
+                        {.barkDark  = {46, 28, 18, 255},
+                         .bark      = {92, 56, 30, 255},
+                         .barkLight = {120, 78, 44, 255},
+                         .leaf      = {{30, 50, 26, 255}, {50, 76, 34, 255}, {76, 104, 46, 255}, {110, 136, 62, 255}}},
+                        {.barkDark  = {42, 28, 20, 255},
+                         .bark      = {84, 54, 32, 255},
+                         .barkLight = {110, 74, 46, 255},
+                         .leaf      = {{26, 44, 24, 255}, {44, 66, 32, 255}, {66, 90, 42, 255}, {96, 118, 56, 255}}},
+                    },
+                .drops     = {{.item = Item::Wood, .least = 5, .most = 9, .chance = 1.0f},
+                              {.item = Item::Resin, .least = 1, .most = 2, .chance = 0.45f},
+                              {.item = Item::Sapling, .least = 1, .most = 2, .chance = 0.5f}},
+                .deciduous = false,
             },
-        .climate =
             {
-                // Cold, and very nearly indifferent to how wet it is. The one
-                // species that climbs to the bare ground near the tops, which is
-                // what the widest humidity range of the four is for: the climate
-                // lifts humidity by 0.0016 per pixel of elevation, so the high
-                // ground this tree is supposed to own reads as soaking, and a
-                // range narrow enough to look reasonable on paper left the peaks
-                // suiting nobody and therefore bare.
-                .temperature      = 0.30f,
-                .temperatureWidth = 0.28f,
-                .humidity         = 0.52f,
-                .humidityWidth    = 0.44f,
-                .ceiling          = 8.0f,
-                .ceilingFade      = 110.0f,
-                .abundance        = 1.0f,
+                .name        = "birch",
+                .layer       = Layer::Canopy,
+                .height      = {30.0f, 72.0f, 118.0f, 142.0f},
+                .canopyWidth = {20.0f, 52.0f, 86.0f, 100.0f},
+                .shape =
+                    {
+                        // Slender and upright, with a narrow crown high on a pale trunk.
+                        .clearance   = 0.38f,
+                        .trunkReach  = 0.72f,
+                        .trunkWidth  = 0.11f,
+                        .trunkTaper  = 0.62f,
+                        .lean        = 0.45f,
+                        .tiers       = 5,
+                        .reach       = 1.07f,
+                        .taper       = 0.78f,
+                        .jitter      = 0.13f,
+                        .crown       = Crown::Clump,
+                        .mass        = 0.56f,
+                        .ragged      = 0.14f,
+                        .gaps        = 0.18f,
+                        .branchReach = 0.92f,
+                    },
+                .climate =
+                    {
+                        // Cool and wet, overlapping the oak on one side and the pine on
+                        // the other, so the border between those two woods is mixed
+                        // rather than a line.
+                        .temperature      = 0.40f,
+                        .temperatureWidth = 0.22f,
+                        .humidity         = 0.66f,
+                        .humidityWidth    = 0.26f,
+                        .ceiling          = 44.0f,
+                        .ceilingFade      = 92.0f,
+                        .abundance        = 0.75f,
+                    },
+                .growth = {.maturityMinutes = 5.0f,
+                           .regrowMinutes   = 9.0f,
+                           .lightNeed       = 0.65f,
+                           .waterNeed       = 0.6f,
+                           .toughness       = 3.5f},
+                .palette =
+                    {
+                        {.barkDark  = {112, 116, 112, 255},
+                         .bark      = {196, 200, 196, 255},
+                         .barkLight = {232, 236, 232, 255},
+                         .leaf = {{56, 120, 56, 255}, {88, 158, 72, 255}, {126, 196, 92, 255}, {172, 224, 124, 255}}},
+                        {.barkDark  = {112, 116, 112, 255},
+                         .bark      = {196, 200, 196, 255},
+                         .barkLight = {232, 236, 232, 255},
+                         .leaf = {{44, 106, 48, 255}, {74, 142, 62, 255}, {110, 180, 80, 255}, {156, 212, 112, 255}}},
+                        {.barkDark  = {110, 112, 108, 255},
+                         .bark      = {190, 192, 186, 255},
+                         .barkLight = {226, 228, 220, 255},
+                         .leaf = {{130, 104, 28, 255}, {184, 148, 40, 255}, {224, 190, 60, 255}, {244, 220, 110, 255}}},
+                        {.barkDark  = {104, 108, 108, 255},
+                         .bark      = {182, 188, 190, 255},
+                         .barkLight = {218, 224, 226, 255},
+                         .leaf = {{96, 92, 72, 255}, {124, 120, 96, 255}, {150, 146, 120, 255}, {178, 174, 148, 255}}},
+                    },
+                .drops     = {{.item = Item::Wood, .least = 3, .most = 5, .chance = 1.0f},
+                              {.item = Item::Sapling, .least = 1, .most = 2, .chance = 0.6f},
+                              {.item = Item::Fibre, .least = 1, .most = 2, .chance = 0.35f}},
+                .deciduous = true,
             },
-        .growth = {.maturityMinutes = 24.0f,
-                   .regrowMinutes   = 16.0f,
-                   .lightNeed       = 0.4f,
-                   .waterNeed       = 0.35f,
-                   .toughness       = 6.0f},
-        .palette =
             {
-                {.barkDark = {48, 30, 18, 255},
-                 .bark     = {96, 58, 32, 255},
-                 .barkLight = {126, 82, 46, 255},
-                 .leaf = {{38, 62, 30, 255}, {62, 92, 42, 255}, {92, 124, 56, 255}, {130, 158, 74, 255}}},
-                {.barkDark = {48, 30, 18, 255},
-                 .bark     = {96, 58, 32, 255},
-                 .barkLight = {126, 82, 46, 255},
-                 .leaf = {{32, 54, 26, 255}, {54, 82, 36, 255}, {82, 112, 48, 255}, {118, 146, 66, 255}}},
-                {.barkDark = {46, 28, 18, 255},
-                 .bark     = {92, 56, 30, 255},
-                 .barkLight = {120, 78, 44, 255},
-                 .leaf = {{30, 50, 26, 255}, {50, 76, 34, 255}, {76, 104, 46, 255}, {110, 136, 62, 255}}},
-                {.barkDark = {42, 28, 20, 255},
-                 .bark     = {84, 54, 32, 255},
-                 .barkLight = {110, 74, 46, 255},
-                 .leaf = {{26, 44, 24, 255}, {44, 66, 32, 255}, {66, 90, 42, 255}, {96, 118, 56, 255}}},
+                .name        = "apple",
+                .layer       = Layer::Canopy,
+                .height      = {30.0f, 68.0f, 106.0f, 120.0f},
+                .canopyWidth = {22.0f, 54.0f, 84.0f, 94.0f},
+                .shape =
+                    {
+                        // Short, broad and low-crowned: an orchard tree, and the one a
+                        // player can reach the fruit of without climbing anything.
+                        .clearance   = 0.42f,
+                        .trunkReach  = 0.64f,
+                        .trunkWidth  = 0.16f,
+                        .trunkTaper  = 0.62f,
+                        .lean        = 1.0f,
+                        .tiers       = 4,
+                        .reach       = 1.14f,
+                        .taper       = 0.86f,
+                        .jitter      = 0.16f,
+                        .crown       = Crown::Clump,
+                        .mass        = 0.58f,
+                        .ragged      = 0.15f,
+                        .gaps        = 0.18f,
+                        .branchReach = 0.88f,
+                    },
+                .climate =
+                    {
+                        // The narrowest range of the four, so it stays something come
+                        // across rather than something walked through.
+                        .temperature      = 0.60f,
+                        .temperatureWidth = 0.18f,
+                        .humidity         = 0.58f,
+                        .humidityWidth    = 0.22f,
+                        .ceiling          = 96.0f,
+                        .ceilingFade      = 80.0f,
+                        .abundance        = 0.35f,
+                    },
+                .growth = {.maturityMinutes = 4.0f,
+                           .regrowMinutes   = 10.0f,
+                           .lightNeed       = 0.7f,
+                           .waterNeed       = 0.65f,
+                           .toughness       = 3.0f},
+                .palette =
+                    {
+                        // Spring is the one palette that is not foliage: the top two
+                        // tones are blossom, which is what the tree is for half a season
+                        // before it is worth picking.
+                        {.barkDark  = {62, 42, 26, 255},
+                         .bark      = {112, 76, 42, 255},
+                         .barkLight = {146, 104, 60, 255},
+                         .leaf = {{58, 116, 52, 255}, {96, 156, 70, 255}, {214, 178, 196, 255}, {244, 222, 232, 255}}},
+                        {.barkDark  = {62, 42, 26, 255},
+                         .bark      = {112, 76, 42, 255},
+                         .barkLight = {146, 104, 60, 255},
+                         .leaf      = {{34, 92, 42, 255}, {60, 130, 54, 255}, {92, 168, 68, 255}, {134, 200, 96, 255}}},
+                        {.barkDark  = {60, 40, 24, 255},
+                         .bark      = {108, 72, 40, 255},
+                         .barkLight = {140, 100, 56, 255},
+                         .leaf = {{112, 74, 26, 255}, {166, 112, 34, 255}, {208, 152, 48, 255}, {234, 192, 84, 255}}},
+                        {.barkDark  = {54, 38, 24, 255},
+                         .bark      = {98, 70, 42, 255},
+                         .barkLight = {128, 96, 58, 255},
+                         .leaf = {{80, 58, 34, 255}, {108, 80, 48, 255}, {134, 104, 66, 255}, {160, 130, 90, 255}}},
+                    },
+                .drops     = {{.item = Item::Wood, .least = 2, .most = 4, .chance = 1.0f},
+                              {.item = Item::Apple, .least = 1, .most = 3, .chance = 0.7f},
+                              {.item = Item::Sapling, .least = 1, .most = 1, .chance = 0.5f}},
+                .deciduous = true,
             },
-        .drops = {{.item = Item::Wood, .least = 5, .most = 9, .chance = 1.0f},
-                  {.item = Item::Resin, .least = 1, .most = 2, .chance = 0.45f},
-                  {.item = Item::Sapling, .least = 1, .most = 2, .chance = 0.5f}},
-        .deciduous = false,
-    },
-    {
-        .name        = "birch",
-        .layer       = Layer::Canopy,
-        .height      = {30.0f, 72.0f, 118.0f, 142.0f},
-        .canopyWidth = {20.0f, 52.0f, 86.0f, 100.0f},
-        .shape =
             {
-                // Slender and upright, with a narrow crown high on a pale trunk.
-                .clearance  = 0.38f,
-                .trunkReach = 0.72f,
-                .trunkWidth = 0.11f,
-                .trunkTaper = 0.62f,
-                .lean       = 0.45f,
-                .tiers       = 5,
-                .reach       = 1.07f,
-                .taper       = 0.78f,
-                .jitter      = 0.13f,
-                .crown       = Crown::Clump,
-                .mass        = 0.56f,
-                .ragged      = 0.14f,
-                .gaps        = 0.18f,
-                .branchReach = 0.92f,
+                .name        = "fern",
+                .layer       = Layer::Undergrowth,
+                .height      = {8.0f, 14.0f, 22.0f, 26.0f},
+                .canopyWidth = {12.0f, 20.0f, 30.0f, 34.0f},
+                .shape =
+                    {
+                        // No trunk to speak of and fronds straight off the ground: an
+                        // undergrowth plant is a crown with a stem, not a small tree.
+                        .clearance   = 0.06f,
+                        .trunkReach  = 0.30f,
+                        .trunkWidth  = 0.08f,
+                        .trunkTaper  = 0.5f,
+                        .lean        = 0.4f,
+                        .tiers       = 3,
+                        .reach       = 1.05f,
+                        .taper       = 0.55f,
+                        .jitter      = 0.20f,
+                        .crown       = Crown::Frond,
+                        .mass        = 0.58f,
+                        .ragged      = 0.24f,
+                        .gaps        = 0.10f,
+                        .branchReach = 0.5f,
+                    },
+                .climate =
+                    {
+                        // Shade and damp. It is the plant found *under* the wood rather
+                        // than the one found where a wood is not.
+                        .temperature      = 0.48f,
+                        .temperatureWidth = 0.30f,
+                        .humidity         = 0.70f,
+                        .humidityWidth    = 0.30f,
+                        .ceiling          = 60.0f,
+                        .ceilingFade      = 90.0f,
+                        .abundance        = 1.0f,
+                    },
+                .growth = {.maturityMinutes = 4.0f,
+                           .regrowMinutes   = 3.0f,
+                           .lightNeed       = 0.2f,
+                           .waterNeed       = 0.8f,
+                           .toughness       = 1.0f},
+                .palette =
+                    {
+                        {.barkDark  = {58, 52, 34, 255},
+                         .bark      = {86, 78, 50, 255},
+                         .barkLight = {112, 102, 66, 255},
+                         .leaf      = {{28, 74, 38, 255}, {46, 106, 48, 255}, {70, 140, 60, 255}, {104, 176, 80, 255}}},
+                        {.barkDark  = {58, 52, 34, 255},
+                         .bark      = {86, 78, 50, 255},
+                         .barkLight = {112, 102, 66, 255},
+                         .leaf      = {{24, 66, 34, 255}, {40, 96, 44, 255}, {62, 128, 54, 255}, {94, 162, 74, 255}}},
+                        {.barkDark  = {56, 48, 32, 255},
+                         .bark      = {84, 72, 46, 255},
+                         .barkLight = {108, 96, 62, 255},
+                         .leaf = {{86, 72, 30, 255}, {126, 104, 38, 255}, {166, 140, 52, 255}, {200, 176, 82, 255}}},
+                        {.barkDark  = {52, 46, 34, 255},
+                         .bark      = {78, 70, 50, 255},
+                         .barkLight = {100, 92, 66, 255},
+                         .leaf      = {{58, 60, 44, 255}, {80, 84, 60, 255}, {102, 106, 78, 255}, {126, 130, 98, 255}}},
+                    },
+                .drops     = {{.item = Item::Fibre, .least = 1, .most = 2, .chance = 0.8f}},
+                .deciduous = false,
             },
-        .climate =
             {
-                // Cool and wet, overlapping the oak on one side and the pine on
-                // the other, so the border between those two woods is mixed
-                // rather than a line.
-                .temperature      = 0.40f,
-                .temperatureWidth = 0.22f,
-                .humidity         = 0.66f,
-                .humidityWidth    = 0.26f,
-                .ceiling          = 44.0f,
-                .ceilingFade      = 92.0f,
-                .abundance        = 0.75f,
+                .name        = "bush",
+                .layer       = Layer::Undergrowth,
+                .height      = {10.0f, 18.0f, 30.0f, 36.0f},
+                .canopyWidth = {14.0f, 26.0f, 40.0f, 46.0f},
+                .shape =
+                    {
+                        .clearance   = 0.10f,
+                        .trunkReach  = 0.34f,
+                        .trunkWidth  = 0.10f,
+                        .trunkTaper  = 0.6f,
+                        .lean        = 0.7f,
+                        .tiers       = 3,
+                        .reach       = 1.10f,
+                        .taper       = 0.88f,
+                        .jitter      = 0.22f,
+                        .crown       = Crown::Clump,
+                        .mass        = 0.60f,
+                        .ragged      = 0.20f,
+                        .gaps        = 0.16f,
+                        .branchReach = 0.7f,
+                    },
+                .climate =
+                    {
+                        // Drier and brighter than the fern, so the two divide the floor
+                        // between them rather than competing for the same ground.
+                        .temperature      = 0.58f,
+                        .temperatureWidth = 0.28f,
+                        .humidity         = 0.46f,
+                        .humidityWidth    = 0.28f,
+                        .ceiling          = 50.0f,
+                        .ceilingFade      = 90.0f,
+                        .abundance        = 0.9f,
+                    },
+                .growth = {.maturityMinutes = 5.0f,
+                           .regrowMinutes   = 4.0f,
+                           .lightNeed       = 0.6f,
+                           .waterNeed       = 0.4f,
+                           .toughness       = 1.0f},
+                .palette =
+                    {
+                        {.barkDark  = {52, 38, 24, 255},
+                         .bark      = {84, 62, 38, 255},
+                         .barkLight = {110, 84, 52, 255},
+                         .leaf      = {{34, 80, 40, 255}, {56, 118, 52, 255}, {88, 158, 68, 255}, {132, 198, 96, 255}}},
+                        {.barkDark  = {52, 38, 24, 255},
+                         .bark      = {84, 62, 38, 255},
+                         .barkLight = {110, 84, 52, 255},
+                         .leaf      = {{28, 72, 36, 255}, {48, 108, 48, 255}, {78, 146, 62, 255}, {118, 184, 88, 255}}},
+                        {.barkDark  = {50, 36, 22, 255},
+                         .bark      = {80, 58, 34, 255},
+                         .barkLight = {106, 80, 48, 255},
+                         .leaf = {{102, 62, 28, 255}, {150, 96, 36, 255}, {192, 134, 48, 255}, {224, 176, 80, 255}}},
+                        {.barkDark  = {46, 36, 26, 255},
+                         .bark      = {74, 58, 40, 255},
+                         .barkLight = {98, 78, 56, 255},
+                         .leaf      = {{62, 54, 40, 255}, {86, 76, 56, 255}, {110, 98, 74, 255}, {136, 122, 94, 255}}},
+                    },
+                .drops     = {{.item = Item::Fibre, .least = 1, .most = 3, .chance = 0.9f}},
+                .deciduous = true,
             },
-        .growth = {.maturityMinutes = 14.0f,
-                   .regrowMinutes   = 9.0f,
-                   .lightNeed       = 0.65f,
-                   .waterNeed       = 0.6f,
-                   .toughness       = 3.5f},
-        .palette =
-            {
-                {.barkDark = {112, 116, 112, 255},
-                 .bark     = {196, 200, 196, 255},
-                 .barkLight = {232, 236, 232, 255},
-                 .leaf = {{56, 120, 56, 255}, {88, 158, 72, 255}, {126, 196, 92, 255}, {172, 224, 124, 255}}},
-                {.barkDark = {112, 116, 112, 255},
-                 .bark     = {196, 200, 196, 255},
-                 .barkLight = {232, 236, 232, 255},
-                 .leaf = {{44, 106, 48, 255}, {74, 142, 62, 255}, {110, 180, 80, 255}, {156, 212, 112, 255}}},
-                {.barkDark = {110, 112, 108, 255},
-                 .bark     = {190, 192, 186, 255},
-                 .barkLight = {226, 228, 220, 255},
-                 .leaf = {{130, 104, 28, 255}, {184, 148, 40, 255}, {224, 190, 60, 255}, {244, 220, 110, 255}}},
-                {.barkDark = {104, 108, 108, 255},
-                 .bark     = {182, 188, 190, 255},
-                 .barkLight = {218, 224, 226, 255},
-                 .leaf = {{96, 92, 72, 255}, {124, 120, 96, 255}, {150, 146, 120, 255}, {178, 174, 148, 255}}},
-            },
-        .drops = {{.item = Item::Wood, .least = 3, .most = 5, .chance = 1.0f},
-                  {.item = Item::Sapling, .least = 1, .most = 2, .chance = 0.6f},
-                  {.item = Item::Fibre, .least = 1, .most = 2, .chance = 0.35f}},
-        .deciduous = true,
-    },
-    {
-        .name        = "apple",
-        .layer       = Layer::Canopy,
-        .height      = {30.0f, 68.0f, 106.0f, 120.0f},
-        .canopyWidth = {22.0f, 54.0f, 84.0f, 94.0f},
-        .shape =
-            {
-                // Short, broad and low-crowned: an orchard tree, and the one a
-                // player can reach the fruit of without climbing anything.
-                .clearance  = 0.42f,
-                .trunkReach = 0.64f,
-                .trunkWidth = 0.16f,
-                .trunkTaper = 0.62f,
-                .lean       = 1.0f,
-                .tiers       = 4,
-                .reach       = 1.14f,
-                .taper       = 0.86f,
-                .jitter      = 0.16f,
-                .crown       = Crown::Clump,
-                .mass        = 0.58f,
-                .ragged      = 0.15f,
-                .gaps        = 0.18f,
-                .branchReach = 0.88f,
-            },
-        .climate =
-            {
-                // The narrowest range of the four, so it stays something come
-                // across rather than something walked through.
-                .temperature      = 0.60f,
-                .temperatureWidth = 0.18f,
-                .humidity         = 0.58f,
-                .humidityWidth    = 0.22f,
-                .ceiling          = 96.0f,
-                .ceilingFade      = 80.0f,
-                .abundance        = 0.35f,
-            },
-        .growth = {.maturityMinutes = 12.0f,
-                   .regrowMinutes   = 10.0f,
-                   .lightNeed       = 0.7f,
-                   .waterNeed       = 0.65f,
-                   .toughness       = 3.0f},
-        .palette =
-            {
-                // Spring is the one palette that is not foliage: the top two
-                // tones are blossom, which is what the tree is for half a season
-                // before it is worth picking.
-                {.barkDark = {62, 42, 26, 255},
-                 .bark     = {112, 76, 42, 255},
-                 .barkLight = {146, 104, 60, 255},
-                 .leaf = {{58, 116, 52, 255}, {96, 156, 70, 255}, {214, 178, 196, 255}, {244, 222, 232, 255}}},
-                {.barkDark = {62, 42, 26, 255},
-                 .bark     = {112, 76, 42, 255},
-                 .barkLight = {146, 104, 60, 255},
-                 .leaf = {{34, 92, 42, 255}, {60, 130, 54, 255}, {92, 168, 68, 255}, {134, 200, 96, 255}}},
-                {.barkDark = {60, 40, 24, 255},
-                 .bark     = {108, 72, 40, 255},
-                 .barkLight = {140, 100, 56, 255},
-                 .leaf = {{112, 74, 26, 255}, {166, 112, 34, 255}, {208, 152, 48, 255}, {234, 192, 84, 255}}},
-                {.barkDark = {54, 38, 24, 255},
-                 .bark     = {98, 70, 42, 255},
-                 .barkLight = {128, 96, 58, 255},
-                 .leaf = {{80, 58, 34, 255}, {108, 80, 48, 255}, {134, 104, 66, 255}, {160, 130, 90, 255}}},
-            },
-        .drops = {{.item = Item::Wood, .least = 2, .most = 4, .chance = 1.0f},
-                  {.item = Item::Apple, .least = 1, .most = 3, .chance = 0.7f},
-                  {.item = Item::Sapling, .least = 1, .most = 1, .chance = 0.5f}},
-        .deciduous = true,
-    },
 };
 
 static_assert(std::size(kSpecies) == kSpeciesCount, "every Species needs exactly one row in kSpecies");
 
-inline constexpr const SpeciesDef &Def(Species species) { return kSpecies[SpeciesIndex(species)]; }
+inline constexpr const SpeciesDef &Def(Species species) {
+    return kSpecies[SpeciesIndex(species)];
+}
 
 // How a layer is scattered.
 struct LayerSettings {
@@ -633,9 +769,13 @@ struct Settings {
         // two hundred thousand pixels was a little over two thirds of it. Set
         // from the figure wanted on the ground rather than from the one the field
         // is measured against.
-        {.cellSpan = 110.0f, .interlock = 0.55f, .coverage = 0.58f},
-        {.cellSpan = 26.0f, .interlock = 0.8f, .coverage = 0.5f, .slopeLimit = 0.85f, .slopeSpan = 18.0f,
-         .dropLimit = 26.0f},
+        {.cellSpan = 110.0f, .interlock = 0.55f, .coverage = 0.9f},
+        {.cellSpan   = 26.0f,
+         .interlock  = 0.8f,
+         .coverage   = 0.5f,
+         .slopeLimit = 0.85f,
+         .slopeSpan  = 18.0f,
+         .dropLimit  = 26.0f},
     };
 
     // Added to every field's own seed, the way terrain::Settings::seed is, so one
@@ -692,11 +832,6 @@ struct Plant {
     // own variation and how well the place suits it, so a species at the edge of
     // its range stands there stunted rather than absent.
     float scale = 1.0f;
-
-    // Drawn mirrored. Free variety on top of the shape, and safe to do because
-    // the form shading is symmetric — a baked sun would come out on the wrong
-    // side of half the wood.
-    bool mirrored = false;
 };
 
 // The cell a world position falls in, for a layer.

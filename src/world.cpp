@@ -905,6 +905,15 @@ float World::Skyline(int column) const {
     // Started just above the surface the generator reports for this column,
     // rather than at a fixed height. The surface is a function of the column
     // alone, so there is nothing to search for above it.
+    //
+    // Note what this leaves behind: the scan begins at an arbitrary height and
+    // steps by the lattice, so the answer is `Height - headroom + k*step` and is
+    // **not** on the lattice. Anything that compares this against a query which
+    // snaps to a vertex — IsSolidAt does — is comparing two grids up to half a
+    // step apart, and half a step at the edge of the ground is the difference
+    // between rock and sky. Callers have to allow for it; Grove::Undermine says
+    // how. Aligning the scan here would straighten it for everyone, but it also
+    // moves where every raindrop lands, so it is its own change.
     float ground = terrain::Height(x, settings_) - kSkylineHeadroom;
 
     // Then followed down to the first ground it meets, since the surface is not
@@ -1030,6 +1039,12 @@ void World::StepWeather(float dt) {
 
 void World::AddLight(Vector2 world, light::Radiance radiance, float radius) {
     sparks_.push_back({world, radiance, radius});
+}
+
+void World::AddCover(float fromX, float toX, float share) {
+    if (share <= 0.0f || toX <= fromX) return;
+
+    covers_.push_back({fromX, toX, share});
 }
 
 void World::StepLight(Rectangle region) {
@@ -1160,6 +1175,23 @@ void World::StepLight(Rectangle region) {
     }
 
     sparks_.clear();
+
+    // And whatever is standing in the light without being made of anything.
+    //
+    // Read into the per-column cover the clouds already use rather than stamped
+    // into the air as extinction — see World::AddCover for why the volume was
+    // wrong. Saturating rather than adding outright, so a wood under a storm does
+    // not hold back more sky than there is.
+    for (const Cover &cover : covers_) {
+        const int from = std::max(static_cast<int>(std::floor(cover.fromX / step)) - i0, 0);
+        const int to   = std::min(static_cast<int>(std::ceil(cover.toX / step)) - i0, medium_.cols - 1);
+
+        for (int i = from; i <= to; i++) {
+            medium_.cover[i] = std::min(medium_.cover[i] + cover.share, 1.0f);
+        }
+    }
+
+    covers_.clear();
 
     // The sky's horizon is the terrain's own, so a world generated with more
     // ground above it darkens without the light having to be retuned.

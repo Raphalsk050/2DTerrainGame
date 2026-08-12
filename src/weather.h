@@ -366,6 +366,11 @@ struct Shading {
 // purpose: a dawn is not four authored colours faded between, it is what happens
 // when the light has to cross more air to arrive.
 struct Day {
+    // Days in a year. Zero means there is no year yet, which is where this world
+    // stands: the seasons exist as a path through the code and as four palettes,
+    // and nothing turns them until this is given a value.
+    float yearDays = 0.0f;
+
     // Length of one whole turn, in minutes of the weather's own clock — so the
     // debug key that runs the weather fast runs the day fast with it.
     //
@@ -491,6 +496,33 @@ struct Settings {
     // rain a property of the map instead of an event.
     terrain::NoiseShape front{};
     float frontWind = 6.0f;
+
+    // Gusts, as a wave that travels rather than a value that varies in place.
+    //
+    // The cloud drift above is a constant, which is all a cloud needs: a sheet
+    // moving at one speed reads correctly because nothing on it is fixed to the
+    // ground. Anything that *is* fixed — a tree — needs the other half, because
+    // what a gust looks like from the ground is not every tree bending at once
+    // and not each one twitching on its own schedule. It is a wave crossing the
+    // wood: the near trees go over, then the ones behind them, then the far side.
+    //
+    // So the field is read at `x/wavelength - t*speed`, which is a shape that
+    // holds together and moves. The speed is its own, and faster than the air,
+    // the way a wave on water outruns the water.
+    struct Gust {
+        // Share of the mean the gust adds and takes away. At zero the wind is a
+        // constant and nothing sways out of step with anything else.
+        float strength = 0.75f;
+
+        // Pixels one gust spans, and pixels per second the pattern travels.
+        // A wavelength near a screen is what makes a gust something that arrives.
+        float wavelength = 900.0f;
+        float speed      = 150.0f;
+
+        terrain::NoiseShape shape{.frequency = 1.0f, .octaves = 2, .seed = 5507};
+    };
+
+    Gust gust{};
 
     // How far the front and the climate may push the weather's own cover, either
     // way. Both small: they texture the sky, they do not overrule the weather. A
@@ -736,6 +768,66 @@ public:
     // How hard it is raining in a column, in [0,1].
     float RainAt(float worldX) const;
 
+    // Wind at a world position, in pixels per second, signed.
+    //
+    // The mean the clouds drift at, plus a gust travelling across the world — see
+    // Settings::Gust for why a gust has to travel. Scaled by how unsettled the
+    // weather is, so a storm blows and a clear afternoon does not.
+    //
+    // Read by anything rooted to the ground. The clouds and the rain deliberately
+    // do not read it: they take the mean straight from the settings, because a
+    // cloud is not fixed to anywhere and a slant that varied per column would
+    // need the drop's whole path solved rather than its angle. Wiring the gust
+    // into rain later means sizing RainReach from the *largest* gust rather than
+    // from the mean, or the ground buffer runs out from under the slant.
+    float WindAt(float worldX) const;
+
+    // The strongest a gust can pull, in pixels per second. What a caller sizes a
+    // sway or a margin against, so nothing has to guess at the envelope.
+    float WindReach() const;
+
+    // How unsettled the weather is, in [0,1].
+    //
+    // Cover and rain together. Either alone gets it wrong in a way that shows:
+    // cover on its own has an overcast afternoon blowing as hard as a storm, rain
+    // on its own leaves a dry gale perfectly still.
+    float Bluster() const;
+
+    // Where the year has got to.
+    //
+    // A hook and not yet a calendar: there is no year in this world, so this
+    // answers spring and a blend of nothing until `Day::yearDays` is given a
+    // value. It is here rather than waiting because everything downstream of a
+    // season — a palette, a rate of leaf fall, a window in which fruit sets — can
+    // then be written, exercised and looked at now, and turning the seasons on
+    // later is a change to this function body alone.
+    //
+    // A pure function of the clock, like every other answer in this module, so
+    // two views of the same world agree about what time of year it is.
+    struct Season {
+        int index   = 0;    // 0 spring, 1 summer, 2 autumn, 3 winter.
+        float blend = 0.0f; // How far into the turn towards the next one, in [0,1].
+    };
+
+    Season Turn() const;
+
+    // Overrides the season until it is cleared, for looking at one rather than
+    // waiting a year for it. Negative clears.
+    void ForceSeason(int index) { forcedSeason_ = index; }
+    int ForcedSeason() const { return forcedSeason_; }
+
+    // What a place gets on average: daylight over one whole turn of the day, and
+    // rain over the moods in the table weighted by how often each comes up.
+    //
+    // Measured from the settings rather than written down, for the same reason
+    // every cutoff in this project is. They exist because anything that has to
+    // account for time it did not watch needs to know what it missed — a plant
+    // growing while the player was elsewhere, a pool drying out — and a guess at
+    // these makes the unwatched world quietly run at a different speed from the
+    // watched one.
+    float MeanDaylight() const;
+    float MeanRain() const;
+
     // Lowest a cloud base ever hangs, which is where any shadow it casts begins.
     // The light solver is told this so the shade lands under the cloud and not on
     // it.
@@ -868,6 +960,9 @@ private:
     // one day, so a long session cannot walk it out of float precision.
     float dayOffset_ = 0.0f;
     float daySkip_   = 0.0f;
+
+    // Which season is being held, or negative for whatever the clock says.
+    int forcedSeason_ = -1;
 
     // Derived from the clock by Advance. Held rather than recomputed because every
     // column asks for the same answer.

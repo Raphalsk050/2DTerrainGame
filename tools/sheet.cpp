@@ -18,6 +18,7 @@
 #include "canopy.h"
 #include "config.h"
 #include "flora.h"
+#include "item.h"
 #include "raylib.h"
 
 #include <cstdio>
@@ -101,7 +102,12 @@ int main(int argc, char **argv) {
 
     const int rows = static_cast<int>(flora::kSpeciesCount);
 
-    Image sheet = GenImageColor(perSpecies * cellW, rows * cellH, kBackdrop);
+    // A band of its own under the species rows for the items. Drawn into the last
+    // row instead, it sat on top of the first plant there — the strip and the
+    // bush were in the same place and read as one overlapping mess.
+    const int strip = kItemArt * zoom * 2 + 24;
+
+    Image sheet = GenImageColor(perSpecies * cellW, rows * cellH + strip, kBackdrop);
 
     std::vector<Color> pixels;
 
@@ -125,8 +131,6 @@ int main(int argc, char **argv) {
             plant.id = static_cast<std::int64_t>(i) * 7919 + static_cast<std::int64_t>(s) * 104729;
             plant.scale =
                 (perSpecies > 1) ? 0.70f + 0.42f * (static_cast<float>(i) / static_cast<float>(perSpecies - 1)) : 1.0f;
-
-            plant.mirrored = (i % 2) == 1;
 
             int w = 0;
             int h = 0;
@@ -198,6 +202,44 @@ int main(int argc, char **argv) {
                     def.height[which] / pixel, (maxx >= minx) ? maxx - minx + 1 : 0,
                     (maxy >= miny) ? maxy - miny + 1 : 0,
                     (area > 0) ? 100.0 * static_cast<double>(filled) / static_cast<double>(area) : 0.0);
+    }
+
+    // A strip of the items along the bottom, at the same zoom. They are drawn
+    // from their own table rather than by canopy, so this is the only place they
+    // can be seen without felling a tree for each one.
+    {
+        auto *canvas = static_cast<Color *>(sheet.data);
+
+        const int side = kItemArt * zoom * 2;
+        const int base = rows * cellH + 12;
+
+        for (std::size_t i = 0; i < kItemCount; i++) {
+            const ItemDef &def = kItems[i];
+
+            // Spaced by a whole item and a half, so neighbours cannot touch even
+            // at the widest zoom.
+            const int originX = 12 + static_cast<int>(i) * (side * 3 / 2);
+
+            for (int row = 0; row < kItemArt; row++) {
+                for (int col = 0; col < kItemArt; col++) {
+                    const char mark = def.art[row][col];
+                    if (mark < 'a' || mark >= static_cast<char>('a' + kItemTones)) continue;
+
+                    const Color tone = def.tone[static_cast<std::size_t>(mark - 'a')];
+
+                    for (int qy = 0; qy < zoom * 2; qy++) {
+                        for (int qx = 0; qx < zoom * 2; qx++) {
+                            const int px = originX + col * zoom * 2 + qx;
+                            const int py = base + row * zoom * 2 + qy;
+
+                            if (px < 0 || py < 0 || px >= sheet.width || py >= sheet.height) continue;
+
+                            canvas[static_cast<std::size_t>(py) * sheet.width + px] = tone;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     ExportImage(sheet, where.c_str());

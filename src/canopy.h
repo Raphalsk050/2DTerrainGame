@@ -73,13 +73,30 @@ public:
     // left the view and its slot may be taken.
     void Begin();
 
-    // The plant, drawn if it is not already held. Null while the frame's drawing
-    // budget is spent, which is what keeps a hundred trees coming into view at
-    // once from costing one long frame.
+    // The plant, drawn if it is not already held.
+    //
+    // Never null while the plant has ever been drawn. When the frame's budget is
+    // spent — which is what keeps a hundred plants arriving at once from costing
+    // one long frame — this hands back whatever that same plant already has, of
+    // any stage or season, rather than nothing.
+    //
+    // That fallback is not a nicety. Turning the season changes the key of every
+    // plant on screen at once, so without it half the wood vanished for two
+    // frames every time; and a caller that reads this to decide where a canopy
+    // casts its shade would otherwise shade trees it had not drawn, which put
+    // grey blobs in an empty sky.
     const Sprite *Acquire(const flora::Plant &plant, flora::Stage stage, flora::Season season);
 
     Texture2D Texture() const { return texture_; }
     bool Ready() const { return texture_.id != 0; }
+
+    // Whether this plant has a drawing at all, of any stage or season.
+    //
+    // A question rather than a request: it takes no budget and draws nothing.
+    // What it is for is the caller that has to know whether a plant is on screen
+    // before acting on it — a canopy may only cast shade if it was drawn, or the
+    // shadow arrives before the tree.
+    bool Holds(std::int64_t cell) const;
 
     int Held() const { return static_cast<int>(lookup_.size()); }
     int Capacity() const;
@@ -92,6 +109,11 @@ private:
 
     struct Slot {
         std::uint64_t key = 0;
+
+        // The plant it belongs to, kept apart from the key so that a plant can be
+        // found again whatever stage or season it was last drawn at.
+        std::int64_t cell = 0;
+
         Sprite sprite{};
 
         // The frame it was last asked for. A slot older than the frame before
@@ -107,6 +129,10 @@ private:
 
     std::vector<Slot> slots_;
     std::unordered_map<std::uint64_t, int> lookup_;
+
+    // Cell to slot, ignoring stage and season. What the fallback above is found
+    // through.
+    std::unordered_map<std::int64_t, int> byPlant_;
 
     std::uint64_t frame_ = 0;
     int drawnThisFrame_  = 0;

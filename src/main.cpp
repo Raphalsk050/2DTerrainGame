@@ -16,6 +16,11 @@
 
 namespace {
 
+constexpr const char *kSeasonNames[] = {"spring", "summer", "autumn", "winter"};
+
+// Seconds a refusal stays on screen.
+constexpr float kNoticeTime = 2.2f;
+
 // Fraction of the distance to the player the camera closes per second. Framing
 // the character with a slight lag reads as smoother than pinning the view to
 // the body, which makes every jump shake the whole screen.
@@ -102,7 +107,25 @@ void FollowPlayer(Camera2D &camera, const Player &player, float dt) {
 //
 // Drawn twice. That is the whole cost, on six lines of text.
 void DrawLabel(const char *text, int x, int y, Color colour) {
-    DrawText(text, x + 1, y + 1, 14, {235, 240, 248, 190});
+    // Outlined on all four sides rather than given a shadow on one.
+    //
+    // This was dark ink with a pale offset a pixel down and right, and it failed
+    // at both ends of the world it has to be read against. Over white cloud the
+    // pale half vanished into the cloud and what was left was thin dark letters;
+    // in a cave the dark half vanished and what was left was the offset. And a
+    // single offset is not an outline — half of every letter has nothing between
+    // it and the background at all.
+    //
+    // Light letter, dark outline, and the two cover each other's ground: the
+    // letter carries a cave and the outline carries a cloud. Five draws on six
+    // lines of text, which is nothing next to a screenful of terrain.
+    constexpr Color kEdge = {8, 10, 14, 235};
+
+    DrawText(text, x - 1, y, 14, kEdge);
+    DrawText(text, x + 1, y, 14, kEdge);
+    DrawText(text, x, y - 1, 14, kEdge);
+    DrawText(text, x, y + 1, 14, kEdge);
+
     DrawText(text, x, y, 14, colour);
 }
 
@@ -125,9 +148,10 @@ void DrawBrushMode(const Editor &editor) {
     DrawText(text, static_cast<int>(badge.x + 8.0f), static_cast<int>(badge.y + 4.0f), 14, color);
 }
 
-void Draw(const World &world, const Grove &grove, const Player &player, const Hotbar &hotbar, const Editor &editor,
-          const LiquidLayer &liquids, const LightLayer &lights, const Camera2D &camera,
-          const debug_view::Toggles &debug, float lantern) {
+void Draw(const World &world, const Grove &grove, const Harvest &gathered, const Player &player,
+          const Hotbar &hotbar, const Editor &editor, const LiquidLayer &liquids, const LightLayer &lights,
+          const Camera2D &camera, const debug_view::Toggles &debug, float lantern, const char *notice,
+          float noticeFor) {
     const Rectangle view = ViewBounds(camera);
 
     BeginDrawing();
@@ -148,7 +172,17 @@ void Draw(const World &world, const Grove &grove, const Player &player, const Ho
     // The plants over the ground and behind the character, and on this side of
     // the light multiply: a tree is lit by the same daylight as the ground it
     // stands on, and has to know nothing about it to be.
-    grove.Draw(flora::Season::Summer);
+    // Whatever time of year it is. There is no calendar yet, so this is spring
+    // unless F9 is holding one — see weather::Sky::Turn.
+    const auto season = static_cast<flora::Season>(world.Sky().Turn().index);
+
+    grove.Draw(world.Sky(), season, world.Sky().Time());
+
+    grove.DrawFruit(season, world.Sky().Time());
+    grove.DrawLeaves(world.Sky(), season, view, world.Sky().Time());
+
+    // What the wood left on the ground, over the plants and under the character.
+    grove.Fallen().Draw(world.Sky().Time());
 
     player.Draw();
 
@@ -203,20 +237,42 @@ void Draw(const World &world, const Grove &grove, const Player &player, const Ho
     // the image that was baked, not a place in the world.
     if (debug.atlas) grove.DrawSheet();
 
-    const Color ink = {14, 18, 24, 255};
+    // Near white, because the outline under it is what does the separating now.
+    const Color ink = {238, 243, 250, 255};
 
-    DrawLabel("A/D: move  |  space: jump  |  S: crouch  |  J: attack  |  mouse: aim  |  F: fly", 10, 10, ink);
+    // And the wet lines keep their meaning by going pale blue rather than dark.
+    const Color wet = {152, 206, 255, 255};
+
+    DrawLabel("A/D: move  |  space: jump  |  S: crouch  |  J: chop  |  P: plant  |  mouse: aim  |  F: fly", 10,
+              10, ink);
     DrawLabel("left: apply brush  |  X: place/dig  |  1-9 or wheel: material  |  - / +: brush size  |  R: regenerate",
               10, 28, ink);
     DrawLabel(TextFormat("V: vertices  |  F3: chunks  |  F4: height grid  |  F5: light probes  |  F6: unlit %s  |"
-                         "  F7: fast weather %s  |  F8: next quarter  |  , . : lantern %.1f",
-                         debug.unlit ? "on" : "off", debug.fastWeather ? "on" : "off", lantern),
+                         "  F7: fast weather %s  |  F8: next quarter  |  F9: season %s  |  F10: sheet  |  , . : lantern %.1f",
+                         debug.unlit ? "on" : "off", debug.fastWeather ? "on" : "off", kSeasonNames[world.Sky().Turn().index],
+                         lantern),
               10, 46, ink);
 
-    DrawLabel(TextFormat("chunks: %d (%d pinned)   edits kept: %d   plants: %d (%d drawn)   water: %.1f   rays: %ld",
+    DrawLabel(TextFormat("chunks: %d (%d pinned)   edits kept: %d   plants: %d (%d drawn, %d kept)   rays: %ld",
                          world.ResidentChunks(), world.PinnedChunks(), world.RememberedEdits(), grove.VisiblePlants(),
-                         grove.DrawnPlants(), world.TotalWater(view), world.Light().Rays()),
+                         grove.DrawnPlants(), grove.RememberedPlants(), world.Light().Rays()),
               10, 70, ink);
+
+    // What the woods have given up.
+    //
+    // Every kind, including the ones at zero. Hiding an empty count reads as the
+    // item not existing rather than as not having any, and the first thing a
+    // player asks when planting will not work is whether they have a sapling at
+    // all — a question the readout has to be able to answer.
+    {
+        const char *line = "gathered:";
+
+        for (std::size_t i = 0; i < kItemCount; i++) {
+            line = TextFormat("%s  %s %d", line, kItems[i].name, gathered[i]);
+        }
+
+        DrawLabel(TextFormat("%s   (%d on the ground)", line, grove.Fallen().Live()), 10, 142, ink);
+    }
 
     const Vector2 centre = player.Centre();
     const auto under     = editor.Under();
@@ -236,7 +292,7 @@ void Draw(const World &world, const Grove &grove, const Player &player, const Ho
         TextFormat("weather: %-8s  sky %.0f%% full   rain %.0f%%   |   here: %.0f%% cloud  %.0f%% shade  base y %d",
                    sky.name, sky.cover * 100.0f, sky.rain * 100.0f, world.Sky().CoverAt(centre.x) * 100.0f,
                    world.Sky().ShadeAt(centre.x) * 100.0f, static_cast<int>(world.Sky().UndersideAt(centre.x))),
-        10, 106, sky.rain > 0.0f ? Color{16, 44, 82, 255} : ink);
+        10, 106, sky.rain > 0.0f ? wet : ink);
 
     // Then the day, and how damp it has left the ground. The clock is the world's
     // own and not the wall's: a whole turn is `Day::dayMinutes` of weather time, so
@@ -252,7 +308,7 @@ void Draw(const World &world, const Grove &grove, const Player &player, const Ho
     DrawLabel(TextFormat("%02d:%02d  %-5s   daylight %.0f%%   |   humidity %.0f%%  [%.*s%.*s]", static_cast<int>(hours),
                          static_cast<int>((hours - std::floor(hours)) * 60.0f), today.name, today.light * 100.0f,
                          damp * 100.0f, filled, soaked, 10 - filled, dry),
-              10, 124, damp > 0.66f ? Color{16, 44, 82, 255} : ink);
+              10, 124, damp > 0.66f ? wet : ink);
 
     // Flight suspends gravity and collision both, which is not something to be
     // left on by accident, so it says so where the eye already is.
@@ -265,6 +321,14 @@ void Draw(const World &world, const Grove &grove, const Player &player, const Ho
         DrawRectangleRec(badge, {30, 34, 42, 220});
         DrawRectangleLinesEx(badge, 2.0f, {170, 130, 220, 255});
         DrawText(text, static_cast<int>(badge.x + 8.0f), static_cast<int>(badge.y + 4.0f), 14, {190, 160, 235, 255});
+    }
+
+    // Whatever the world last refused to do, over the middle of the screen where
+    // the eye already is after pressing a key that did nothing.
+    if (noticeFor > 0.0f) {
+        const int width = MeasureText(notice, 14);
+
+        DrawLabel(notice, (GetScreenWidth() - width) / 2, GetScreenHeight() - 140, {255, 214, 140, 255});
     }
 
     DrawBrushMode(editor);
@@ -536,6 +600,12 @@ int main() {
                 // a whole day in half a minute. F8 runs it on to the next quarter.
                 .dayMinutes = 24.0f,
 
+                // Eight in the morning, so a fresh world opens in full light with
+                // the day ahead of it. Stated here rather than left to the default
+                // because this is the block a reader comes to when asking what
+                // time the game starts.
+                .startAt = 8.0f / 24.0f,
+
                 // Both below the horizon's own zero, so light arrives before the sun
                 // does and outlasts it. Twelve minutes of full day, eight and a half
                 // of full night, and about two minutes of turning at each end.
@@ -703,7 +773,11 @@ int main() {
     // and they are settled by walking through a wood at each setting rather than
     // by argument, the same way the lantern and the cave coverage were.
     Grove grove;
-    grove.Configure({.seed = settings.seed}, settings);
+    grove.Configure({.seed = settings.seed}, settings, world.Sky());
+
+    // What has been picked up. The counterpart of Editor::Collected for anything
+    // that is not a material — see item.h for why the two are separate tables.
+    Harvest gathered{};
 
     // The two ends of a day, and they are two colours rather than one turned down.
     //
@@ -733,6 +807,10 @@ int main() {
     float accumulated = 0.0f;
     float lantern     = config::kLanternStrength;
 
+    // The last thing the world said back, and how long it has left on screen.
+    const char *notice = "";
+    float noticeFor    = 0.0f;
+
     debug_view::Toggles debug;
 
     while (!WindowShouldClose()) {
@@ -756,7 +834,7 @@ int main() {
         // drawn and nothing else — it holds no liquid and steps no automaton — so
         // there is nothing about one off screen that has to have settled by the
         // time it scrolls in.
-        grove.Update(world, ViewBounds(camera));
+        grove.Update(world, ViewBounds(camera), player.Centre(), world.Sky().Time(), dt, gathered);
 
         hotbar.Update();
         editor.Update(world, hotbar, camera);
@@ -768,6 +846,12 @@ int main() {
         // not held in the debug toggles. Asking again while one is running queues
         // another quarter.
         if (IsKeyPressed(KEY_F8)) world.SkipToQuarter();
+
+        // Holds a season, for looking at one rather than waiting a year. There is
+        // no year yet, so without this the world is always in spring — which is
+        // exactly why the key exists: the whole seasonal path can be exercised and
+        // judged before there is a calendar to drive it.
+        if (IsKeyPressed(KEY_F9)) world.CycleSeason();
 
         // Turned up and down while walking, since how much light the player
         // carries is a balance question and the only way to settle it is to be
@@ -785,6 +869,35 @@ int main() {
         player.Update(ReadPlayerInput(camera), world, dt);
         FollowPlayer(camera, player, dt);
 
+        // Only on the frame the swing began. The strike box is live for the whole
+        // window, so reading that instead lands nine blows per swing.
+        if (player.AttackStarted()) {
+            grove.Strike(player.AttackHitbox(), 1.0f, player.Centre(), world.Sky().Time());
+        }
+
+        // A sapling goes in where the player is standing, and the species is the
+        // one the climate there would have grown anyway. Choosing it for the
+        // player rather than offering a menu: what a place will support is a
+        // property of the place, and planting a pine in a swamp is not a decision
+        // worth surfacing before there is a reason to make it.
+        if (IsKeyPressed(KEY_P)) {
+            const Vector2 feet = {player.Centre().x, player.Bounds().y + player.Bounds().height};
+
+            if (gathered[ItemIndex(Item::Sapling)] <= 0) {
+                notice     = "no saplings — fell a tree for one";
+                noticeFor  = kNoticeTime;
+            } else if (grove.Plant(grove.Suited(feet.x), feet, world.Sky().Time())) {
+                gathered[ItemIndex(Item::Sapling)]--;
+            } else {
+                // Said out loud rather than swallowed. A key that does nothing and
+                // explains nothing is the same to a player as a key that is broken.
+                notice    = "no room here — something is already growing";
+                noticeFor = kNoticeTime;
+            }
+        }
+
+        noticeFor = std::max(noticeFor - dt, 0.0f);
+
         // Re-offered every frame rather than registered once. A light that has
         // to be renewed to keep burning needs nothing told to it when the thing
         // carrying it moves, and nothing told to it when that thing is gone.
@@ -796,6 +909,11 @@ int main() {
         // which would be wrong.
         world.StepWeather(dt * (debug.fastWeather ? debug_view::kFastWeather : 1.0f));
 
+        // Offered on the same terms as the lantern above, and for the same
+        // reason: a canopy that has to be re-offered to keep shading needs
+        // nothing told to it when the tree is felled.
+        grove.Shade(world, world.Sky().Time());
+
         // Solved after the world has finished moving, so the light matches the
         // frame it is about to be drawn over rather than the one before it.
         world.StepLight(active);
@@ -804,7 +922,8 @@ int main() {
         // Captured before the frame opens, since it renders to its own target.
         liquids.Capture(world, ViewBounds(camera), camera);
 
-        Draw(world, grove, player, hotbar, editor, liquids, lights, camera, debug, lantern);
+        Draw(world, grove, gathered, player, hotbar, editor, liquids, lights, camera, debug, lantern, notice,
+             noticeFor);
     }
 
     grove.Unload();

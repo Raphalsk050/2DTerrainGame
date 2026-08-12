@@ -212,7 +212,14 @@ float Sky::SunLightAt(float seconds) const {
 Daylight Sky::DaylightAt(float seconds) const {
     const Day &day = settings_.day;
 
-    const float turns = seconds / SecondsPerDay();
+    // `startAt` belongs here and was missing.
+    //
+    // SunLightAt has always added it and this has never done, so the two
+    // disagreed about what time it was — and since this is the one that produces
+    // the Daylight a frame is lit and drawn by, the setting had no effect on
+    // anything anybody could see. A fresh world opened at midnight in the pitch
+    // dark, against the plain intent of the field's own comment.
+    const float turns = seconds / SecondsPerDay() + day.startAt;
 
     Daylight light;
     light.phase     = turns - std::floor(turns);
@@ -671,6 +678,74 @@ float Sky::RainAt(float worldX) const {
     // The weather's, everywhere. Kept taking a position so the caller does not have
     // to know that, and so a future local squall has somewhere to go.
     return now_.rain;
+}
+
+// How unsettled the weather is, in [0,1]. Cover on its own would have an overcast
+// afternoon blowing as hard as a storm; rain on its own would leave a dry gale
+// still. The two together are what "blustery" means.
+float Sky::Bluster() const { return std::clamp(now_.cover * 0.45f + now_.rain * 0.55f, 0.0f, 1.0f); }
+
+float Sky::WindAt(float worldX) const {
+    const Settings::Gust &gust = settings_.gust;
+
+    // Sampled at a position that slides with time, so what the field describes is
+    // a shape crossing the world rather than a value changing where it stands.
+    const float along = worldX / std::max(gust.wavelength, 1.0f) - time_ * gust.speed / std::max(gust.wavelength, 1.0f);
+
+    // The shape's own seed, the way every other field in this module is read.
+    const float wave = terrain::Signed({along * terrain::kFeatureSpan, 0.0f}, gust.shape);
+
+    // A calm day still has its breeze; a storm has the mean and a gust half again
+    // as strong on top of it.
+    const float weight = 0.35f + 0.65f * Bluster();
+
+    return settings_.wind * (1.0f + wave * gust.strength * weight);
+}
+
+float Sky::WindReach() const { return std::fabs(settings_.wind) * (1.0f + settings_.gust.strength); }
+
+Sky::Season Sky::Turn() const {
+    // Held, for looking at one season rather than waiting for it.
+    if (forcedSeason_ >= 0) return {forcedSeason_ % 4, 0.0f};
+
+    const float year = settings_.day.yearDays * SecondsPerDay();
+
+    // No calendar yet. Spring, and no blend — see the declaration.
+    if (year <= 0.0f) return {};
+
+    const float through = std::fmod((time_ + dayOffset_) / year, 1.0f) * 4.0f;
+
+    const int index = std::clamp(static_cast<int>(through), 0, 3);
+
+    return {index, through - static_cast<float>(index)};
+}
+
+float Sky::MeanDaylight() const {
+    // Walked rather than integrated. The curve is a smoothstep of a sine and its
+    // mean has no useful closed form, and this is asked once.
+    constexpr int kSamples = 96;
+
+    const float day = SecondsPerDay();
+
+    float total = 0.0f;
+
+    for (int i = 0; i < kSamples; i++) {
+        total += DaylightAt(static_cast<float>(i) / kSamples * day).light;
+    }
+
+    return total / static_cast<float>(kSamples);
+}
+
+float Sky::MeanRain() const {
+    float rain   = 0.0f;
+    float weight = 0.0f;
+
+    for (const MoodDef &mood : settings_.moods) {
+        rain += mood.rain * mood.likelihood;
+        weight += mood.likelihood;
+    }
+
+    return (weight > 0.0f) ? rain / weight : 0.0f;
 }
 
 // ------------------------------------------------------------------- the air

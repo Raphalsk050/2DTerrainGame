@@ -80,9 +80,14 @@ void Player::UpdateStance(const PlayerInput &input, const World &terrain) {
 }
 
 void Player::UpdateAttack(const PlayerInput &input) {
+    // Cleared every frame, so it names the frame a swing began rather than the
+    // frame the key happened to be read on.
+    attackStarted_ = false;
+
     if (input.attackPressed && attackCooldown_ <= 0.0f) {
         attackTimer_    = player_config::kAttackDuration;
         attackCooldown_ = player_config::kAttackCooldown;
+        attackStarted_  = true;
     }
 }
 

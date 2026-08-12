@@ -121,6 +121,27 @@ public:
     // goes out.
     void AddLight(Vector2 world, light::Radiance radiance, float radius);
 
+    // Sky held back over a run of columns, for the next solve only.
+    //
+    // The spark read the other way round: re-offered every frame, so nothing has
+    // to be told when the thing casting it moves or is cut down.
+    //
+    // A *column* and not a volume, and that distinction is the whole of this. It
+    // was a rectangle of extinction stamped into the medium, which is what a
+    // material does — and it was wrong for the same reason it is right for a
+    // material: extinction is fog, and a material's cell is also drawn, so its
+    // own picture hides it. A canopy stands in open air where nothing is drawn,
+    // so the fog was the only thing on screen and every tree wore a grey blob in
+    // the sky above it. Softening the edge and dropping the figure to a tenth
+    // made the blob fainter and no less a blob.
+    //
+    // This is the arrangement the clouds already use — `Medium::cover`, one
+    // figure per column, applied to the sky a ray reaches at the end of its
+    // march. Nothing is added to the air; what changes is how much sky arrives
+    // underneath. Added to whatever the cloud is already holding back, because
+    // shade under a cloud under a canopy is both.
+    void AddCover(float fromX, float toX, float share);
+
     // Light reaching a world position, and the same as a single level in [0,1].
     //
     // The level is the number game rules should be written against: crops that
@@ -173,6 +194,10 @@ public:
     // Runs the day on to its next quarter. For looking at a transition rather than
     // waiting for it; the weather and the clouds are not disturbed.
     void SkipToQuarter() { sky_.SkipToQuarter(); }
+
+    // Holds the next season, and wraps back to whatever the clock says after the
+    // fourth. For looking at the year before there is one.
+    void CycleSeason() { sky_.ForceSeason((sky_.ForcedSeason() + 1) % 4); }
 
     // How hard it is raining over a world position, in [0,1].
     //
@@ -449,6 +474,15 @@ private:
     };
 
     std::vector<Spark> sparks_;
+
+    // Sky held back over a span of columns, lasting one solve.
+    struct Cover {
+        float fromX = 0.0f;
+        float toX   = 0.0f;
+        float share = 0.0f;
+    };
+
+    std::vector<Cover> covers_;
 
     light::Settings lightSettings_{};
 

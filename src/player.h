@@ -152,6 +152,13 @@ public:
     bool IsGrounded() const { return grounded_; }
     bool IsAttacking() const { return attackTimer_ > 0.0f; }
 
+    // True on the one frame a swing began.
+    //
+    // Distinct from IsAttacking, which stays true for the whole strike window —
+    // nine frames at sixty. Anything that lands a blow has to read this one, or a
+    // single swing deals its damage nine times.
+    bool AttackStarted() const { return attackStarted_; }
+
     // Deep enough in liquid that walking and jumping give way to swimming.
     bool IsSwimming() const { return submerged_ >= player_config::kSwimThreshold; }
     float Submerged() const { return submerged_; }
@@ -226,6 +233,7 @@ private:
 
     float attackTimer_    = 0.0f;
     float attackCooldown_ = 0.0f;
+    bool attackStarted_   = false;
 
     int health_ = 100;
 };

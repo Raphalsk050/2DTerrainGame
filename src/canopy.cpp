@@ -115,10 +115,15 @@ constexpr int kSlotH = 136;
 constexpr int kColumns = 10;
 constexpr int kRows    = 10;
 
-// Plants drawn per frame. Walking into a wood brings a few trees into view a
-// second; this only binds when the view jumps, and then it spreads the cost over
-// the frames after it rather than spending it all in one.
-constexpr int kDrawBudget = 6;
+// Plants drawn per frame.
+//
+// Raised once the undergrowth arrived: a screen holds forty-odd plants now
+// rather than a dozen, and at six a frame the first second of a new view was
+// spent with most of the wood missing while its shade was already being cast.
+// Walking into a wood brings a few plants into view a second, so this only binds
+// when the view jumps, and then it spreads the cost over the next two frames
+// rather than one.
+constexpr int kDrawBudget = 24;
 
 // Texels of clear space left around a plant inside its slot.
 constexpr int kPad = 2;
@@ -652,6 +657,15 @@ std::uint64_t Sheet::Key(std::int64_t cell, flora::Stage stage, flora::Season se
 
 int Sheet::Capacity() const { return kColumns * kRows; }
 
+bool Sheet::Holds(std::int64_t cell) const {
+    const auto held = byPlant_.find(cell);
+    if (held == byPlant_.end()) return false;
+
+    const Slot &slot = slots_[static_cast<std::size_t>(held->second)];
+
+    return slot.taken && slot.cell == cell;
+}
+
 void Sheet::Create() {
     Unload();
 
@@ -668,6 +682,7 @@ void Sheet::Create() {
 
     slots_.assign(static_cast<std::size_t>(Capacity()), Slot{});
     lookup_.clear();
+    byPlant_.clear();
 
     frame_ = 0;
 }
@@ -679,6 +694,7 @@ void Sheet::Unload() {
 
     slots_.clear();
     lookup_.clear();
+    byPlant_.clear();
 
     frame_          = 0;
     drawnThisFrame_ = 0;
@@ -701,7 +717,21 @@ const Sprite *Sheet::Acquire(const flora::Plant &plant, flora::Stage stage, flor
         return &slot.sprite;
     }
 
-    if (drawnThisFrame_ >= kDrawBudget) return nullptr;
+    // Whatever this plant already has, for the two cases below where it cannot be
+    // drawn now. Wrong season for a frame or two beats absent for a frame or two.
+    const auto Held = [this](std::int64_t cell) -> Sprite * {
+        const auto held = byPlant_.find(cell);
+        if (held == byPlant_.end()) return nullptr;
+
+        Slot &slot = slots_[static_cast<std::size_t>(held->second)];
+        if (!slot.taken || slot.cell != cell) return nullptr;
+
+        slot.used = frame_;
+
+        return &slot.sprite;
+    };
+
+    if (drawnThisFrame_ >= kDrawBudget) return Held(plant.id);
 
     // A free slot, or the one that has gone longest without being asked for.
     // Never one asked for this frame or the last, which would take the sprite of
@@ -725,19 +755,30 @@ const Sprite *Sheet::Acquire(const flora::Plant &plant, flora::Stage stage, flor
         }
     }
 
-    if (chosen < 0) return nullptr;
+    if (chosen < 0) return Held(plant.id);
 
     Slot &slot = slots_[static_cast<std::size_t>(chosen)];
 
-    if (slot.taken) lookup_.erase(slot.key);
+    if (slot.taken) {
+        lookup_.erase(slot.key);
+
+        // Only if this slot is still the one that plant is found through. A plant
+        // drawn at two stages has two slots, and evicting the older must not
+        // unhook the newer.
+        if (const auto held = byPlant_.find(slot.cell); held != byPlant_.end() && held->second == chosen) {
+            byPlant_.erase(held);
+        }
+    }
 
     Draw(plant, stage, season, slot, chosen % kColumns, chosen / kColumns);
 
     slot.key   = key;
+    slot.cell  = plant.id;
     slot.used  = frame_;
     slot.taken = true;
 
-    lookup_[key] = chosen;
+    lookup_[key]        = chosen;
+    byPlant_[plant.id]  = chosen;
     drawnThisFrame_++;
 
     return &slot.sprite;

@@ -304,10 +304,9 @@ bool Grow(Layer layer, std::int64_t cell, const Settings &settings, const terrai
 
     if (Roll(cell, 29, seed) >= density) return false;
 
-    out.id       = cell;
-    out.species  = static_cast<Species>(chosen);
-    out.scale    = scale;
-    out.mirrored = Roll(cell, 41, seed) < 0.5f;
+    out.id      = cell;
+    out.species = static_cast<Species>(chosen);
+    out.scale   = scale;
 
     // Set half a lattice step into the ground. The surface is the first solid
     // vertex, but what is drawn is the contour between that vertex and the empty

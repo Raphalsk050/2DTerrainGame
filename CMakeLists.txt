@@ -53,6 +53,7 @@ add_executable(${PROJECT_NAME}
     src/noise_view.cpp
     src/debug_view.cpp
     src/canopy.cpp
+    src/drop.cpp
     src/editor.cpp
     src/flora.cpp
     src/grove.cpp
