@@ -32,7 +32,9 @@ enum class Item { Wood, Sapling, Apple, Resin, Fibre, Count };
 
 inline constexpr std::size_t kItemCount = static_cast<std::size_t>(Item::Count);
 
-inline constexpr std::size_t ItemIndex(Item item) { return static_cast<std::size_t>(item); }
+inline constexpr std::size_t ItemIndex(Item item) {
+    return static_cast<std::size_t>(item);
+}
 
 struct ItemDef {
     const char *name;
@@ -74,7 +76,7 @@ inline constexpr ItemDef kItems[] = {
                 ".dccc.",
                 "......",
             },
-        .stack = 999,
+        .stack = 64,
     },
     {
         .name   = "sapling",
@@ -91,7 +93,7 @@ inline constexpr ItemDef kItems[] = {
                 "..c...",
                 ".ddd..",
             },
-        .stack = 99,
+        .stack = 64,
     },
     {
         .name   = "apple",
@@ -108,7 +110,7 @@ inline constexpr ItemDef kItems[] = {
                 ".abbc.",
                 "..cc..",
             },
-        .stack = 99,
+        .stack = 64,
     },
     {
         .name   = "resin",
@@ -126,7 +128,7 @@ inline constexpr ItemDef kItems[] = {
                 "..bbc.",
                 "..cc..",
             },
-        .stack = 99,
+        .stack = 64,
     },
     {
         .name   = "fibre",
@@ -144,13 +146,15 @@ inline constexpr ItemDef kItems[] = {
                 ".ab.a.",
                 ".b..b.",
             },
-        .stack = 999,
+        .stack = 64,
     },
 };
 
 static_assert(std::size(kItems) == kItemCount, "every Item needs exactly one row in kItems");
 
-inline constexpr const ItemDef &Def(Item item) { return kItems[ItemIndex(item)]; }
+inline constexpr const ItemDef &Def(Item item) {
+    return kItems[ItemIndex(item)];
+}
 
 // How many of each item something gave up.
 //

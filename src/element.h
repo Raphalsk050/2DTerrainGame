@@ -5,6 +5,7 @@
 #include "terrain.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <iterator>
 
@@ -14,9 +15,25 @@
 // squares routine and simulated by the same rules. Everything that used to be
 // decided by naming a particular element somewhere in the code is declared here
 // instead, so a new material is one row in the table below and nothing else.
-// Ores are listed in the order they are met on the way down, which is also the
-// order of their worth, so the hotbar reads as a progression.
-enum class Element { Rock, Coal, Copper, Iron, Gold, Diamond, Emerald, Water, Torch, Count };
+//
+// The order is the order the hotbar shows them in, and it reads as two runs: what
+// the ground is made of near the top, where a player builds, and then the ores in
+// the order they are met on the way down, which is also the order of their worth.
+enum class Element {
+    Rock,
+    Soil,
+    Sand,
+    Snow,
+    Torch,
+    Coal,
+    Copper,
+    Iron,
+    Gold,
+    Diamond,
+    Emerald,
+    Water,
+    Count
+};
 
 inline constexpr std::size_t kElementCount = static_cast<std::size_t>(Element::Count);
 
@@ -63,6 +80,7 @@ enum class Generator {
     None,    // Only ever placed by hand.
     Terrain, // The base landscape, shaped by terrain::Settings.
     Vein,    // Patches scattered through the ground by their own noise.
+    Cover,   // A skin over the landscape, as thick as the climate makes it.
     Pool,    // Liquid standing in the open space the ground leaves behind.
 };
 
@@ -114,8 +132,80 @@ struct DepthBand {
     // noise along the horizontal axis, so it costs no extra field to sample.
     float jitter = 0.0f;
 
+    // Reads the three heights above as depths below the surface rather than as
+    // absolute world Y.
+    //
+    // An ore level is absolute on purpose, for the reasons written above it. A
+    // cover is the opposite kind of thing: it is a skin on the land and has to
+    // ride over every hill and down into every valley, which is precisely what an
+    // absolute band cannot say. One flag rather than a second kind of band,
+    // because everything else about the shape — the peak, the two arms, the
+    // scarcity, the wobble — means exactly the same thing measured either way.
+    bool relative = false;
+
     bool Bounded() const { return top > -kUnboundedDepth || bottom < kUnboundedDepth; }
 };
+
+// Where a material belongs, as a place in the two climate fields rather than as a
+// list of biomes.
+//
+// A centre and a width per axis, read as a bell: densest at the centre, thinning
+// to nothing about a width away. Deliberately the same shape as
+// flora::SpeciesClimate, so that when there is a biome table it supplies weights
+// that multiply a suitability which already exists, rather than replacing it.
+// Until then this *is* the biome selection, and it is what puts sand in a desert
+// and snow on the cold ground.
+//
+// Altitude needs no term of its own. terrain::ClimateSettings already cools the
+// air by `temperatureLapse` per pixel of elevation, so a material that wants the
+// tops only has to ask for cold and the peaks answer.
+struct ElementClimate {
+    float temperature = 0.5f;
+    float humidity    = 0.5f;
+
+    // A width of kUnboundedDepth reads as "anywhere", since the bell then never
+    // falls off. That is what a material present the world over asks for, and it
+    // is why the defaults here mean no climate preference at all.
+    float temperatureWidth = kUnboundedDepth;
+    float humidityWidth    = kUnboundedDepth;
+
+    // Suitability at which the material lies at its full depth, and the
+    // suitability below which it is not there at all.
+    //
+    // A pair rather than the bell used raw, and both halves of it were measured
+    // rather than argued. Two bells multiplied peak only where both axes peak *in
+    // the same column*, and the two climate fields are decorrelated by
+    // construction — so the joint suitability of the hottest, driest place in a
+    // hundred and twenty thousand pixels came out at 0.68, and sand was drawn at
+    // two thirds depth at its very best and at a fifth of it everywhere else.
+    // What that paints is not a desert; it is a dusting of sand over half a
+    // county.
+    //
+    // Dividing by a ceiling fixed the depth and made the second fault worse: a
+    // Gaussian's tail is long, so the fringe simply got thicker as well as
+    // wider, and a fifth of the world was slightly sandy. What a desert has is an
+    // edge. So the bell is spent on *where* that edge falls rather than on how
+    // deep the middle is, and the run between these two numbers is how far it
+    // takes to cross it — narrow on purpose, the same argument
+    // flora::Settings::edgeBand makes about the border of a wood.
+    float fullAt = 0.55f;
+    float goneAt = 0.30f;
+};
+
+// The smooth ramp between two edges, in [0,1].
+inline float ClimateRamp(float edge0, float edge1, float x) {
+    const float t = std::clamp((x - edge0) / std::max(edge1 - edge0, 1e-3f), 0.0f, 1.0f);
+
+    return t * t * (3.0f - 2.0f * t);
+}
+
+// How well a climate suits a material, in [0,1], before the shaping above.
+inline float ClimateBell(const ElementClimate &wants, float temperature, float humidity) {
+    const float dt = (temperature - wants.temperature) / std::max(wants.temperatureWidth, 1e-3f);
+    const float dh = (humidity - wants.humidity) / std::max(wants.humidityWidth, 1e-3f);
+
+    return std::exp(-dt * dt - dh * dh);
+}
 
 struct ElementSpawn {
     Generator generator = Generator::None;
@@ -157,7 +247,46 @@ struct ElementSpawn {
     SpawnSpace space = SpawnSpace::Anywhere;
 
     DepthBand band{};
+
+    // How thick a cover lies where its climate suits it best, in pixels, and how
+    // much its own noise thickens and thins that along the way.
+    //
+    // The variation is not decoration. A cover of one thickness meets the rock
+    // under it along a line as straight as a spirit level, which reads as a
+    // painted stripe rather than as ground; a cover whose base wanders is soil
+    // that has gathered where it could.
+    //
+    // Nothing may ask for more than kCoverCeiling — see the constant.
+    float thickness     = 0.0f;
+    float thicknessVary = 0.0f;
+
+    // Where the material belongs, and how far the noise is allowed to argue with
+    // that at the border.
+    //
+    // The jitter is added to the climate weight before it is clamped, so it does
+    // nothing at all in the middle of a range — one either side of the border the
+    // weight is already past both ends of the clamp — and everything at the edge,
+    // where it breaks the transition into patches of one material and patches of
+    // the other. A border with no jitter is a line drawn across the world, and
+    // there is no such line in any desert.
+    ElementClimate climate{};
+    float climateJitter = 0.0f;
 };
+
+// The furthest a cover may reach below the surface, in pixels.
+//
+// CaveSettings::crust keeps every cave layer at least that far under the ground,
+// so a cover thinner than it can never open into the roof of a gallery. Ask for
+// more and the first thing you meet underground is a ceiling of hanging soil.
+inline constexpr float kCoverCeiling = 48.0f;
+
+// Distance between the two places a cover reads its own noise: once for its
+// thickness, once for the jitter on its climate.
+//
+// Far enough apart that the two are not one field read twice, which would tie the
+// raggedness of a beach's edge to the raggedness of its floor. The same trick, and
+// the same reason, as flora::Settings::standStride.
+inline constexpr float kCoverStride = 5300.0f;
 
 // Product of a vein's width in pixels and the frequency of the noise that made it.
 //
@@ -233,6 +362,139 @@ inline constexpr ElementDef kElements[] = {
         .rules   = {.blocksBodies = true, .blocksLiquid = true, .occupies = true, .precedence = 0},
         .spawn   = {.generator = Generator::Terrain},
         .light   = {.opacity = 0.8f},
+    },
+    // The three covers. Each one is a skin over the rock as thick as its climate
+    // allows, and they stack by precedence alone: sand outranks soil and so
+    // replaces it where a desert wants it, snow outranks both but asks for so
+    // little depth that what it takes is a cap, leaving the soil underneath.
+    // Nothing had to be taught either arrangement — it falls out of the exclusion
+    // pass, which is the whole point of ranking materials rather than choosing
+    // between them.
+    {
+        .name = "soil",
+
+        // The same line the rock crosses, for the same reason: a cover's field is
+        // its distance to its own edges mapped through kDensitySpan, exactly as
+        // the terrain's is, so the two meet on one contour instead of leaving a
+        // seam a fraction of a cell wide between them.
+        .threshold = terrain::kSurfaceLevel,
+
+        .fill    = {122, 88, 56, 255},
+        .contour = {74, 52, 30, 255},
+        .rules   = {.blocksBodies = true, .blocksLiquid = true, .occupies = true, .precedence = 7},
+        .spawn =
+            {
+                .generator = Generator::Cover,
+
+                // One feature every four hundred pixels or so: the scale at which
+                // soil reads as having gathered in places rather than as having
+                // been spread with a trowel.
+                .shape = {.frequency = 2.6f, .octaves = 2, .seed = 8201},
+                .space = SpawnSpace::InsideGround,
+
+                // Two Minecraft blocks and a bit, which is what that game puts
+                // between the grass and the stone. Deep enough that an ordinary
+                // hole stays in the soil and reaching rock is a decision.
+                //
+                // No climate: soil is what the ground is made of wherever nothing
+                // else has claimed it, so its bell is the default one and reads
+                // as one everywhere.
+                .thickness     = 36.0f,
+                .thicknessVary = 10.0f,
+            },
+        .light = {.opacity = 1.0f},
+    },
+    {
+        .name      = "sand",
+        .threshold = terrain::kSurfaceLevel,
+        .fill      = {214, 192, 134, 255},
+        .contour   = {166, 144, 92, 255},
+        .rules     = {.blocksBodies = true, .blocksLiquid = true, .occupies = true, .precedence = 8},
+        .spawn =
+            {
+                .generator = Generator::Cover,
+                .shape     = {.frequency = 2.2f, .octaves = 2, .seed = 8203},
+                .space     = SpawnSpace::InsideGround,
+
+                // Nearly as deep as the soil it displaces, so a desert is sand to
+                // dig through and not a dusting over brown ground.
+                .thickness     = 32.0f,
+                .thicknessVary = 9.0f,
+
+                // Hot and dry, and well past where any tree in the table grows —
+                // the hottest of those is the apple at 0.60 — so a desert comes
+                // out bare rather than wooded, without anything having to say so.
+                .climate       = {.temperature      = 0.88f,
+                                  .humidity         = 0.14f,
+                                  .temperatureWidth = 0.22f,
+                                  .humidityWidth    = 0.26f,
+                                  .fullAt           = 0.45f,
+                                  .goneAt           = 0.26f},
+                .climateJitter = 0.16f,
+            },
+        .light = {.opacity = 1.0f},
+    },
+    {
+        .name      = "snow",
+        .threshold = terrain::kSurfaceLevel,
+        .fill      = {234, 239, 248, 255},
+        .contour   = {182, 196, 216, 255},
+        .rules     = {.blocksBodies = true, .blocksLiquid = true, .occupies = true, .precedence = 9},
+        .spawn =
+            {
+                .generator = Generator::Cover,
+
+                // The finest of the three, because a snow line is drawn by the
+                // shape of the hill it lies on and a coarse field would drape it
+                // across two valleys at once.
+                .shape = {.frequency = 3.4f, .octaves = 2, .seed = 8205},
+                .space = SpawnSpace::InsideGround,
+
+                // A cap and not a layer. Thin enough that the soil it sits on is
+                // still there to be dug, which is what keeps a snowfield ground
+                // rather than a different world.
+                .thickness     = 11.0f,
+                .thicknessVary = 5.0f,
+
+                // Colder than anything else asks for — the pine, the coldest tree
+                // in the table, centres on 0.30. Narrow with it, so snow is the
+                // tops and the far north and not a general chill: the climate
+                // loses 0.0011 of temperature per pixel of elevation, so the peaks
+                // reach this on their own without altitude being named here.
+                //
+                // Indifferent to how wet it is, since what falls as snow is
+                // decided by the cold alone.
+                .climate       = {.temperature      = 0.10f,
+                                  .humidity         = 0.5f,
+                                  .temperatureWidth = 0.18f,
+                                  .humidityWidth    = kUnboundedDepth,
+                                  .fullAt           = 0.50f,
+                                  .goneAt           = 0.32f},
+                .climateJitter = 0.14f,
+            },
+        .light = {.opacity = 1.0f},
+    },
+    {
+        .name      = "torch",
+        .threshold = 0.45f,
+        .fill      = {255, 216, 150, 255},
+        .contour   = {196, 128, 44, 255},
+
+        // Claims its vertex, so it replaces what it is put on and can be mined
+        // back out, but stops nothing: a body walks through it and so does
+        // water. A torch that cast its own shadow would sit in a dark spot of
+        // its own making.
+        //
+        // Outranks every ore and every cover, so a torch driven into a seam or
+        // into a snowbank replaces it rather than being swallowed by it.
+        .rules = {.occupies = true, .precedence = 10},
+        .spawn = {.generator = Generator::None},
+
+        // Brighter than the sky, because it has to carry a room on its own
+        // while daylight arrives from every direction at once. Not by much,
+        // though: this is the light given off by every cell the brush covers,
+        // and a wide brush lays down a great many of them.
+        .light = {.opacity = 0.0f, .glow = {255, 198, 130, 255}, .strength = 2.5f},
     },
     // The ores below follow Minecraft's set and its ordering, on a scale of one
     // block to sixteen pixels: its sea level at Y 64 is this world's y 144 and
@@ -414,28 +676,6 @@ inline constexpr ElementDef kElements[] = {
         // moment it is thick enough to swim in.
         .light = {.opacity = 0.10f},
     },
-    {
-        .name      = "torch",
-        .threshold = 0.45f,
-        .fill      = {255, 216, 150, 255},
-        .contour   = {196, 128, 44, 255},
-
-        // Claims its vertex, so it replaces what it is put on and can be mined
-        // back out, but stops nothing: a body walks through it and so does
-        // water. A torch that cast its own shadow would sit in a dark spot of
-        // its own making.
-        //
-        // Outranks every ore, so a torch driven into a seam replaces it rather
-        // than being swallowed by it.
-        .rules = {.occupies = true, .precedence = 7},
-        .spawn = {.generator = Generator::None},
-
-        // Brighter than the sky, because it has to carry a room on its own
-        // while daylight arrives from every direction at once. Not by much,
-        // though: this is the light given off by every cell the brush covers,
-        // and a wide brush lays down a great many of them.
-        .light = {.opacity = 0.0f, .glow = {255, 198, 130, 255}, .strength = 2.5f},
-    },
 };
 
 // An enumerator without its row would otherwise read past the table, and the
@@ -460,6 +700,21 @@ consteval bool PrecedencesAreDistinct() {
 
 static_assert(PrecedencesAreDistinct(), "every occupying element needs its own precedence");
 
+// A cover reaching past the crust would meet the cave layers, and the first thing
+// it produced would be soil hanging from the roof of a gallery. The thickest a
+// cover ever gets is its nominal depth plus the whole swing of its own noise, so
+// that is what has to clear the ceiling.
+consteval bool CoversFitUnderTheCrust() {
+    for (const ElementDef &def : kElements) {
+        if (def.spawn.generator != Generator::Cover) continue;
+        if (def.spawn.thickness + def.spawn.thicknessVary > kCoverCeiling) return false;
+    }
+
+    return true;
+}
+
+static_assert(CoversFitUnderTheCrust(), "a cover may not reach deeper than kCoverCeiling");
+
 inline constexpr const ElementDef &Def(Element element) {
     return kElements[ElementIndex(element)];
 }
@@ -475,16 +730,27 @@ inline float BandWobble(const ElementSpawn &spawn, float worldX) {
     return (terrain::Sample({worldX, 0.0f}, SpawnNoise(spawn)) - 0.5f) * 2.0f * spawn.band.jitter;
 }
 
+// The coordinate a band is measured along at a world position: the depth below
+// the surface for a relative band, the world Y for an absolute one.
+//
+// One function rather than a branch at every use, so that a band cannot be read
+// one way in one place and the other way somewhere else. `depth` is
+// terrain::Ground::depth, which the generator has already worked out.
+inline float BandCoord(const ElementSpawn &spawn, Vector2 world, float depth) {
+    return spawn.band.relative ? depth : world.y;
+}
+
 // Distance into a band at a world position, in pixels: positive inside,
 // negative outside, zero exactly on an edge.
 //
 // Expressed as a distance rather than a yes-or-no test so that the field can
 // be faded across the boundary and the contour still has a gradient to
 // interpolate through.
-inline float BandDepth(const ElementSpawn &spawn, Vector2 world) {
+inline float BandDepth(const ElementSpawn &spawn, Vector2 world, float depth) {
     const float wobble = BandWobble(spawn, world.x);
+    const float along  = BandCoord(spawn, world, depth);
 
-    return std::min(world.y - (spawn.band.top + wobble), (spawn.band.bottom + wobble) - world.y);
+    return std::min(along - (spawn.band.top + wobble), (spawn.band.bottom + wobble) - along);
 }
 
 // Share of its peak abundance a material has at a world position, in [0,1]: one
@@ -493,11 +759,11 @@ inline float BandDepth(const ElementSpawn &spawn, Vector2 world) {
 // The two arms are independent, so an ore can reach a long way down from its peak
 // and only a little way up, which is the shape most of them have. An arm running
 // to kUnboundedDepth simply never falls off on that side.
-inline float BandAbundance(const ElementSpawn &spawn, Vector2 world) {
+inline float BandAbundance(const ElementSpawn &spawn, Vector2 world, float depth) {
     const DepthBand &band = spawn.band;
     if (!band.Bounded()) return 1.0f;
 
-    const float y    = world.y - BandWobble(spawn, world.x);
+    const float y    = BandCoord(spawn, world, depth) - BandWobble(spawn, world.x);
     const float peak = std::clamp(band.peak, band.top, band.bottom);
 
     // Above the peak the shallow arm decides, below it the deep one. An arm of no
@@ -513,8 +779,34 @@ inline float BandAbundance(const ElementSpawn &spawn, Vector2 world) {
 
 // Extra height a material's noise has to clear at a world position, which is how
 // it thins out away from its own level instead of stopping at the edge of it.
-inline float BandPenalty(const ElementSpawn &spawn, Vector2 world) {
-    return spawn.band.scarcity * (1.0f - BandAbundance(spawn, world));
+inline float BandPenalty(const ElementSpawn &spawn, Vector2 world, float depth) {
+    return spawn.band.scarcity * (1.0f - BandAbundance(spawn, world, depth));
+}
+
+// How thick a cover lies in a column, in pixels, climate and noise included.
+//
+// Zero where the climate does not suit it at all, which is what makes a material
+// belong somewhere rather than everywhere. Both noises are read along the
+// horizontal axis alone, because a cover is a property of a column: sampling them
+// in two dimensions would make the thickness change on the way down through the
+// slab, which is not a thickness at all.
+inline float CoverThickness(const ElementSpawn &spawn, float worldX, float temperature, float humidity) {
+    const terrain::NoiseShape shape = SpawnNoise(spawn);
+
+    const float jitter =
+        (terrain::Sample({worldX + kCoverStride, 0.0f}, shape) - 0.5f) * 2.0f * spawn.climateJitter;
+
+    const float suits = ClimateBell(spawn.climate, temperature, humidity) + jitter;
+
+    // Full depth where the place suits it, nothing where it does not, and a short
+    // run between the two. See ElementClimate::fullAt for what the alternatives
+    // drew instead.
+    const float weight = ClimateRamp(spawn.climate.goneAt, spawn.climate.fullAt, suits);
+    if (weight <= 0.0f) return 0.0f;
+
+    const float vary = (terrain::Sample({worldX, 0.0f}, shape) - 0.5f) * 2.0f * spawn.thicknessVary;
+
+    return std::max(weight * (spawn.thickness + vary), 0.0f);
 }
 
 inline constexpr const ElementDef &StyleOf(Element element) {

@@ -213,7 +213,14 @@ void DrawLayers(const World &world, Rectangle view) {
             // The old flat bar was the overlay agreeing with a rule the generator
             // no longer follows.
             for (float y = top; y < bottom; y += 2.0f) {
-                const float share = BandAbundance(def->spawn, {view.x + kGutterInset, y});
+                const Vector2 at = {view.x + kGutterInset, y};
+
+                // Asked for even though every band that reaches here is absolute
+                // — the list above keeps out anything unbounded, which is what a
+                // cover's band is. It is here so that a relative band given
+                // bounds later is drawn against the same scale it generates on,
+                // rather than silently against sea level.
+                const float share = BandAbundance(def->spawn, at, terrain::Depth(at, settings));
 
                 DrawRectangleRec({gutter, y, kGutterBar, 2.0f}, Fade(def->fill, 0.15f + 0.7f * share));
             }

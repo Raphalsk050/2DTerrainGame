@@ -209,14 +209,15 @@ bool World::SpawnEligible(const ElementSpawn &spawn, Vector2 world, float ground
     return true;
 }
 
-float World::GeneratedValue(Element element, Vector2 world, float ground) const {
+float World::GeneratedValue(Element element, Vector2 world, const terrain::Ground &ground,
+                            const terrain::Climate &climate) const {
     const ElementDef &def     = Def(element);
     const ElementSpawn &spawn = def.spawn;
 
     switch (spawn.generator) {
     case Generator::None: break;
 
-    case Generator::Terrain: return ground;
+    case Generator::Terrain: return ground.density;
 
     case Generator::Vein: {
         // Shifted so the element's own threshold is the deciding line: the
@@ -229,13 +230,37 @@ float World::GeneratedValue(Element element, Vector2 world, float ground) const 
         // noise happened to run high, which arrives as the occasional small
         // pocket a long way from home — the thing a hard edge made impossible.
         float value = terrain::Sample(world, SpawnNoise(spawn)) - spawnCutoff_[ElementIndex(element)]
-                    - BandPenalty(spawn, world) + def.threshold;
+                    - BandPenalty(spawn, world, ground.depth) + def.threshold;
 
         // Bounded against the ground, so a vein ends on the terrain's own
         // contour rather than a fraction of a cell past it, hanging in the air
         // of a cave it happened to cross.
         if (spawn.space == SpawnSpace::InsideGround) {
-            value = std::min(value, def.threshold + (ground - RockThreshold()) * kClampGain);
+            value = std::min(value, def.threshold + (ground.density - RockThreshold()) * kClampGain);
+        }
+
+        return value;
+    }
+
+    case Generator::Cover: {
+        const float thickness = CoverThickness(spawn, world.x, climate.temperature, climate.humidity);
+        if (thickness <= 0.0f) return 0.0f;
+
+        // How far inside the slab this vertex is, in pixels: the smaller of its
+        // distance below the surface and its distance above the material's own
+        // floor. A distance and not a yes-or-no, so the contour has a gradient to
+        // interpolate through and the cover's edge lands on the same line the
+        // rock's does rather than a fraction of a cell away from it.
+        const float inside = std::min(ground.depth, thickness - ground.depth);
+
+        float value = std::clamp(def.threshold + inside / terrain::kDensitySpan, 0.0f, 1.0f);
+
+        // Bounded against the ground for the reason a vein is, and it matters more
+        // here: the depth a cover is measured against knows nothing about caves,
+        // so without this a shaft breaking the surface would be plugged with soil
+        // and every cave mouth would wear a brown lid.
+        if (spawn.space == SpawnSpace::InsideGround) {
+            value = std::min(value, def.threshold + (ground.density - RockThreshold()) * kClampGain);
         }
 
         return value;
@@ -251,8 +276,8 @@ float World::GeneratedValue(Element element, Vector2 world, float ground) const 
         // Its band is tested outright for the same reason: unlike an ore, a water
         // table has a real top and bottom, and one that merely became less likely
         // with depth would be a mist rather than a surface.
-        if (BandAbundance(spawn, world) <= 0.0f) return 0.0f;
-        if (!SpawnEligible(spawn, world, ground)) return 0.0f;
+        if (BandAbundance(spawn, world, ground.depth) <= 0.0f) return 0.0f;
+        if (!SpawnEligible(spawn, world, ground.density)) return 0.0f;
 
         return (terrain::Sample(world, SpawnNoise(spawn)) > spawnCutoff_[ElementIndex(element)]) ? water::kMaxMass : 0.0f;
     }
@@ -260,7 +285,8 @@ float World::GeneratedValue(Element element, Vector2 world, float ground) const 
     return 0.0f;
 }
 
-float World::ExclusionHeadroom(Element element, Vector2 world, float ground) const {
+float World::ExclusionHeadroom(Element element, Vector2 world, const terrain::Ground &ground,
+                               const terrain::Climate &climate) const {
     const ElementDef &def = Def(element);
     if (!def.rules.occupies) return kUnboundedDepth;
 
@@ -270,7 +296,7 @@ float World::ExclusionHeadroom(Element element, Vector2 world, float ground) con
         const ElementDef &other = kElements[e];
         if (!other.rules.occupies || other.rules.precedence <= def.rules.precedence) continue;
 
-        const float claim = GeneratedValue(static_cast<Element>(e), world, ground);
+        const float claim = GeneratedValue(static_cast<Element>(e), world, ground, climate);
         headroom          = std::min(headroom, def.threshold + (other.threshold - claim) * kClampGain);
     }
 
@@ -278,12 +304,16 @@ float World::ExclusionHeadroom(Element element, Vector2 world, float ground) con
 }
 
 float World::SpawnValue(Element element, Vector2 world) const {
-    // Sampled once here and handed to everything below. It is much the most
-    // expensive field in the generator, and every material bounded against the
-    // ground wants the same answer at the same position.
-    const float ground = terrain::Density(world, settings_);
+    // Both sampled once here and handed to everything below. The ground is much
+    // the most expensive field in the generator and every material bounded
+    // against it wants the same answer at the same position; the climate costs
+    // the surface a second time on top of its own two fields, and every cover
+    // asks for it.
+    const terrain::Ground ground   = terrain::SampleGround(world, settings_);
+    const terrain::Climate climate = terrain::ClimateAt(world.x, settings_);
 
-    return std::min(GeneratedValue(element, world, ground), ExclusionHeadroom(element, world, ground));
+    return std::min(GeneratedValue(element, world, ground, climate),
+                    ExclusionHeadroom(element, world, ground, climate));
 }
 
 std::int64_t World::Key(int cx, int cy) {
@@ -334,14 +364,26 @@ World::Chunk &World::Emplace(int cx, int cy) {
     // expensive field the generator produces, and every material bounded against
     // the ground asks it the same question at the same position, so sampling it
     // per material per vertex cost five times what it had to.
-    std::vector<float> ground(static_cast<std::size_t>(kChunkVertices) * kChunkVertices);
+    std::vector<terrain::Ground> ground(static_cast<std::size_t>(kChunkVertices) * kChunkVertices);
+
+    // The climate once per *column*, which is the whole of what it depends on.
+    //
+    // It is not a cheap sample: two fields of its own, plus the surface again for
+    // the elevation the lapse rate is read against — and the surface is the eight
+    // octaves the paragraph above is about. Per vertex it would have cost this
+    // chunk thirty-three times what it does, for an answer that is the same all
+    // the way down the column by construction.
+    std::array<terrain::Climate, kChunkVertices> climate{};
 
     for (int i = 0; i < kChunkVertices; i++) {
-        for (int j = 0; j < kChunkVertices; j++) {
-            const Vector2 vertex = {origin.x + static_cast<float>(i * spacing_),
-                                    origin.y + static_cast<float>(j * spacing_)};
+        const float x = origin.x + static_cast<float>(i * spacing_);
 
-            ground[static_cast<std::size_t>(i) * kChunkVertices + j] = terrain::Density(vertex, settings_);
+        climate[static_cast<std::size_t>(i)] = terrain::ClimateAt(x, settings_);
+
+        for (int j = 0; j < kChunkVertices; j++) {
+            const Vector2 vertex = {x, origin.y + static_cast<float>(j * spacing_)};
+
+            ground[static_cast<std::size_t>(i) * kChunkVertices + j] = terrain::SampleGround(vertex, settings_);
         }
     }
 
@@ -353,10 +395,12 @@ World::Chunk &World::Emplace(int cx, int cy) {
         Grid &field = chunk.fields[e];
 
         for (int i = 0; i < field.Cols(); i++) {
-            for (int j = 0; j < field.Rows(); j++) {
-                const float here = ground[static_cast<std::size_t>(i) * kChunkVertices + j];
+            const terrain::Climate &here = climate[static_cast<std::size_t>(i)];
 
-                field.SetValue(i, j, GeneratedValue(static_cast<Element>(e), field.PointAt(i, j), here));
+            for (int j = 0; j < field.Rows(); j++) {
+                const terrain::Ground &under = ground[static_cast<std::size_t>(i) * kChunkVertices + j];
+
+                field.SetValue(i, j, GeneratedValue(static_cast<Element>(e), field.PointAt(i, j), under, here));
             }
         }
     }

@@ -390,7 +390,8 @@ private:
     // rather than sampled here because several materials are bounded against it
     // and it is the most expensive field the generator produces: asking for it
     // once per material per vertex was five times the work of asking once.
-    float GeneratedValue(Element element, Vector2 world, float ground) const;
+    float GeneratedValue(Element element, Vector2 world, const terrain::Ground &ground,
+                         const terrain::Climate &climate) const;
 
     // Ceiling a material's field is held under by everything that outranks it,
     // expressed so that it equals the material's own threshold exactly where
@@ -399,7 +400,8 @@ private:
     // That single identity is what aligns the two contours: both cross their
     // thresholds on the same line, so the ore ends precisely where the rock
     // around it begins and neither leaves a seam.
-    float ExclusionHeadroom(Element element, Vector2 world, float ground) const;
+    float ExclusionHeadroom(Element element, Vector2 world, const terrain::Ground &ground,
+                            const terrain::Climate &climate) const;
 
     // True where a material's generator is allowed to place it at all: inside
     // its band, and on the side of the ground its `space` names.

@@ -28,9 +28,22 @@ public:
     bool Contains(Vector2 screen) const;
 
 private:
-    static constexpr float kSlotSize = 52.0f;
-    static constexpr float kPadding  = 6.0f;
-    static constexpr float kMargin   = 12.0f;
+    // The size a slot is drawn at when there is room for it, and the size below
+    // which its label stops being readable and the swatch stops being a swatch.
+    static constexpr float kSlotSize    = 52.0f;
+    static constexpr float kMinSlotSize = 28.0f;
+
+    static constexpr float kPadding = 6.0f;
+    static constexpr float kMargin  = 12.0f;
+
+    // What a slot is actually drawn at now.
+    //
+    // The bar holds one slot per material, and there are enough of them that at
+    // full size it is wider than the smallest window the game may be dragged to.
+    // Shrinking is the answer rather than scrolling or wrapping: a bar is read at
+    // a glance, and a slot that has to be found before it can be read is not a
+    // bar.
+    float SlotSize() const;
 
     Rectangle BarBounds() const;
     Rectangle SlotBounds(int slot) const;

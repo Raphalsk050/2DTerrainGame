@@ -335,6 +335,21 @@ float Solidity(Vector2 world, const Settings &s);
 // Solidity crosses zero.
 float Density(Vector2 world, const Settings &s);
 
+// Both answers about the ground at a position, taken together.
+//
+// The density is what the field stores; the depth is what a material whose band
+// is measured from the surface has to be placed against. They are asked for at
+// once because the depth is already worked out on the way to the density, and
+// the surface it comes from is much the most expensive part of either — eight
+// octaves for a number that would otherwise be computed twice at every vertex of
+// every chunk.
+struct Ground {
+    float density; // Rock density in [0,1], exactly as Density reports it.
+    float depth;   // Signed distance below the surface in pixels, fold included.
+};
+
+Ground SampleGround(Vector2 world, const Settings &s);
+
 // Density thresholded into ground or air. The threshold is passed in rather
 // than stored here: it belongs to the element the field represents, and keeping
 // a second copy alongside the noise settings is what let drawing and collision

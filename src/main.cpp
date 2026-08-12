@@ -13,6 +13,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <array>
+#include <cstdio>
+#include <cstdlib>
 
 namespace {
 
@@ -148,6 +151,128 @@ void DrawBrushMode(const Editor &editor) {
     DrawText(text, static_cast<int>(badge.x + 8.0f), static_cast<int>(badge.y + 4.0f), 14, color);
 }
 
+// One strip of the world drawn straight to a file, at one screen pixel per world
+// pixel.
+//
+// The offline probe this project was tuned with lived outside the repository and
+// went with it. This is its replacement, and it is inside the game on purpose:
+// what it draws is the world these settings describe rather than a copy of them
+// kept in step by hand, and a probe that has to be maintained alongside what it
+// measures is a probe that will one day be measuring something else.
+//
+// Drawn unlit, for the same reason F6 exists — what a material's own colour is
+// doing and what the light is doing to it are two questions, and answering them
+// together is how a palette gets tuned against a time of day.
+void DrawProbe(World &world, Rectangle strip, const char *path) {
+    world.Update(strip);
+
+    RenderTexture2D canvas = LoadRenderTexture(static_cast<int>(strip.width), static_cast<int>(strip.height));
+
+    Camera2D camera = {};
+    camera.offset   = {0.0f, 0.0f};
+    camera.target   = {strip.x, strip.y};
+    camera.zoom     = 1.0f;
+
+    BeginTextureMode(canvas);
+
+    // The sky's own colour, so the silhouette of the ground reads against
+    // something rather than against black.
+    ClearBackground({92, 132, 176, 255});
+
+    BeginMode2D(camera);
+    world.DrawTerrain(strip);
+    world.DrawLiquids(strip);
+    EndMode2D();
+
+    EndTextureMode();
+
+    Image image = LoadImageFromTexture(canvas.texture);
+
+    // A render texture is filled bottom row first, so what comes back off it is
+    // upside down.
+    ImageFlipVertical(&image);
+
+    ExportImage(image, path);
+
+    UnloadImage(image);
+    UnloadRenderTexture(canvas);
+}
+
+// What the covers actually do over a stretch of world, measured rather than
+// guessed.
+//
+// A cover's extent is decided by a climate bell, and a bell is very easy to
+// author into a material that is simply never there: nothing errors, nothing is
+// drawn, and the only symptom is a world with no deserts in it. This walks the
+// columns and reports the share of them each cover claims and how thick it gets,
+// which is the same treatment terrain::Calibrate gives cave coverage and for the
+// same reason.
+void ReportCovers(const terrain::Settings &settings, float fromX, float toX, float step) {
+    struct Tally {
+        double thickness = 0.0;
+        float deepest    = 0.0f;
+        float where      = 0.0f;
+        int columns      = 0;
+    };
+
+    std::array<Tally, kElementCount> tally{};
+
+    float coldest = 1.0f;
+    float hottest = 0.0f;
+    float driest  = 1.0f;
+    float wettest = 0.0f;
+
+    int columns = 0;
+
+    for (float x = fromX; x <= toX; x += step, columns++) {
+        const terrain::Climate climate = terrain::ClimateAt(x, settings);
+
+        coldest = std::min(coldest, climate.temperature);
+        hottest = std::max(hottest, climate.temperature);
+        driest  = std::min(driest, climate.humidity);
+        wettest = std::max(wettest, climate.humidity);
+
+        for (std::size_t e = 0; e < kElementCount; e++) {
+            const ElementSpawn &spawn = kElements[e].spawn;
+            if (spawn.generator != Generator::Cover) continue;
+
+            const float thickness = CoverThickness(spawn, x, climate.temperature, climate.humidity);
+
+            // A cover thinner than one terrain pixel is not on the ground, it is
+            // a rounding error, and counting it would report a desert nobody can
+            // see.
+            if (thickness < config::kPixelSize) continue;
+
+            Tally &into = tally[e];
+
+            into.thickness += thickness;
+            into.columns++;
+
+            if (thickness > into.deepest) {
+                into.deepest = thickness;
+                into.where   = x;
+            }
+        }
+    }
+
+    std::printf("%d columns over %.0f px, every %.0f\n", columns, toX - fromX, step);
+    std::printf("temperature %.2f..%.2f   humidity %.2f..%.2f\n\n", coldest, hottest, driest, wettest);
+
+    for (std::size_t e = 0; e < kElementCount; e++) {
+        if (kElements[e].spawn.generator != Generator::Cover) continue;
+
+        const Tally &t = tally[e];
+
+        if (t.columns == 0) {
+            std::printf("%-6s  never\n", kElements[e].name);
+            continue;
+        }
+
+        std::printf("%-6s  %5.1f%% of columns   mean %4.1f px   deepest %4.1f px at x %.0f\n", kElements[e].name,
+                    100.0 * t.columns / std::max(columns, 1), t.thickness / t.columns, t.deepest, t.where);
+    }
+}
+
 void Draw(const World &world, const Grove &grove, const Harvest &gathered, const Player &player,
           const Hotbar &hotbar, const Editor &editor, const LiquidLayer &liquids, const LightLayer &lights,
           const Camera2D &camera, const debug_view::Toggles &debug, float lantern, const char *notice,
@@ -245,7 +370,7 @@ void Draw(const World &world, const Grove &grove, const Harvest &gathered, const
 
     DrawLabel("A/D: move  |  space: jump  |  S: crouch  |  J: chop  |  P: plant  |  mouse: aim  |  F: fly", 10,
               10, ink);
-    DrawLabel("left: apply brush  |  X: place/dig  |  1-9 or wheel: material  |  - / +: brush size  |  R: regenerate",
+    DrawLabel("left: apply brush  |  X: place/dig  |  1-0 or wheel: material  |  - / +: brush size  |  R: regenerate",
               10, 28, ink);
     DrawLabel(TextFormat("V: vertices  |  F3: chunks  |  F4: height grid  |  F5: light probes  |  F6: unlit %s  |"
                          "  F7: fast weather %s  |  F8: next quarter  |  F9: season %s  |  F10: sheet  |  , . : lantern %.1f",
@@ -339,10 +464,19 @@ void Draw(const World &world, const Grove &grove, const Harvest &gathered, const
 
 } // namespace
 
-int main() {
+int main(int argc, char **argv) {
+    // `--probe x y w h out.png` draws one strip of the world to a file and exits.
+    // See DrawProbe. Read here rather than after the window opens, so the probe
+    // can ask for a hidden one: it wants a GL context and nothing else.
+    const bool probing = argc >= 7 && TextIsEqual(argv[1], "--probe");
+
+    // `--covers x0 x1 step` walks the columns and reports what each cover claims.
+    // See ReportCovers.
+    const bool counting = argc >= 5 && TextIsEqual(argv[1], "--covers");
+
     // Resizable, with a floor under it: below the minimum the hotbar is wider than
     // the frame and the head-up display runs off the side of it.
-    SetConfigFlags(FLAG_WINDOW_RESIZABLE);
+    SetConfigFlags((probing || counting) ? FLAG_WINDOW_HIDDEN : FLAG_WINDOW_RESIZABLE);
 
     InitWindow(config::kScreenWidth, config::kScreenHeight, "marching squares");
     SetWindowMinSize(config::kMinScreenWidth, config::kMinScreenHeight);
@@ -774,6 +908,24 @@ int main() {
     // by argument, the same way the lantern and the cave coverage were.
     Grove grove;
     grove.Configure({.seed = settings.seed}, settings, world.Sky());
+
+    if (probing) {
+        const Rectangle strip = {static_cast<float>(std::atof(argv[2])), static_cast<float>(std::atof(argv[3])),
+                                 static_cast<float>(std::atof(argv[4])), static_cast<float>(std::atof(argv[5]))};
+
+        DrawProbe(world, strip, argv[6]);
+
+        CloseWindow();
+        return 0;
+    }
+
+    if (counting) {
+        ReportCovers(settings, static_cast<float>(std::atof(argv[2])), static_cast<float>(std::atof(argv[3])),
+                     static_cast<float>(std::atof(argv[4])));
+
+        CloseWindow();
+        return 0;
+    }
 
     // What has been picked up. The counterpart of Editor::Collected for anything
     // that is not a material — see item.h for why the two are separate tables.

@@ -435,10 +435,15 @@ float Depth(Vector2 world, const Settings &s) {
     return world.y - Height(WarpedX(world, s), s);
 }
 
-float Solidity(Vector2 world, const Settings &s) {
-    const CaveSettings &caves = s.caves;
+namespace {
 
-    const float depth = Depth(world, s);
+// Solidity at a position whose depth below the surface has already been found.
+//
+// Split out so that a caller wanting both numbers pays for the surface once. The
+// depth is the whole of what Solidity needs from the surface, so handing it in is
+// the entire saving.
+float SolidityBelow(Vector2 world, float depth, const Settings &s) {
+    const CaveSettings &caves = s.caves;
 
     // Above the ground there is nothing to carve out of, and the cave layers are
     // what this function spends its time on. Every position in the open sky
@@ -478,8 +483,20 @@ float Solidity(Vector2 world, const Settings &s) {
     return solid;
 }
 
+} // namespace
+
+float Solidity(Vector2 world, const Settings &s) {
+    return SolidityBelow(world, Depth(world, s), s);
+}
+
+Ground SampleGround(Vector2 world, const Settings &s) {
+    const float depth = Depth(world, s);
+
+    return {std::clamp(kSurfaceLevel + SolidityBelow(world, depth, s) / kDensitySpan, 0.0f, 1.0f), depth};
+}
+
 float Density(Vector2 world, const Settings &s) {
-    return std::clamp(kSurfaceLevel + Solidity(world, s) / kDensitySpan, 0.0f, 1.0f);
+    return SampleGround(world, s).density;
 }
 
 bool IsSolid(Vector2 world, const Settings &s, float threshold) {
