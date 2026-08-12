@@ -360,9 +360,9 @@ void Grove::Thin() {
 
         if (blocked) continue;
 
-        // A fern wants the shade a bush does not. The species' own light need is
-        // read backwards here, which is exactly what it means: needing little
-        // light is the same fact as tolerating shade.
+        // The species' own light need, read backwards, which is exactly what it
+        // means: needing little light is the same fact as tolerating shade, so a
+        // shade plant thickens under a crown where a sun plant thins out.
         const flora::SpeciesDef &def = flora::Def(plant.species);
 
         const float wants = 1.0f - def.growth.lightNeed;
@@ -988,15 +988,32 @@ void Grove::DrawLeaves(const weather::Sky &sky, flora::Season season, Rectangle 
         // open field is the one thing that would give the trick away.
         const flora::Plant *under = nullptr;
 
+        flora::Stage crown = flora::Stage::Mature;
+
         for (const flora::Plant &plant : plants_) {
             const flora::SpeciesDef &def = flora::Def(plant.species);
             if (!def.deciduous) continue;
 
-            const float width = def.canopyWidth[flora::StageIndex(flora::Stage::Mature)] * plant.scale;
+            // Standing, and only standing. A felled tree stays in `plants_` —
+            // the procedural pass still says a tree grows in that cell and only
+            // the record says it came down — so without this the leaves went on
+            // falling out of thin air where the tree had been.
+            //
+            // The third place this has caught me now, after the shade and the
+            // fruit. **Anything that walks `plants_` and does something with a
+            // tree has to ask `Read` first**; the list is what the world would
+            // grow, not what is there.
+            const Standing standing = Read(plant, now);
+            if (standing.felling >= 0.0f || standing.stump) continue;
+
+            // And the crown it actually has. A sapling was shedding a mature
+            // tree's worth from a mature tree's height.
+            const float width = def.canopyWidth[flora::StageIndex(standing.stage)] * plant.scale;
 
             if (std::fabs(plant.base.x - column) > width * 0.5f) continue;
 
             under = &plant;
+            crown = standing.stage;
             break;
         }
 
@@ -1004,7 +1021,7 @@ void Grove::DrawLeaves(const weather::Sky &sky, flora::Season season, Rectangle 
 
         const flora::SpeciesDef &def = flora::Def(under->species);
 
-        const float height = def.height[flora::StageIndex(flora::Stage::Mature)] * under->scale;
+        const float height = def.height[flora::StageIndex(crown)] * under->scale;
 
         // Leaves the crown and wraps back to it, so the fall runs for ever
         // without anything having to be respawned.

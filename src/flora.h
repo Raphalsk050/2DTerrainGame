@@ -44,7 +44,7 @@ inline constexpr float kNever = 1.0e9f;
 // empty ground around it.
 enum class Layer { Canopy, Undergrowth, Count };
 
-enum class Species { Oak, Pine, Birch, Apple, Fern, Bush, Count };
+enum class Species { Oak, Pine, Birch, Apple, Fern, Count };
 
 // How far along a plant is. Growth moves between these; the world's untouched
 // plants are all at the last one, since a wood nobody has cut is a mature wood.
@@ -609,67 +609,6 @@ inline constexpr SpeciesDef
                     },
                 .drops     = {{.item = Item::Fibre, .least = 1, .most = 2, .chance = 0.8f}},
                 .deciduous = false,
-            },
-            {
-                .name        = "bush",
-                .layer       = Layer::Undergrowth,
-                .height      = {10.0f, 18.0f, 30.0f, 36.0f},
-                .canopyWidth = {14.0f, 26.0f, 40.0f, 46.0f},
-                .shape =
-                    {
-                        .clearance   = 0.10f,
-                        .trunkReach  = 0.34f,
-                        .trunkWidth  = 0.10f,
-                        .trunkTaper  = 0.6f,
-                        .lean        = 0.7f,
-                        .tiers       = 3,
-                        .reach       = 1.10f,
-                        .taper       = 0.88f,
-                        .jitter      = 0.22f,
-                        .crown       = Crown::Clump,
-                        .mass        = 0.60f,
-                        .ragged      = 0.20f,
-                        .gaps        = 0.16f,
-                        .branchReach = 0.7f,
-                    },
-                .climate =
-                    {
-                        // Drier and brighter than the fern, so the two divide the floor
-                        // between them rather than competing for the same ground.
-                        .temperature      = 0.58f,
-                        .temperatureWidth = 0.28f,
-                        .humidity         = 0.46f,
-                        .humidityWidth    = 0.28f,
-                        .ceiling          = 50.0f,
-                        .ceilingFade      = 90.0f,
-                        .abundance        = 0.9f,
-                    },
-                .growth = {.maturityMinutes = 5.0f,
-                           .regrowMinutes   = 4.0f,
-                           .lightNeed       = 0.6f,
-                           .waterNeed       = 0.4f,
-                           .toughness       = 1.0f},
-                .palette =
-                    {
-                        {.barkDark  = {52, 38, 24, 255},
-                         .bark      = {84, 62, 38, 255},
-                         .barkLight = {110, 84, 52, 255},
-                         .leaf      = {{34, 80, 40, 255}, {56, 118, 52, 255}, {88, 158, 68, 255}, {132, 198, 96, 255}}},
-                        {.barkDark  = {52, 38, 24, 255},
-                         .bark      = {84, 62, 38, 255},
-                         .barkLight = {110, 84, 52, 255},
-                         .leaf      = {{28, 72, 36, 255}, {48, 108, 48, 255}, {78, 146, 62, 255}, {118, 184, 88, 255}}},
-                        {.barkDark  = {50, 36, 22, 255},
-                         .bark      = {80, 58, 34, 255},
-                         .barkLight = {106, 80, 48, 255},
-                         .leaf = {{102, 62, 28, 255}, {150, 96, 36, 255}, {192, 134, 48, 255}, {224, 176, 80, 255}}},
-                        {.barkDark  = {46, 36, 26, 255},
-                         .bark      = {74, 58, 40, 255},
-                         .barkLight = {98, 78, 56, 255},
-                         .leaf      = {{62, 54, 40, 255}, {86, 76, 56, 255}, {110, 98, 74, 255}, {136, 122, 94, 255}}},
-                    },
-                .drops     = {{.item = Item::Fibre, .least = 1, .most = 3, .chance = 0.9f}},
-                .deciduous = true,
             },
 };
 
