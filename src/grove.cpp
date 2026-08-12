@@ -40,7 +40,7 @@ constexpr float kSwayReach = 0.055f;
 // A branch has its own period and the wind sets how hard it is pushed, not how
 // fast it swings — but a stiff wind does shorten it, so the two are related and
 // neither is a constant.
-constexpr float kSwayPeriod = 3.1f;
+constexpr float kSwayPeriod  = 3.1f;
 constexpr float kSwayUrgency = 0.45f;
 
 // Share of the sky a crown holds back from the ground under it.
@@ -149,9 +149,8 @@ float Rate(const flora::SpeciesDef &def, const terrain::Climate &climate, float 
     // And how well the place suits it at all. A tree at the edge of its range is
     // already stunted by the scatter; this is why it also took longer to get
     // there.
-    const float suited = std::exp(-std::pow((climate.temperature - def.climate.temperature) /
-                                                std::max(def.climate.temperatureWidth, 1e-3f),
-                                            2.0f));
+    const float suited = std::exp(-std::pow(
+        (climate.temperature - def.climate.temperature) / std::max(def.climate.temperatureWidth, 1e-3f), 2.0f));
 
     return pace * against(growth.lightNeed, light, meanLight) * against(growth.waterNeed, water, meanWater) *
            (0.45f + 0.55f * suited);
@@ -173,8 +172,8 @@ float Rate(const flora::SpeciesDef &def, const terrain::Climate &climate, float 
 // crown; and half again were inside the stretch of the fall that is on screen.
 // **Four tenths of one leaf.** A field of particles nobody can ever see is
 // indistinguishable from one that is switched off.
-constexpr float kLeafCell  = 18.0f;
-constexpr float kLeafFall  = 26.0f;
+constexpr float kLeafCell = 18.0f;
+constexpr float kLeafFall = 26.0f;
 // The fall wraps over this, and only the stretch between a crown's top and its
 // foot is on screen — so a span far longer than a tree spends most of every
 // leaf's life culled. Near the height of a mature crown keeps three quarters of
@@ -184,7 +183,7 @@ constexpr float kLeafSwing = 13.0f;
 constexpr float kLeafSide  = 0.9f;
 
 // Share of the cells that hold a leaf at all, before the season thins them.
-constexpr float kLeafDensity = 0.85f;
+constexpr float kLeafDensity = 0.9f;
 
 // How far a plant is through its fall, eased the way a rod hinged at its foot
 // goes over: barely at first, then all at once.
@@ -244,7 +243,9 @@ void Grove::Configure(const flora::Settings &settings, const terrain::Settings &
     sheet_.Create();
 }
 
-void Grove::Unload() { sheet_.Unload(); }
+void Grove::Unload() {
+    sheet_.Unload();
+}
 
 void Grove::ReadGround(const World &world, Rectangle view) {
     const auto spacing = static_cast<float>(world.Spacing());
@@ -278,10 +279,8 @@ void Grove::ReadGround(const World &world, Rectangle view) {
     // wood from rearranging itself around a hole.
     for (int i = 0; i < count; i++) surface_[static_cast<std::size_t>(i)] = world.Skyline(first + i);
 
-    ground_ = {.top     = surface_.data(),
-               .count   = count,
-               .originX = static_cast<float>(first) * spacing,
-               .spacing = spacing};
+    ground_ = {
+        .top = surface_.data(), .count = count, .originX = static_cast<float>(first) * spacing, .spacing = spacing};
 }
 
 void Grove::Update(const World &world, Rectangle view, Vector2 player, float now, float dt, Harvest &into) {
@@ -314,8 +313,8 @@ void Grove::Update(const World &world, Rectangle view, Vector2 player, float now
     // And the floor under them. Grown after the trees, because it asks where they
     // are: nothing takes root inside a trunk, and what grows in the open is not
     // what grows in the shade.
-    flora::Scatter(flora::Layer::Undergrowth, view.x - kLead, view.x + view.width + kLead, settings_, terrain_,
-                   ground_, undergrowth_);
+    flora::Scatter(flora::Layer::Undergrowth, view.x - kLead, view.x + view.width + kLead, settings_, terrain_, ground_,
+                   undergrowth_);
 
     Thin();
 
@@ -579,8 +578,7 @@ void Grove::Draw(const weather::Sky &sky, flora::Season season, float now) const
 
             const Vector2 pivot = {sprite->anchor.x * pixel, sprite->anchor.y * pixel};
 
-            DrawTexturePro(sheet_.Texture(), sprite->source, target, pivot, angle,
-                           Fade(WHITE, standing.fade));
+            DrawTexturePro(sheet_.Texture(), sprite->source, target, pivot, angle, Fade(WHITE, standing.fade));
 
             // The stump is under it from the moment it starts to go, so there is
             // never a frame with nothing where the tree was.
@@ -596,8 +594,8 @@ void Grove::Draw(const weather::Sky &sky, flora::Season season, float now) const
         // is, and a strip draw costs a quad per band.
         if (std::fabs(lean) < pixel * 0.5f) {
             DrawTexturePro(sheet_.Texture(), sprite->source,
-                           {left, top, sprite->source.width * pixel, sprite->source.height * pixel}, {0.0f, 0.0f},
-                           0.0f, WHITE);
+                           {left, top, sprite->source.width * pixel, sprite->source.height * pixel}, {0.0f, 0.0f}, 0.0f,
+                           WHITE);
             continue;
         }
 
@@ -631,8 +629,7 @@ void Grove::Draw(const weather::Sky &sky, flora::Season season, float now) const
 
             const Rectangle source = {sprite->source.x, sprite->source.y + y0, sprite->source.width, y1 - y0};
 
-            const Rectangle target = {left + offset, top + y0 * pixel, sprite->source.width * pixel,
-                                      (y1 - y0) * pixel};
+            const Rectangle target = {left + offset, top + y0 * pixel, sprite->source.width * pixel, (y1 - y0) * pixel};
 
             DrawTexturePro(sheet_.Texture(), source, target, {0.0f, 0.0f}, 0.0f, WHITE);
         }
@@ -706,8 +703,7 @@ void Grove::Forget(float now) {
         if (state.felledAt >= 0.0f) {
             // Regrown. The species table decides how long a stump stays, and
             // kNever leaves it for good.
-            const float regrow =
-                flora::kSpecies[state.species].growth.regrowMinutes * kMinute;
+            const float regrow = flora::kSpecies[state.species].growth.regrowMinutes * kMinute;
 
             it = (now - state.felledAt > regrow) ? remembered_.erase(it) : std::next(it);
             continue;
@@ -843,11 +839,11 @@ bool Grove::Plant(flora::Species species, Vector2 world, float now) {
     //
     // Clamped rather than centred, so it lands at the player's feet when the cell
     // is theirs and against the near edge when it is not.
-    const float span   = settings_.layer[flora::LayerIndex(flora::Layer::Canopy)].cellSpan;
-    const float inset  = span * 0.15f;
+    const float span  = settings_.layer[flora::LayerIndex(flora::Layer::Canopy)].cellSpan;
+    const float inset = span * 0.15f;
 
-    const float where = std::clamp(world.x, static_cast<float>(cell) * span + inset,
-                                   static_cast<float>(cell + 1) * span - inset);
+    const float where =
+        std::clamp(world.x, static_cast<float>(cell) * span + inset, static_cast<float>(cell + 1) * span - inset);
 
     fresh.at = {where, flora::GroundAt(ground_, where) + ground_.spacing * 0.5f};
 
@@ -916,9 +912,7 @@ void Grove::Shade(World &world, float now) const {
 void Grove::DrawFruit(flora::Season season, float now) const {
     // Fruit sets in spring and is worth picking through the summer. Outside that
     // window a tree that bears is just a tree.
-    const float ripe = (season == flora::Season::Summer)   ? 1.0f
-                       : (season == flora::Season::Spring) ? 0.35f
-                                                           : 0.0f;
+    const float ripe = (season == flora::Season::Summer) ? 1.0f : (season == flora::Season::Spring) ? 0.35f : 0.0f;
 
     if (ripe <= 0.0f) return;
 
@@ -959,8 +953,7 @@ void Grove::DrawFruit(flora::Season season, float now) const {
             const float ax = (Chance(plant.id, 67 + i * 3, settings_.seed) - 0.5f) * width * 0.72f;
             const float ay = foot + Chance(plant.id, 71 + i * 3, settings_.seed) * (height - foot) * 0.8f;
 
-            DrawRectangleV({Snap(plant.base.x + ax), Snap(plant.base.y - ay)}, {pixel, pixel},
-                           Def(Item::Apple).colour);
+            DrawRectangleV({Snap(plant.base.x + ax), Snap(plant.base.y - ay)}, {pixel, pixel}, Def(Item::Apple).colour);
         }
     }
 }
@@ -973,7 +966,7 @@ void Grove::DrawLeaves(const weather::Sky &sky, flora::Season season, Rectangle 
     const float shedding = (season == flora::Season::Autumn)   ? 1.0f
                            : (season == flora::Season::Spring) ? 0.7f
                            : (season == flora::Season::Winter) ? 0.0f
-                                                              : 0.5f;
+                                                               : 0.5f;
 
     if (shedding <= 0.0f || plants_.empty()) return;
 
