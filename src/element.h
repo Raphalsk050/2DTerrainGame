@@ -1,6 +1,7 @@
 #pragma once
 
 #include "config.h"
+#include "picture.h"
 #include "raylib.h"
 #include "terrain.h"
 
@@ -409,10 +410,46 @@ struct ElementDef {
     ElementPaint paint;
     Color contour;
 
+    // The material as it appears held rather than as it appears in the ground:
+    // one block of it, in a slot.
+    //
+    // Only the art is written here. The four tones are the paint tones above,
+    // read backwards — see PictureOf. Painting a wall and drawing a block are
+    // the same material lit the same way, and a second set of colours here would
+    // let the two drift apart with nothing to notice that they had.
+    //
+    // Most of these are a face: a lit crest, a body, a shaded belly, and a
+    // stipple across each boundary. Which is to say the form is the block and
+    // the texture is the material, at the two different scales that keeps them
+    // legible. What varies between them is the mark that says *which* material
+    // at the size of a slot — bedding for rock, ripples for sand and water,
+    // facets for the gems, a rolled sheen for the metals.
+    const char *icon[kPictureSide];
+
+    // How many blocks of it a slot holds.
+    //
+    // Sixty-four throughout, as the items are. It is here rather than as one
+    // constant because the first material that should not stack like the rest is
+    // already in the table: water is carried by the bucket everywhere it has
+    // ever been carried, and when it is, this is the row that says so.
+    int stack;
+
     ElementRules rules;
     ElementSpawn spawn;
     ElementLight light;
 };
+
+// The material drawn as a block.
+//
+// The paint table runs darkest first and a picture runs lit face first, so the
+// ramp is read backwards, which also lands the darkest tone on the accent — and
+// the accent is where a picture wants its darkest anyway.
+inline constexpr Picture PictureOf(const ElementDef &def) {
+    return {
+        .tone = {def.paint.tone[3], def.paint.tone[2], def.paint.tone[1], def.paint.tone[0]},
+        .art  = {def.icon[0], def.icon[1], def.icon[2], def.icon[3], def.icon[4], def.icon[5]},
+    };
+}
 
 inline constexpr ElementDef kElements[] = {
     {
@@ -433,7 +470,23 @@ inline constexpr ElementDef kElements[] = {
 
                     .strata = 1.15f},
         .contour = {0, 82, 172, 255},
-        .rules   = {.blocksBodies = true, .blocksLiquid = true, .occupies = true, .precedence = 0},
+
+        // Bedded, which is the one thing that separates stone from every other
+        // grey at this size: the seam across the middle and the darker course
+        // under it are the same layering the paint's strata term draws in the
+        // wall.
+        .icon =
+            {
+                "aaabaa",
+                "abbabb",
+                "bbbbbb",
+                "bcbbcb",
+                "cccccc",
+                "cdccdc",
+            },
+        .stack = 64,
+
+        .rules = {.blocksBodies = true, .blocksLiquid = true, .occupies = true, .precedence = 0},
         .spawn   = {.generator = Generator::Terrain},
         .light   = {.opacity = 0.8f},
     },
@@ -461,7 +514,22 @@ inline constexpr ElementDef kElements[] = {
 
                     .strata = 0.40f},
         .contour = {74, 52, 30, 255},
-        .rules   = {.blocksBodies = true, .blocksLiquid = true, .occupies = true, .precedence = 7},
+
+        // Loose rather than laid down: the tones break across each other in
+        // clods instead of in courses, and the darkest marks are scattered as
+        // the stones in it are.
+        .icon =
+            {
+                "aabaab",
+                "babbba",
+                "bbcbbb",
+                "bccbcb",
+                "ccdccc",
+                "cdcddc",
+            },
+        .stack = 64,
+
+        .rules = {.blocksBodies = true, .blocksLiquid = true, .occupies = true, .precedence = 7},
         .spawn =
             {
                 .generator = Generator::Cover,
@@ -491,8 +559,23 @@ inline constexpr ElementDef kElements[] = {
                     .grain  = 0.50f,
                     .patch  = 0.70f,
                     .strata = 0.60f},
-        .contour   = {166, 144, 92, 255},
-        .rules     = {.blocksBodies = true, .blocksLiquid = true, .occupies = true, .precedence = 8},
+        .contour = {166, 144, 92, 255},
+
+        // The evenest face in the table, and deliberately. Sand is the one
+        // material with no structure of its own, so what it gets is a ripple —
+        // a single texel offset between one course and the next.
+        .icon =
+            {
+                "aaaaaa",
+                "aabaab",
+                "bbbbbb",
+                "bbcbbc",
+                "cccccc",
+                "ccdccd",
+            },
+        .stack = 64,
+
+        .rules = {.blocksBodies = true, .blocksLiquid = true, .occupies = true, .precedence = 8},
         .spawn =
             {
                 .generator = Generator::Cover,
@@ -524,7 +607,24 @@ inline constexpr ElementDef kElements[] = {
                     .grain  = 0.34f,
                     .patch  = 0.55f,
                     .strata = 0.00f},
-        .contour   = {182, 196, 216, 255},
+        .contour = {182, 196, 216, 255},
+
+        // Weighted to the lit face, since snow is the one material whose whole
+        // character is that it is bright. The shading is kept to the last two
+        // courses; taking it further up turns fresh snow into grey slush, and
+        // its four tones are close enough together that there is nowhere to
+        // recover the brightness from once it has gone.
+        .icon =
+            {
+                "aaaaaa",
+                "aaaaaa",
+                "aabaab",
+                "bbbbbb",
+                "bbcbbc",
+                "ccdccd",
+            },
+        .stack = 64,
+
         .rules     = {.blocksBodies = true, .blocksLiquid = true, .occupies = true, .precedence = 9},
         .spawn =
             {
@@ -567,7 +667,25 @@ inline constexpr ElementDef kElements[] = {
                     .grain  = 0.30f,
                     .patch  = 0.30f,
                     .strata = 0.00f},
-        .contour   = {196, 128, 44, 255},
+        .contour = {196, 128, 44, 255},
+
+        // The one row here that is not a block face, because a torch is not a
+        // material one has a block of — it is an object, and drawing it as a
+        // square of flame colour would say nothing about what it is. So it is
+        // drawn as the thing: a flame over a shaft. The shaft is the darkest of
+        // its own four rather than a brown fetched from somewhere else, which
+        // keeps the row self-contained the way every other picture is.
+        .icon =
+            {
+                "..a...",
+                ".aab..",
+                ".abbc.",
+                "..bc..",
+                "..d...",
+                "..d...",
+            },
+        .stack = 64,
+
 
         // Claims its vertex, so it replaces what it is put on and can be mined
         // back out, but stops nothing: a body walks through it and so does
@@ -601,8 +719,24 @@ inline constexpr ElementDef kElements[] = {
                     .grain  = 0.62f,
                     .patch  = 0.75f,
                     .strata = 0.45f},
-        .contour   = {26, 26, 32, 255},
-        .rules     = {.blocksBodies = true, .blocksLiquid = true, .occupies = true, .precedence = 1},
+        .contour = {26, 26, 32, 255},
+
+        // Lumpy and matt. Coal is the one ore that does not catch the light, so
+        // it gets no sheen and no facet: the tones interleave without ever
+        // settling into a course, which is what reads as a broken black surface
+        // rather than as a polished one.
+        .icon =
+            {
+                "abbbab",
+                "bbbcbb",
+                "bcbbcb",
+                "cbccbc",
+                "ccdcdc",
+                "cddddc",
+            },
+        .stack = 64,
+
+        .rules = {.blocksBodies = true, .blocksLiquid = true, .occupies = true, .precedence = 1},
         .spawn =
             {
                 // The commonest ore and the largest veins, as in Minecraft, where
@@ -633,7 +767,23 @@ inline constexpr ElementDef kElements[] = {
                     .grain  = 0.62f,
                     .patch  = 0.75f,
                     .strata = 0.45f},
-        .contour   = {132, 66, 40, 255},
+        .contour = {132, 66, 40, 255},
+
+        // The three metals are told apart by how each one catches the light,
+        // since their tones alone are close enough to read as one another in a
+        // slot. Copper takes a diagonal sheen, which is the sharpest of the
+        // three and the one that says beaten rather than cast.
+        .icon =
+            {
+                "aaabbb",
+                "aabbbc",
+                "abbbcc",
+                "bbbccd",
+                "bbcccd",
+                "bcccdd",
+            },
+        .stack = 64,
+
         .rules     = {.blocksBodies = true, .blocksLiquid = true, .occupies = true, .precedence = 2},
         .spawn =
             {
@@ -659,7 +809,26 @@ inline constexpr ElementDef kElements[] = {
                     .grain  = 0.62f,
                     .patch  = 0.75f,
                     .strata = 0.45f},
-        .contour   = {92, 86, 79, 255},
+        .contour = {92, 86, 79, 255},
+
+        // Iron is rolled: courses running flat across, stepping straight down,
+        // where copper's sheen runs diagonally. Banding against a diagonal is
+        // what separates two greys with a warm cast at six texels.
+        //
+        // The courses are broken by a texel each rather than laid clean. A run
+        // of six identical texels is a painted stripe and reads as one; the
+        // stipple has to cross every boundary or the whole face goes flat.
+        .icon =
+            {
+                "aaaaba",
+                "abbbbb",
+                "bbbcbb",
+                "bcccbc",
+                "ccccdc",
+                "cdcddd",
+            },
+        .stack = 64,
+
         .rules     = {.blocksBodies = true, .blocksLiquid = true, .occupies = true, .precedence = 3},
         .spawn =
             {
@@ -685,7 +854,23 @@ inline constexpr ElementDef kElements[] = {
                     .grain  = 0.62f,
                     .patch  = 0.75f,
                     .strata = 0.45f},
-        .contour   = {148, 114, 20, 255},
+        .contour = {148, 114, 20, 255},
+
+        // Gold is soft, so its sheen is the broadest and the least stepped of
+        // the three: the same diagonal as copper with the boundaries stippled
+        // open, which is the difference between a struck edge and a polished
+        // one.
+        .icon =
+            {
+                "aaabba",
+                "aabbbc",
+                "abbbcc",
+                "bbabcd",
+                "bccbcd",
+                "cccddd",
+            },
+        .stack = 64,
+
         .rules     = {.blocksBodies = true, .blocksLiquid = true, .occupies = true, .precedence = 4},
         .spawn =
             {
@@ -711,7 +896,23 @@ inline constexpr ElementDef kElements[] = {
                     .grain  = 0.62f,
                     .patch  = 0.75f,
                     .strata = 0.45f},
-        .contour   = {40, 146, 154, 255},
+        .contour = {40, 146, 154, 255},
+
+        // The two gems are cut rather than surfaced: the corners are taken off
+        // and the light collects in the middle instead of along the top, which
+        // is the only way six texels can say faceted. Diamond is cut across —
+        // a wide table with the crown falling away below it.
+        .icon =
+            {
+                "ccaacc",
+                "cabbac",
+                "abbbba",
+                "abccba",
+                "bcddcb",
+                "cddddc",
+            },
+        .stack = 64,
+
         .rules     = {.blocksBodies = true, .blocksLiquid = true, .occupies = true, .precedence = 5},
         .spawn =
             {
@@ -740,7 +941,30 @@ inline constexpr ElementDef kElements[] = {
                     .grain  = 0.62f,
                     .patch  = 0.75f,
                     .strata = 0.45f},
-        .contour   = {26, 124, 62, 255},
+        .contour = {26, 124, 62, 255},
+
+        // Emerald takes a step cut instead of diamond's brilliant: the corners
+        // are off it in the same way, but the light gathers to one side and
+        // falls away across the stone rather than sitting symmetrically on a
+        // table. Two gems that took the same cut would be one green square and
+        // one cyan square, and the point of a picture is that it is not that.
+        //
+        // Its first cut ran a dark course down the middle of the lit face,
+        // meaning to read as a facet edge. At this size an interior mark
+        // surrounded by lighter tone has nothing to be an edge *of* and reads as
+        // a smudge on the stone. A facet has to be a boundary between two
+        // regions, which means it has to reach the outline.
+        .icon =
+            {
+                "cbaabc",
+                "baaabb",
+                "aaabbb",
+                "abbbcc",
+                "abbccd",
+                "cbccdc",
+            },
+        .stack = 64,
+
         .rules     = {.blocksBodies = true, .blocksLiquid = true, .occupies = true, .precedence = 6},
         .spawn =
             {
@@ -781,7 +1005,22 @@ inline constexpr ElementDef kElements[] = {
 
                     .strata = 0.00f},
         .contour = {56, 152, 236, 255},
-        .rules   = {.flows = true, .buoyancy = 1.0f},
+
+        // Sand's ripple, deepened. Water is the only material here that is
+        // drawn as a surface seen from above rather than as a face seen from
+        // the side, so the courses are broken twice over instead of offset once.
+        .icon =
+            {
+                "aabaab",
+                "bbbbbb",
+                "babbba",
+                "bbcbbc",
+                "cccccc",
+                "ccdccd",
+            },
+        .stack = 64,
+
+        .rules = {.flows = true, .buoyancy = 1.0f},
         // The only row whose extent this table does not describe.
         //
         // Everything else here is a field thresholded against a depth band, and
@@ -811,6 +1050,16 @@ inline constexpr ElementDef kElements[] = {
 // An enumerator without its row would otherwise read past the table, and the
 // first symptom is a hotbar slot drawing from whatever follows it in memory.
 static_assert(std::size(kElements) == kElementCount, "every Element needs exactly one row in kElements");
+
+inline constexpr bool ElementIconsAreSquare() {
+    for (const ElementDef &def : kElements) {
+        if (!IsSquare(PictureOf(def))) return false;
+    }
+
+    return true;
+}
+
+static_assert(ElementIconsAreSquare(), "every element icon is six rows of six characters");
 
 // Two occupying materials sharing a precedence would overlap, since neither one
 // gives way to the other, and the vertex they share would have no single

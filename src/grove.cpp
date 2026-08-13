@@ -312,7 +312,7 @@ void Grove::ReadGround(const World &world, Rectangle view) {
                .spacing = spacing};
 }
 
-void Grove::Update(const World &world, Rectangle view, Vector2 player, float now, float dt, Harvest &into) {
+void Grove::Update(const World &world, Rectangle view, Vector2 player, float now, float dt, Inventory &into) {
     ReadGround(world, view);
 
     // Grown a little wider than the view, so a tree coming over the edge has a
@@ -540,7 +540,7 @@ void Grove::Yield(const flora::Plant &plant, const TreeState &state, float now) 
 
         const int count = rule.least + static_cast<int>(amount * static_cast<float>(rule.most - rule.least + 1));
 
-        drops_.Spawn(rule.item, std::clamp(count, rule.least, rule.most), from, away, now);
+        drops_.Scatter(ItemsOf(rule.item, std::clamp(count, rule.least, rule.most)), from, away, now);
     }
 }
 

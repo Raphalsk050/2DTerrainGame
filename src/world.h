@@ -88,16 +88,38 @@ public:
     // samples it covers. Bodies use it to work out how much they float.
     float SubmergedFraction(Rectangle rect) const;
 
+    // What one stroke of the brush did.
+    struct Stroke {
+        // What it took out, per material.
+        Yield freed{};
+
+        // Vertices the placed material came to occupy that it did not occupy
+        // before.
+        //
+        // Only the new ones. Placing writes every vertex in the circle, and a
+        // brush swept back and forth over ground it has already laid rewrites
+        // most of them every frame — so counting writes would charge a player
+        // several times over for one wall. What a stroke costs is what it
+        // gained.
+        int filled = 0;
+    };
+
     // Fills every vertex within `radius` with a material, clearing whatever was
-    // there first. Placing is always a replacement, since two materials cannot
-    // share a vertex; a liquid is the exception and simply does not enter a
-    // vertex a solid already fills.
-    void Place(Element element, Vector2 world, float radius);
+    // there first, and stops once it has newly filled `budget` of them. Placing
+    // is always a replacement, since two materials cannot share a vertex; a
+    // liquid is the exception and simply does not enter a vertex a solid already
+    // fills.
+    //
+    // The budget is how a supply that runs out mid-stroke stops the brush where
+    // the material ran out instead of continuing for free. It is tested before
+    // anything is cleared, so the brush never digs out ground it cannot afford
+    // to replace.
+    Stroke Place(Element element, Vector2 world, float radius, int budget);
 
     // Empties every vertex within `radius` and reports what came out. This is
     // the shape the mining action takes: the world performs the removal, the
     // caller decides what the yield is worth.
-    Yield Excavate(Vector2 world, float radius);
+    Stroke Excavate(Vector2 world, float radius);
 
     // Advances the liquid inside `active` by one step. The region is copied
     // into a flat buffer, simulated, and written back, which keeps the
@@ -435,8 +457,9 @@ private:
     bool ClearVertex(Vector2 vertex, Yield &yield);
 
     // Both edits a brush can make. Placing clears the vertex first, so it is
-    // the same edit as digging with a second half.
-    void ApplyBrush(Vector2 world, float radius, std::optional<Element> place, Yield &yield);
+    // the same edit as digging with a second half. `budget` bounds how many
+    // vertices the placed material may newly take, and is ignored when digging.
+    Stroke ApplyBrush(Vector2 world, float radius, std::optional<Element> place, int budget);
 
     // Signed margin by which the solids of at least `minPrecedence` fill each
     // vertex of a chunk: positive inside one of them, negative outside, and

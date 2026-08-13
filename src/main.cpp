@@ -1,3 +1,4 @@
+#include "backdrop.h"
 #include "config.h"
 #include "debug_view.h"
 #include "editor.h"
@@ -146,14 +147,21 @@ void DrawLabel(const char *text, int x, int y, Color colour) {
     DrawText(text, x, y, 14, colour);
 }
 
-// Badge showing what the next click will do, next to the bar that decides what
-// it will do it with. The brush is modal, so the mode has to be somewhere the
-// eye passes without being sent looking for it.
-void DrawBrushMode(const Editor &editor) {
-    const bool place  = editor.CurrentMode() == Editor::Mode::Place;
-    const Color color = place ? Color{120, 200, 130, 255} : Color{235, 84, 84, 255};
+// Badge showing how wide the brush is, next to the bar that decides what it
+// works with.
+//
+// Size is the one property of the brush with no mark of its own out in the
+// world — the ring shows where it is and what it would put down, but not what
+// the last press of the size key did, since a ring four pixels wider is not a
+// thing anyone sees change.
+void DrawBrushSize(const Editor &editor) {
+    // Grey out of reach, which is the same thing the ring in the world says and
+    // is worth saying twice: out there the ring is the only mark on screen, and
+    // a player who has not noticed it is a player wondering why the button
+    // stopped working.
+    const Color color = editor.Reachable() ? Color{190, 198, 212, 255} : Color{120, 126, 138, 255};
 
-    const char *text = TextFormat("%s  (X)     brush %.0f  (- / +)", editor.ModeName(), editor.Radius());
+    const char *text = TextFormat("brush %.0f  (- / +)", editor.Radius());
     const int width  = MeasureText(text, 14);
 
     // Sat just clear of the bar, which reaches 76 pixels up from the bottom.
@@ -177,7 +185,7 @@ void DrawBrushMode(const Editor &editor) {
 // Drawn unlit, for the same reason F6 exists — what a material's own colour is
 // doing and what the light is doing to it are two questions, and answering them
 // together is how a palette gets tuned against a time of day.
-void DrawProbe(World &world, Grove &grove, Harvest &gathered, Rectangle strip, const char *path, int zoom,
+void DrawProbe(World &world, Grove &grove, Inventory &gathered, Rectangle strip, const char *path, int zoom,
                float seconds, bool plants, int lit) {
     // Run the clock on before drawing, so a still picture can be taken of a world
     // that has been blowing for a while. The sway and the gust are both pure
@@ -1097,7 +1105,7 @@ void ReportSettling(World &world, Rectangle region, int steps) {
 // Run twice over: the first pass pays for whatever the region needed generating,
 // which is a real cost but a one-off, and the second is what a frame standing
 // still actually costs.
-void ReportFrame(World &world, Grove &grove, Harvest &gathered, Vector2 at, int frames) {
+void ReportFrame(World &world, Grove &grove, Inventory &gathered, Vector2 at, int frames) {
     const Rectangle view   = {at.x - 500.0f, at.y - 300.0f, 1000.0f, 600.0f};
     const Rectangle active = Expand(view, kSimulationMargin);
 
@@ -1166,13 +1174,16 @@ void ReportFrame(World &world, Grove &grove, Harvest &gathered, Vector2 at, int 
     std::printf("chunks resident %d, pinned %d\n", world.ResidentChunks(), world.PinnedChunks());
 }
 
-void Draw(const World &world, const Grove &grove, const Harvest &gathered, const Player &player,
-          const Hotbar &hotbar, const Editor &editor, const LiquidLayer &liquids, const LightLayer &lights,
-          const Camera2D &camera, const debug_view::Toggles &debug, float lantern, const char *notice,
-          float noticeFor) {
+// The world, from the sky down to the brush cursor over it.
+//
+// Split out from the head-up display because the two are wanted apart: with the
+// inventory open the world goes through a blur and the display does not, and a
+// blur needs the world rendered into a target of its own. Neither half opens the
+// frame, so the caller decides whether that target is the screen.
+void DrawScene(const World &world, const Grove &grove, const Inventory &inventory, const Player &player,
+               const Editor &editor, const LiquidLayer &liquids, const LightLayer &lights, const Camera2D &camera,
+               const debug_view::Toggles &debug, bool aiming) {
     const Rectangle view = ViewBounds(camera);
-
-    BeginDrawing();
 
     BeginMode2D(camera);
 
@@ -1255,10 +1266,18 @@ void Draw(const World &world, const Grove &grove, const Harvest &gathered, const
     if (debug.chunks) debug_view::DrawChunks(world, view);
     if (debug.light) debug_view::DrawLight(world, view);
 
-    editor.DrawCursor(hotbar, camera);
+    // Not while the panel is up: the pointer is over a slot, not over the world,
+    // and a brush ring left under an inventory says the next click will dig
+    // where it is sitting when it will not.
+    if (aiming) editor.DrawCursor(inventory, camera);
 
     EndMode2D();
+}
 
+// Everything drawn in the coordinates of the frame rather than of the world.
+void DrawHud(const World &world, const Grove &grove, const Player &player, const Editor &editor,
+             const Camera2D &camera, const debug_view::Toggles &debug, float lantern, const char *notice,
+             float noticeFor) {
     // Outside the camera transform, unlike every other overlay: what it shows is
     // the image that was baked, not a place in the world.
     if (debug.atlas) grove.DrawSheet();
@@ -1269,12 +1288,13 @@ void Draw(const World &world, const Grove &grove, const Harvest &gathered, const
     // And the wet lines keep their meaning by going pale blue rather than dark.
     const Color wet = {152, 206, 255, 255};
 
-    DrawLabel("A/D: move  |  space: jump  |  S: crouch  |  J: chop  |  P: plant  |  mouse: aim  |  F: fly", 10,
-              10, ink);
-    DrawLabel("left: apply brush  |  X: place/dig  |  1-0 or wheel: material  |  - / +: brush size  |  R: regenerate",
+    DrawLabel("A/D: move  |  space: jump  |  S: crouch  |  J: chop  |  mouse: aim  |  F: fly", 10, 10, ink);
+    DrawLabel("left: dig  |  right: place what is held  |  1-9 or wheel: slot  |  tab: inventory  |"
+              "  - / +: brush size  |  R: regenerate",
               10, 28, ink);
     DrawLabel(TextFormat("V: vertices  |  F3: chunks  |  F4: height grid  |  F5: light probes  |  F6: unlit %s  |"
-                         "  F7: fast weather %s  |  F8: next quarter  |  F9: season %s  |  F10: sheet  |  , . : lantern %.1f",
+                         "  F7: fast weather %s  |  F8: next quarter  |  F9: season %s  |  F10: sheet  |"
+                         "  F11: stock up  |  , . : lantern %.1f",
                          debug.unlit ? "on" : "off", debug.fastWeather ? "on" : "off", kSeasonNames[world.Sky().Turn().index],
                          lantern),
               10, 46, ink);
@@ -1284,21 +1304,7 @@ void Draw(const World &world, const Grove &grove, const Harvest &gathered, const
                          grove.DrawnPlants(), grove.RememberedPlants(), world.Light().Rays()),
               10, 70, ink);
 
-    // What the woods have given up.
-    //
-    // Every kind, including the ones at zero. Hiding an empty count reads as the
-    // item not existing rather than as not having any, and the first thing a
-    // player asks when planting will not work is whether they have a sapling at
-    // all — a question the readout has to be able to answer.
-    {
-        const char *line = "gathered:";
-
-        for (std::size_t i = 0; i < kItemCount; i++) {
-            line = TextFormat("%s  %s %d", line, kItems[i].name, gathered[i]);
-        }
-
-        DrawLabel(TextFormat("%s   (%d on the ground)", line, grove.Fallen().Live()), 10, 142, ink);
-    }
+    DrawLabel(TextFormat("on the ground: %d", grove.Fallen().Live()), 10, 142, ink);
 
     const Vector2 centre = player.Centre();
     const auto under     = editor.Under();
@@ -1357,10 +1363,7 @@ void Draw(const World &world, const Grove &grove, const Harvest &gathered, const
         DrawLabel(notice, (GetScreenWidth() - width) / 2, GetScreenHeight() - 140, {255, 214, 140, 255});
     }
 
-    DrawBrushMode(editor);
-    hotbar.Draw(editor.Collected());
-
-    EndDrawing();
+    DrawBrushSize(editor);
 }
 
 } // namespace
@@ -1408,6 +1411,16 @@ int main(int argc, char **argv) {
     InitWindow(config::kScreenWidth, config::kScreenHeight, "marching squares");
     SetWindowMinSize(config::kMinScreenWidth, config::kMinScreenHeight);
     SetTargetFPS(config::kTargetFps);
+
+    // Escape stops closing the window, so that it can close the inventory
+    // instead.
+    //
+    // raylib binds it to WindowShouldClose by default, which with a panel on
+    // screen means the key every player presses to back out of a panel quits the
+    // game instead — losing whatever they were in the middle of. The window still
+    // closes by its own button, and Minecraft's escape has never quit anything
+    // either.
+    SetExitKey(KEY_NULL);
 
     // Assets are opened through paths relative to the executable.
     ChangeDirectory(GetApplicationDirectory());
@@ -1956,7 +1969,7 @@ int main(int argc, char **argv) {
     }
 
     if (timing) {
-        Harvest timed{};
+        Inventory timed{};
 
         ReportFrame(world, grove, timed,
                     {static_cast<float>(std::atof(argv[2])), static_cast<float>(std::atof(argv[3]))},
@@ -2053,7 +2066,7 @@ int main(int argc, char **argv) {
 
     // What has been picked up. The counterpart of Editor::Collected for anything
     // that is not a material — see item.h for why the two are separate tables.
-    Harvest gathered{};
+    Inventory inventory{};
 
     // The two ends of a day, and they are two colours rather than one turned down.
     //
@@ -2069,7 +2082,7 @@ int main(int argc, char **argv) {
         const Rectangle strip = {static_cast<float>(std::atof(argv[2])), static_cast<float>(std::atof(argv[3])),
                                  static_cast<float>(std::atof(argv[4])), static_cast<float>(std::atof(argv[5]))};
 
-        Harvest probed{};
+        Inventory probed{};
 
         DrawProbe(world, grove, probed, strip, argv[6], (argc >= 8) ? std::atoi(argv[7]) : 1,
                   (argc >= 9) ? static_cast<float>(std::atof(argv[8])) : 0.0f,
@@ -2095,12 +2108,14 @@ int main(int argc, char **argv) {
     // Dropped in above the ground at the origin rather than at a fixed height,
     // since the surface there is now wherever the relief put it.
     Player player({0.0f, terrain::Height(0.0f, settings) - 96.0f});
-    Hotbar hotbar;
     Editor editor;
 
     LiquidLayer liquids;
 
     LightLayer lights;
+
+    Backdrop backdrop;
+    backdrop.Create();
 
     Camera2D camera = {};
     camera.offset   = {GetScreenWidth() / 2.0f, GetScreenHeight() / 2.0f};
@@ -2116,6 +2131,23 @@ int main(int argc, char **argv) {
 
     debug_view::Toggles debug;
 
+    // Whether the inventory panel is up.
+    //
+    // Held here beside the debug toggles rather than inside the inventory, for
+    // the reason debug_view::Toggles gives for the same choice: what is on the
+    // screen is the state of the screen, and the loop is where the screen is
+    // decided. It is also what this gates the whole simulation on, and a gate
+    // hidden inside the thing it gates is a gate nobody finds.
+    bool packOpen = false;
+
+    // Whether the brush is waiting for the hand to come off the button.
+    //
+    // A click outside the panel dismisses it, and the button is still down for
+    // the several frames a human click lasts — while the brush reads it held
+    // rather than pressed. Without this, getting out of the inventory digs a
+    // hole in whatever was behind it.
+    bool holdOff = false;
+
     while (!WindowShouldClose()) {
         const float dt = GetFrameTime();
 
@@ -2125,22 +2157,86 @@ int main(int argc, char **argv) {
         // was told about one and something else was not.
         camera.offset = {GetScreenWidth() / 2.0f, GetScreenHeight() / 2.0f + GetScreenHeight() / 4.0f};
         liquids.Fit(GetScreenWidth(), GetScreenHeight());
+        backdrop.Fit(GetScreenWidth(), GetScreenHeight());
 
         // Chunks are generated over the simulated band, not merely the visible
         // one. A write-back to a vertex whose chunk is absent is dropped, which
         // would quietly destroy the liquid that flowed there.
         const Rectangle active = Expand(ViewBounds(camera), kSimulationMargin);
 
+        // Read before the gate below, since it is the one key that has to work on
+        // both sides of it. Escape closes the panel as well, which it can only do
+        // because the exit key was cleared at startup — see SetExitKey.
+        if (IsKeyPressed(KEY_TAB) || (packOpen && IsKeyPressed(KEY_ESCAPE))) {
+            packOpen = !packOpen;
+
+            // Anything still on the cursor goes into the world rather than into
+            // nowhere. Closing over a full hand is the one way a stack could be
+            // held by a panel that is no longer drawn.
+            if (!packOpen) {
+                holdOff = true;
+
+                const Stack held = inventory.Release();
+
+                if (!held.Empty()) {
+                    grove.Fallen().Toss(held, player.Centre(), GetScreenToWorld2D(GetMousePosition(), camera),
+                                        world.Sky().Time());
+                }
+            }
+        }
+
+        // Streaming carries on with the panel up. It is the one step that is
+        // about where the view is rather than about time passing, the view is not
+        // going anywhere, and leaving it running means there is no state to
+        // catch up on when the panel closes.
         world.Update(active);
 
-        // Grown over the visible band rather than the simulated one. A plant is
-        // drawn and nothing else — it holds no liquid and steps no automaton — so
-        // there is nothing about one off screen that has to have settled by the
-        // time it scrolls in.
-        grove.Update(world, ViewBounds(camera), player.Centre(), world.Sky().Time(), dt, gathered);
+        if (packOpen) {
+            const Inventory::Gesture gesture = inventory.Update();
 
-        hotbar.Update();
-        editor.Update(world, hotbar, camera);
+            if (!gesture.thrown.Empty()) {
+                grove.Fallen().Toss(gesture.thrown, player.Centre(), GetScreenToWorld2D(GetMousePosition(), camera),
+                                    world.Sky().Time());
+            }
+
+            if (gesture.close) {
+                packOpen = false;
+                holdOff  = true;
+            }
+        }
+
+        if (holdOff && IsMouseButtonUp(MOUSE_BUTTON_LEFT) && IsMouseButtonUp(MOUSE_BUTTON_RIGHT)) holdOff = false;
+
+        // Everything from here to the light solve is the world moving, and none
+        // of it runs while the panel is up. Single player, so a panel is a pause;
+        // and a drop left falling behind an open inventory is a drop that has
+        // timed out and gone by the time it is looked at again.
+        if (!packOpen) {
+            // Grown over the visible band rather than the simulated one. A plant is
+            // drawn and nothing else — it holds no liquid and steps no automaton — so
+            // there is nothing about one off screen that has to have settled by the
+            // time it scrolls in.
+            grove.Update(world, ViewBounds(camera), player.Centre(), world.Sky().Time(), dt, inventory);
+
+            // The two that read the mouse wait out the click that closed the
+            // panel; the plants above do not, since nothing about them is a
+            // click.
+            if (!holdOff) {
+                hotbar::Update(inventory);
+
+                // Handed the player's position from before it moves this frame,
+                // which is what the reach is measured from and which side an
+                // overflowing dig throws its blocks out on. A frame of lag at a
+                // run is two pixels against a reach of ninety-six.
+                const char *said =
+                    editor.Update(world, inventory, grove, camera, player.Centre(), world.Sky().Time());
+
+                if (said != nullptr) {
+                    notice    = said;
+                    noticeFor = kNoticeTime;
+                }
+            }
+        }
 
         debug_view::ReadToggles(debug);
         if (IsKeyPressed(KEY_R)) world.Reset();
@@ -2156,6 +2252,10 @@ int main(int argc, char **argv) {
         // judged before there is a calendar to drive it.
         if (IsKeyPressed(KEY_F9)) world.CycleSeason();
 
+        // An action beside the other two, and for the reason F8 gives: the debug
+        // toggles hold the state of the screen, and this is not a state.
+        if (IsKeyPressed(KEY_F11)) inventory.Stock();
+
         // Turned up and down while walking, since how much light the player
         // carries is a balance question and the only way to settle it is to be
         // underground at each setting. Zero is a valid answer: it leaves the
@@ -2163,18 +2263,25 @@ int main(int argc, char **argv) {
         if (IsKeyPressed(KEY_COMMA)) lantern = std::max(lantern - config::kLanternStep, 0.0f);
         if (IsKeyPressed(KEY_PERIOD)) lantern = std::min(lantern + config::kLanternStep, config::kLanternMax);
 
-        accumulated = std::min(accumulated + dt, kMaxAccumulated);
-        while (accumulated >= kWaterStep) {
-            world.StepWater(active);
-            accumulated -= kWaterStep;
-        }
+        // The accumulator is not fed while the panel is up, rather than being fed
+        // and the stepping skipped. Skipping alone would leave it holding
+        // kMaxAccumulated by the time the panel closed and run a quarter of a
+        // second of water in one frame — the whole pond would jump.
+        if (!packOpen) {
+            accumulated = std::min(accumulated + dt, kMaxAccumulated);
 
-        player.Update(ReadPlayerInput(camera), world, dt);
-        FollowPlayer(camera, player, dt);
+            while (accumulated >= kWaterStep) {
+                world.StepWater(active);
+                accumulated -= kWaterStep;
+            }
+
+            player.Update(ReadPlayerInput(camera), world, dt);
+            FollowPlayer(camera, player, dt);
+        }
 
         // Only on the frame the swing began. The strike box is live for the whole
         // window, so reading that instead lands nine blows per swing.
-        if (player.AttackStarted()) {
+        if (!packOpen && player.AttackStarted()) {
             grove.Strike(player.AttackHitbox(), 1.0f, player.Centre(), world.Sky().Time());
 
             // And whatever grass the same swing went through. A tuft gives up
@@ -2190,64 +2297,75 @@ int main(int argc, char **argv) {
                 // the side the blow came from and the way the wood already goes.
                 const float away = (from.x < player.Centre().x) ? -1.0f : 1.0f;
 
-                grove.Fallen().Spawn(Item::Fibre, mown, from, away, world.Sky().Time());
-            }
-        }
-
-        // A sapling goes in where the player is standing, and the species is the
-        // one the climate there would have grown anyway. Choosing it for the
-        // player rather than offering a menu: what a place will support is a
-        // property of the place, and planting a pine in a swamp is not a decision
-        // worth surfacing before there is a reason to make it.
-        if (IsKeyPressed(KEY_P)) {
-            const Vector2 feet = {player.Centre().x, player.Bounds().y + player.Bounds().height};
-
-            if (gathered[ItemIndex(Item::Sapling)] <= 0) {
-                notice     = "no saplings — fell a tree for one";
-                noticeFor  = kNoticeTime;
-            } else if (grove.Plant(grove.Suited(feet.x), feet, world.Sky().Time())) {
-                gathered[ItemIndex(Item::Sapling)]--;
-            } else {
-                // Said out loud rather than swallowed. A key that does nothing and
-                // explains nothing is the same to a player as a key that is broken.
-                notice    = "no room here — something is already growing";
-                noticeFor = kNoticeTime;
+                grove.Fallen().Scatter(ItemsOf(Item::Fibre, mown), from, away, world.Sky().Time());
             }
         }
 
         noticeFor = std::max(noticeFor - dt, 0.0f);
 
-        // Re-offered every frame rather than registered once. A light that has
-        // to be renewed to keep burning needs nothing told to it when the thing
-        // carrying it moves, and nothing told to it when that thing is gone.
-        world.AddLight(player.Centre(), Lantern(lantern), config::kLanternRadius);
+        // The light goes out with the solve and not on its own.
+        //
+        // AddLight is re-offered every frame and cleared by each solve, so the
+        // two have to be skipped together: skipping only the offer would let the
+        // solve run against an empty list and put the lantern out, and skipping
+        // only the solve would leave offers piling up against a field nothing is
+        // clearing. Left alone, the light already on screen is the light of a
+        // world that has stopped moving, which is the right answer.
+        if (!packOpen) {
+            // Re-offered every frame rather than registered once. A light that has
+            // to be renewed to keep burning needs nothing told to it when the thing
+            // carrying it moves, and nothing told to it when that thing is gone.
+            world.AddLight(player.Centre(), Lantern(lantern), config::kLanternRadius);
 
-        // Drifted before the light is solved, because the shade the cloud casts is
-        // read during the solve. Advancing it afterwards would light every frame by
-        // the sky of the frame before it, which nothing would look wrong about and
-        // which would be wrong.
-        world.StepWeather(dt * (debug.fastWeather ? debug_view::kFastWeather : 1.0f));
+            // Drifted before the light is solved, because the shade the cloud casts is
+            // read during the solve. Advancing it afterwards would light every frame by
+            // the sky of the frame before it, which nothing would look wrong about and
+            // which would be wrong.
+            world.StepWeather(dt * (debug.fastWeather ? debug_view::kFastWeather : 1.0f));
 
-        // Offered on the same terms as the lantern above, and for the same
-        // reason: a canopy that has to be re-offered to keep shading needs
-        // nothing told to it when the tree is felled.
-        grove.Shade(world, world.Sky().Time());
+            // Offered on the same terms as the lantern above, and for the same
+            // reason: a canopy that has to be re-offered to keep shading needs
+            // nothing told to it when the tree is felled.
+            grove.Shade(world, world.Sky().Time());
 
-        // Solved after the world has finished moving, so the light matches the
-        // frame it is about to be drawn over rather than the one before it.
-        world.StepLight(active);
-        lights.Update(world.Light());
+            // Solved after the world has finished moving, so the light matches the
+            // frame it is about to be drawn over rather than the one before it.
+            world.StepLight(active);
+            lights.Update(world.Light());
+        }
 
         // Captured before the frame opens, since it renders to its own target.
         liquids.Capture(world, ViewBounds(camera), camera);
 
-        Draw(world, grove, gathered, player, hotbar, editor, liquids, lights, camera, debug, lantern, notice,
-             noticeFor);
+        // And the world itself, when it is about to be put behind a panel. Same
+        // constraint, one step further: a texture mode cannot be opened inside a
+        // frame, so the scene is drawn into the backdrop's target out here and
+        // only the blurred result is drawn once the frame is open.
+        if (packOpen) {
+            backdrop.Capture();
+            DrawScene(world, grove, inventory, player, editor, liquids, lights, camera, debug, !packOpen);
+            backdrop.Finish();
+        }
+
+        BeginDrawing();
+
+        if (packOpen) backdrop.Compose(config::kPanelDim);
+        else DrawScene(world, grove, inventory, player, editor, liquids, lights, camera, debug, !packOpen);
+
+        DrawHud(world, grove, player, editor, camera, debug, lantern, notice, noticeFor);
+
+        // The panel replaces the bar rather than sitting over it, since it draws
+        // those same nine slots as its own bottom row.
+        if (packOpen) inventory.Draw();
+        else hotbar::Draw(inventory);
+
+        EndDrawing();
     }
 
     grove.Unload();
     lights.Unload();
     liquids.Unload();
+    backdrop.Unload();
     CloseWindow();
 
     return 0;

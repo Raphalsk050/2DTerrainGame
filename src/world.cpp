@@ -908,7 +908,9 @@ bool World::ClearVertex(Vector2 vertex, Yield &yield) {
     return removed;
 }
 
-void World::ApplyBrush(Vector2 world, float radius, std::optional<Element> place, Yield &yield) {
+World::Stroke World::ApplyBrush(Vector2 world, float radius, std::optional<Element> place, int budget) {
+    Stroke edit{};
+
     const Rectangle brush = {world.x - radius, world.y - radius, radius * 2.0f, radius * 2.0f};
 
     int i0 = 0;
@@ -927,44 +929,73 @@ void World::ApplyBrush(Vector2 world, float radius, std::optional<Element> place
             // A liquid is poured into a space, not pressed into one. It does
             // not clear what it lands on; it simply does not land there.
             if (place.has_value() && Def(*place).rules.flows) {
-                if (!OccupantAt(vertex).has_value()) WriteVertex(*place, vertex, water::kMaxMass);
+                if (OccupantAt(vertex).has_value()) continue;
+
+                if (edit.filled >= budget) return edit;
+
+                WriteVertex(*place, vertex, water::kMaxMass);
+                edit.filled++;
                 continue;
             }
 
-            // Digging and placing a solid start the same way. Two materials
-            // never share a vertex, so placing is a replacement, and digging is
-            // this edit without its second half.
-            const bool dug = ClearVertex(vertex, yield);
+            if (place.has_value()) {
+                // Whether this vertex is one the material does not already hold.
+                // Only those are paid for, and only those may exhaust the
+                // budget: a stroke laid over its own work costs nothing because
+                // it gains nothing.
+                const bool gained = ValueAt(*place, vertex) <= Def(*place).threshold;
 
-            if (!place.has_value()) {
-                // Only where there was something to dig. A brush swung through
-                // open sky has not changed the world and must not be remembered
-                // as having: the memory is what makes an edit outlive its chunk,
-                // and it is the one thing here that never shrinks.
-                if (dug) Remember(vertex, std::nullopt);
+                // Tested before anything is cleared. The other order digs out a
+                // vertex and then finds there is nothing left to fill it with,
+                // which leaves a hole the player was never charged for and never
+                // asked for.
+                if (gained && edit.filled >= budget) return edit;
+
+                // What the vertex gave up, except any of the material now going
+                // into it.
+                //
+                // ClearVertex counts everything it finds, and a brush passing
+                // back over its own wall finds that wall — so without this a
+                // stroke would hand back a vertex of stone for every vertex of
+                // stone it rewrote, and a player could stand still and make
+                // material out of nothing.
+                const std::size_t self = ElementIndex(*place);
+                const int held         = edit.freed[self];
+
+                ClearVertex(vertex, edit.freed);
+                edit.freed[self] = held;
+
+                // Painted samples are pinned to the top of the range rather than
+                // nudged, so a brush stroke reads as a definite edit and not as
+                // a faint gradient.
+                WriteVertex(*place, vertex, 1.0f);
+                MarkEdited(vertex);
+                Remember(vertex, *place);
+
+                if (gained) edit.filled++;
                 continue;
             }
 
-            // Painted samples are pinned to the top of the range rather than
-            // nudged, so a brush stroke reads as a definite edit and not as a
-            // faint gradient.
-            WriteVertex(*place, vertex, 1.0f);
-            MarkEdited(vertex);
-            Remember(vertex, *place);
+            // Digging is that same edit without its second half. Two materials
+            // never share a vertex, so placing is a replacement.
+            //
+            // Only where there was something to dig. A brush swung through open
+            // sky has not changed the world and must not be remembered as
+            // having: the memory is what makes an edit outlive its chunk, and it
+            // is the one thing here that never shrinks.
+            if (ClearVertex(vertex, edit.freed)) Remember(vertex, std::nullopt);
         }
     }
+
+    return edit;
 }
 
-void World::Place(Element element, Vector2 world, float radius) {
-    Yield discarded{};
-    ApplyBrush(world, radius, element, discarded);
+World::Stroke World::Place(Element element, Vector2 world, float radius, int budget) {
+    return ApplyBrush(world, radius, element, budget);
 }
 
-World::Yield World::Excavate(Vector2 world, float radius) {
-    Yield yield{};
-    ApplyBrush(world, radius, std::nullopt, yield);
-
-    return yield;
+World::Stroke World::Excavate(Vector2 world, float radius) {
+    return ApplyBrush(world, radius, std::nullopt, 0);
 }
 
 void World::StepWater(Rectangle active) {

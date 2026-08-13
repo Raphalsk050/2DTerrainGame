@@ -110,5 +110,19 @@ inline constexpr float kLanternMax  = 8.0f;
 // Shader path, relative to the executable. The working directory is switched to
 // the binary's own directory at startup, and the build copies assets there.
 inline constexpr const char *kNoiseShaderPath = "assets/noise_filter_shader.fs";
+inline constexpr const char *kBlurShaderPath  = "assets/blur_shader.fs";
+
+// How far the world behind an open panel is pushed back.
+//
+// A little over half its brightness, with the blur doing the rest of the work.
+// Darkening alone leaves the world legible and competing for the eye; blurring
+// alone leaves it as bright as the panel over it. Between them at these amounts
+// the world is plainly still there and plainly not the thing being looked at,
+// which is the whole requirement.
+//
+// Deliberately short of the two thirds it started at. That was dark enough to
+// read as night having fallen rather than as the world stepping back, and the
+// point is a world one can still see oneself standing in.
+inline constexpr float kPanelDim = 0.58f;
 
 } // namespace config

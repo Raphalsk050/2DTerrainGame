@@ -30,14 +30,19 @@ mkdir -p build
 
 # Rebuilt whenever anything it draws from has changed. The probe exists to be
 # run immediately after an edit, so a stale binary is worse than a slow start.
+# The cave sources are here because terrain reads the cave fields while deciding
+# what is solid, and the picture sources because the strips under the plants are
+# drawn from the item and element tables.
 newest=$(ls -t tools/sheet.cpp src/canopy.cpp src/flora.cpp src/terrain.cpp src/grid.cpp \
-             src/canopy.h src/flora.h src/config.h 2>/dev/null | head -1)
+             src/cave.cpp src/picture.cpp \
+             src/canopy.h src/flora.h src/config.h src/element.h src/item.h src/picture.h 2>/dev/null | head -1)
 
 if [[ ! -x build/sheet || "$newest" -nt build/sheet ]]; then
     echo "compilando a sonda..."
 
     clang++ -std=c++26 -O2 -o build/sheet \
         tools/sheet.cpp src/canopy.cpp src/flora.cpp src/terrain.cpp src/grid.cpp \
+        src/cave.cpp src/picture.cpp \
         -Isrc -I"$raylib_src" -I"$raylib_src/external" \
         "$raylib_lib" \
         -framework Cocoa -framework IOKit -framework CoreVideo -framework OpenGL

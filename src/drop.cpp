@@ -1,6 +1,7 @@
 #include "drop.h"
 
 #include "config.h"
+#include "picture.h"
 
 #include <algorithm>
 #include <cmath>
@@ -33,6 +34,23 @@ constexpr float kHoming = 9.0f;
 // lands before it comes to hand. Collected at the instant of the drop, a felling
 // reads as a number going up rather than as a tree giving something up.
 constexpr float kSettleDelay = 0.45f;
+
+// And the same for a stack the player threw away, which needs far longer.
+//
+// The pull reaches kReach in every direction, and a stack thrown out of the
+// inventory leaves from the player's own chest — so at the settling delay it
+// would be back in the bar a third of a second after being let go of, and
+// dropping something would simply not work. Two seconds is Minecraft's number
+// and it is about how long it takes to turn and walk away from what you threw.
+constexpr float kThrownDelay = 2.0f;
+
+// How hard a thrown stack leaves the hand.
+//
+// Faster than a chip off an axe and flatter, because it has to clear the
+// player's own body rather than arc off a trunk. Enough to land it a little way
+// off, not enough to lose sight of it.
+constexpr float kTossSpeed = 210.0f;
+constexpr float kTossLift  = 80.0f;
 
 // How fast a pickup that found itself inside the ground climbs out, in pixels a
 // second.
@@ -67,40 +85,68 @@ float Spray(int index) {
 
 } // namespace
 
-void Drops::Spawn(Item item, int count, Vector2 from, float away, float now) {
-    for (int i = 0; i < count; i++) {
-        // One full pass and no more. A pool this size only fills if something has
-        // gone wrong upstream, and dropping the overflow is the right answer:
-        // the alternative is taking a slot from a pickup the player can see.
-        std::size_t slot = kSlots;
+Drops::Pickup *Drops::Claim() {
+    for (std::size_t step = 0; step < kSlots; step++) {
+        const std::size_t candidate = (next_ + step) % kSlots;
 
-        for (std::size_t step = 0; step < kSlots; step++) {
-            const std::size_t candidate = (next_ + step) % kSlots;
+        if (pool_[candidate].live) continue;
 
-            if (pool_[candidate].live) continue;
+        next_ = (candidate + 1) % kSlots;
 
-            slot  = candidate;
-            next_ = (candidate + 1) % kSlots;
-            break;
-        }
+        return &pool_[candidate];
+    }
 
-        if (slot >= kSlots) return;
+    return nullptr;
+}
 
-        const float spread = Spray(static_cast<int>(slot) * 31 + i);
+void Drops::Scatter(Stack stack, Vector2 from, float away, float now) {
+    if (stack.Empty()) return;
 
-        Pickup &pickup = pool_[slot];
+    for (int i = 0; i < stack.count; i++) {
+        Pickup *pickup = Claim();
+        if (pickup == nullptr) return;
 
-        pickup.at       = from;
-        pickup.velocity = {away * kThrowSpeed * (0.35f + 0.65f * spread),
-                           -kThrowLift * (0.6f + 0.5f * Spray(static_cast<int>(slot) * 17 + i + 5))};
-        pickup.item     = item;
-        pickup.bornAt   = now;
-        pickup.settled  = false;
-        pickup.live     = true;
+        // Seeded off the pool index as well as the loop counter, so a second
+        // handful thrown from the same place on the same frame does not land in
+        // the first one's footprints.
+        const int seed     = static_cast<int>(pickup - pool_.data()) * 31 + i;
+        const float spread = Spray(seed);
+
+        pickup->at       = from;
+        pickup->velocity = {away * kThrowSpeed * (0.35f + 0.65f * spread),
+                            -kThrowLift * (0.6f + 0.5f * Spray(seed + 5))};
+        pickup->stack    = {.holds = stack.holds, .what = stack.what, .count = 1};
+        pickup->bornAt   = now;
+        pickup->holdFor  = kSettleDelay;
+        pickup->settled  = false;
+        pickup->live     = true;
     }
 }
 
-void Drops::Update(const World &world, Vector2 player, float dt, float now, Harvest &into) {
+void Drops::Toss(Stack stack, Vector2 from, Vector2 towards, float now) {
+    if (stack.Empty()) return;
+
+    Pickup *pickup = Claim();
+    if (pickup == nullptr) return;
+
+    const float dx = towards.x - from.x;
+    const float dy = towards.y - from.y;
+
+    const float distance = std::max(std::sqrt(dx * dx + dy * dy), 1e-3f);
+
+    // Aimed along the throw but always given some lift, so a stack thrown at the
+    // ground still leaves the hand on an arc. A throw that went straight down
+    // would land under the player's feet, which is where it was already.
+    pickup->at       = from;
+    pickup->velocity = {(dx / distance) * kTossSpeed, (dy / distance) * kTossSpeed - kTossLift};
+    pickup->stack    = stack;
+    pickup->bornAt   = now;
+    pickup->holdFor  = kThrownDelay;
+    pickup->settled  = false;
+    pickup->live     = true;
+}
+
+void Drops::Update(const World &world, Vector2 player, float dt, float now, Inventory &into) {
     for (Pickup &pickup : pool_) {
         if (!pickup.live) continue;
 
@@ -125,10 +171,19 @@ void Drops::Update(const World &world, Vector2 player, float dt, float now, Harv
 
         const float distance = std::max(std::sqrt(dx * dx + dy * dy), 1e-3f);
 
-        if (distance < kCollect) {
-            into[ItemIndex(pickup.item)]++;
-            pickup.live = false;
-            continue;
+        if (distance < kCollect && (now - pickup.bornAt) > pickup.holdFor) {
+            const int refused = into.Add(pickup.stack);
+
+            if (refused <= 0) {
+                pickup.live = false;
+                continue;
+            }
+
+            // Part of it went and the rest could not. What is left keeps lying
+            // there, still being drawn along, and goes in the moment a slot
+            // frees up — which is what a player emptying a full bag over a pile
+            // of ore expects to happen.
+            pickup.stack.count = refused;
         }
 
         // Drawn to a player who has come close, once it has had a moment to leave
@@ -139,7 +194,7 @@ void Drops::Update(const World &world, Vector2 player, float dt, float now, Harv
         // its first act, so the next frame fell through to gravity and the item
         // got one nudge per landing instead of a pull. What a player saw was a
         // thing stuttering towards them a hop at a time.
-        const bool drawn = (now - pickup.bornAt) > kSettleDelay && distance < kReach;
+        const bool drawn = (now - pickup.bornAt) > pickup.holdFor && distance < kReach;
 
         if (drawn) {
             const float share = 0.35f + 0.65f * (1.0f - distance / kReach);
@@ -213,23 +268,15 @@ void Drops::Draw(float now) const {
 
         if (remaining < kWarning && std::fmod(remaining, 0.36f) < 0.18f) continue;
 
-        const ItemDef &def = Def(pickup.item);
-
         const float pixel = config::kFloraPixel;
-        const float side  = kItemArt * pixel;
+        const float side  = kPictureSide * pixel;
 
-        const float left = Snap(pickup.at.x - side * 0.5f);
-        const float top  = Snap(pickup.at.y - side * 0.5f);
+        // Snapped to the world's own grid rather than to the pickup's position,
+        // so a pickup lying still does not crawl a texel as the view scrolls
+        // past it.
+        const Vector2 corner = {Snap(pickup.at.x - side * 0.5f), Snap(pickup.at.y - side * 0.5f)};
 
-        for (int row = 0; row < kItemArt; row++) {
-            for (int col = 0; col < kItemArt; col++) {
-                const char mark = def.art[row][col];
-                if (mark < 'a' || mark >= static_cast<char>('a' + kItemTones)) continue;
-
-                DrawRectangleV({left + static_cast<float>(col) * pixel, top + static_cast<float>(row) * pixel},
-                               {pixel, pixel}, def.tone[static_cast<std::size_t>(mark - 'a')]);
-            }
-        }
+        DrawPicture(PictureOf(pickup.stack), corner, pixel);
     }
 }
 

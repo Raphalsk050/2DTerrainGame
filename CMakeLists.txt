@@ -58,8 +58,11 @@ add_executable(${PROJECT_NAME}
     src/flora.cpp
     src/grove.cpp
     src/hotbar.cpp
+    src/inventory.cpp
+    src/backdrop.cpp
     src/light.cpp
     src/light_layer.cpp
+    src/picture.cpp
     src/liquid_layer.cpp
     src/player.cpp
     src/water.cpp

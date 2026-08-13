@@ -17,10 +17,13 @@
 
 #include "canopy.h"
 #include "config.h"
+#include "element.h"
 #include "flora.h"
 #include "item.h"
+#include "picture.h"
 #include "raylib.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -102,12 +105,31 @@ int main(int argc, char **argv) {
 
     const int rows = static_cast<int>(flora::kSpeciesCount);
 
-    // A band of its own under the species rows for the items. Drawn into the last
-    // row instead, it sat on top of the first plant there — the strip and the
-    // bush were in the same place and read as one overlapping mess.
-    const int strip = kItemArt * zoom * 2 + 24;
+    // Two bands of their own under the species rows: the items on the first, the
+    // materials as they appear in a slot on the second. Drawn into the last row
+    // instead, they sat on top of the first plant there — the strip and the bush
+    // were in the same place and read as one overlapping mess.
+    //
+    // The materials are here for the same reason the plants are. A block is
+    // thirty-six texels seen at the size of a thumbnail behind whatever the
+    // inventory is doing, and whether iron reads as different from copper is a
+    // question about the image, not about the table.
+    const int band  = kPictureSide * zoom * 2 + 12;
+    const int strip = band * 2 + 12;
 
-    Image sheet = GenImageColor(perSpecies * cellW, rows * cellH + strip, kBackdrop);
+    // Spaced by a whole picture and a half, so neighbours cannot touch even at
+    // the widest zoom.
+    const int step = (kPictureSide * zoom * 2) * 3 / 2;
+
+    // Wide enough for whichever is longer, the plants or the longer of the two
+    // strips. With one plant per species the species rows are narrower than the
+    // twelve materials, and the strip would otherwise run off the right-hand
+    // edge and be silently clipped — which looks exactly like a table with
+    // fewer materials in it than it has.
+    const int longest = 12 + static_cast<int>(std::max(kItemCount, kElementCount)) * step;
+    const int width   = std::max(perSpecies * cellW, longest);
+
+    Image sheet = GenImageColor(width, rows * cellH + strip, kBackdrop);
 
     std::vector<Color> pixels;
 
@@ -204,41 +226,44 @@ int main(int argc, char **argv) {
                     (area > 0) ? 100.0 * static_cast<double>(filled) / static_cast<double>(area) : 0.0);
     }
 
-    // A strip of the items along the bottom, at the same zoom. They are drawn
-    // from their own table rather than by canopy, so this is the only place they
-    // can be seen without felling a tree for each one.
+    // Strips of the items and of the materials along the bottom, at the same
+    // zoom. Both are drawn from their own tables rather than by canopy, so this
+    // is the only place they can be seen without felling a tree or digging a
+    // hole for each one.
     {
         auto *canvas = static_cast<Color *>(sheet.data);
 
-        const int side = kItemArt * zoom * 2;
-        const int base = rows * cellH + 12;
-
-        for (std::size_t i = 0; i < kItemCount; i++) {
-            const ItemDef &def = kItems[i];
-
-            // Spaced by a whole item and a half, so neighbours cannot touch even
-            // at the widest zoom.
-            const int originX = 12 + static_cast<int>(i) * (side * 3 / 2);
-
-            for (int row = 0; row < kItemArt; row++) {
-                for (int col = 0; col < kItemArt; col++) {
-                    const char mark = def.art[row][col];
-                    if (mark < 'a' || mark >= static_cast<char>('a' + kItemTones)) continue;
-
-                    const Color tone = def.tone[static_cast<std::size_t>(mark - 'a')];
+        // Written into the image a texel at a time rather than through
+        // DrawPicture, which paints through raylib and would need a graphics
+        // device this tool deliberately does not open. What the two share is
+        // ToneAt: the meaning of a character is in one place even though the
+        // drawing cannot be.
+        const auto blit = [&](const Picture &picture, int originX, int originY) {
+            for (int row = 0; row < kPictureSide; row++) {
+                for (int col = 0; col < kPictureSide; col++) {
+                    const Color *tone = ToneAt(picture, picture.art[row][col]);
+                    if (tone == nullptr) continue;
 
                     for (int qy = 0; qy < zoom * 2; qy++) {
                         for (int qx = 0; qx < zoom * 2; qx++) {
                             const int px = originX + col * zoom * 2 + qx;
-                            const int py = base + row * zoom * 2 + qy;
+                            const int py = originY + row * zoom * 2 + qy;
 
                             if (px < 0 || py < 0 || px >= sheet.width || py >= sheet.height) continue;
 
-                            canvas[static_cast<std::size_t>(py) * sheet.width + px] = tone;
+                            canvas[static_cast<std::size_t>(py) * sheet.width + px] = *tone;
                         }
                     }
                 }
             }
+        };
+
+        for (std::size_t i = 0; i < kItemCount; i++) {
+            blit(kItems[i].picture, 12 + static_cast<int>(i) * step, rows * cellH + 12);
+        }
+
+        for (std::size_t e = 0; e < kElementCount; e++) {
+            blit(PictureOf(kElements[e]), 12 + static_cast<int>(e) * step, rows * cellH + band + 12);
         }
     }
 

@@ -1,52 +1,59 @@
 #pragma once
 
-#include "element.h"
+#include "inventory.h"
 #include "raylib.h"
 
-#include <array>
-
-// Row of slots along the bottom of the screen, one per element, selecting what
-// the mouse places.
+// The row of slots along the bottom of the screen.
 //
-// Drawn in screen space, outside the camera transform, so it stays put while
-// the world scrolls underneath.
-class Hotbar {
-public:
-    // Number keys select a slot directly; the wheel steps through them.
-    void Update();
+// A view of the first nine slots of the inventory and nothing more: it holds no
+// stacks, and the slot it points at is the inventory's own. Before there was an
+// inventory this was a palette with one slot per material and an endless supply
+// behind each, which is a different idea wearing the same shape — what a player
+// can place is now only what a player has.
+//
+// A namespace rather than a class because there is no longer any state to keep.
+// Everything it draws it is handed, and where it draws is a function of the
+// frame as it is this instant, so that the bar stays under the middle of a
+// window that has been resized.
+namespace hotbar {
 
-    // `collected` is how much of each material has been dug out, shown on the
-    // slot it belongs to. The bar is where a player already looks for a
-    // material, so it is where the amount of it belongs too.
-    void Draw(const std::array<int, kElementCount> &collected) const;
+// Side of one slot, and the width of one texel of the picture inside it.
+//
+// Fixed, where the palette's had to shrink to fit twelve materials into the
+// narrowest window the game may be dragged to. Nine slots come to 456 pixels
+// against a floor of 640, so there is always room — and that is what lets the
+// texel be a whole number of screen pixels always. A picture authored on a
+// six-texel grid drawn at a fraction of a pixel comes out with its columns
+// alternating two pixels wide and three, which is the one thing that must never
+// happen to art of this size.
+inline constexpr float kSlotSide  = 44.0f;
+inline constexpr float kIconPixel = 6.0f;
 
-    Element Selected() const { return static_cast<Element>(selected_); }
+inline constexpr float kPadding = 6.0f;
+inline constexpr float kMargin  = 12.0f;
 
-    // True when a screen position lies on the bar. Callers test this before
-    // acting on a click, so selecting a slot does not also paint the world
-    // behind it.
-    bool Contains(Vector2 screen) const;
+// Number keys select a slot directly; the wheel steps through them.
+void Update(Inventory &inventory);
 
-private:
-    // The size a slot is drawn at when there is room for it, and the size below
-    // which its label stops being readable and the swatch stops being a swatch.
-    static constexpr float kSlotSize    = 52.0f;
-    static constexpr float kMinSlotSize = 28.0f;
+void Draw(const Inventory &inventory);
 
-    static constexpr float kPadding = 6.0f;
-    static constexpr float kMargin  = 12.0f;
+// Where the bar and its slots are, this frame.
+//
+// Public because the inventory panel draws the same nine slots as its own
+// bottom row and has to line them up with these; two independent layouts of one
+// row is two of them disagreeing by a pixel the first time either changes.
+Rectangle Bounds();
+Rectangle SlotBounds(int slot);
 
-    // What a slot is actually drawn at now.
-    //
-    // The bar holds one slot per material, and there are enough of them that at
-    // full size it is wider than the smallest window the game may be dragged to.
-    // Shrinking is the answer rather than scrolling or wrapping: a bar is read at
-    // a glance, and a slot that has to be found before it can be read is not a
-    // bar.
-    float SlotSize() const;
+// Draws one slot's worth of stack — the frame, the picture and the count.
+//
+// Shared with the panel for the same reason the bounds are: a slot in the grid
+// and a slot in the bar are the same thing seen twice, and the moment they are
+// drawn by two routines they start to look like two different things.
+void DrawSlot(const Stack &stack, Rectangle bounds, bool active);
 
-    Rectangle BarBounds() const;
-    Rectangle SlotBounds(int slot) const;
+// True when a screen position lies on the bar. Callers test this before acting
+// on a click, so selecting a slot does not also paint the world behind it.
+bool Contains(Vector2 screen);
 
-    int selected_ = 0;
-};
+} // namespace hotbar

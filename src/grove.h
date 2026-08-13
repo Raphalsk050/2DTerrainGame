@@ -40,7 +40,7 @@ public:
     // then runs what has been done to them: trees finishing their fall give up
     // their wood, pickups fall and are gathered into `into`, and records with
     // nothing left to say are dropped.
-    void Update(const World &world, Rectangle view, Vector2 player, float now, float dt, Harvest &into);
+    void Update(const World &world, Rectangle view, Vector2 player, float now, float dt, Inventory &into);
 
     // Offers every visible canopy to the light as shade, so a wood has a dark
     // floor. Re-offered each frame; see World::AddShade.
