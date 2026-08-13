@@ -40,6 +40,41 @@
 // state to keep and two views of the same world at the same moment agree.
 namespace weather {
 
+// How far the air carries a loose thing sideways over its own lifetime, in world
+// pixels, at the strongest gust the weather can produce.
+//
+// The one figure every particle in the world is blown by. Leaves off a crown,
+// leaves the year sheds, chips out of a trunk — each has its own weight, below,
+// and every one of them multiplies this. Turning the wind up or down in the world
+// is a change to this line and to nothing else, which is the whole reason it is
+// here rather than three constants in three files that happened to agree.
+//
+// Well over the width of a mature crown, and it has to be: a leaf that lands where
+// it was let go of has not been blown anywhere.
+inline constexpr float kCarry = 150.0f;
+
+// How readily one kind of loose thing takes the wind up, as a share of what a leaf
+// does. A leaf is the unit, because a leaf is the thing the figure above was set
+// against; anything denser than one is carried less.
+inline constexpr float kLeafDrag = 1.00f;
+inline constexpr float kChipDrag = 0.22f;
+
+// The sideways offset the air has given a particle, in world pixels.
+//
+// `push` is the wind where the particle is, as a share of the strongest gust —
+// Sky::PushAt, and nothing should be computing it any other way. `flown` is how
+// far through its own flight the particle is, in [0,1]. `drag` is one of the
+// weights above.
+//
+// Squared in `flown`, and that is the part worth keeping in one place: what is
+// being drawn is a thing picking the wind up, not one already travelling at its
+// speed. A leaf leaves the branch at whatever speed it was let go at and is moving
+// with the air by the time it lands, and a term linear in time reads instead as
+// the whole world sliding sideways.
+inline float Carry(float push, float flown, float drag) {
+    return push * kCarry * drag * flown * flown;
+}
+
 // Margin value the outside edge of a cloud sits at.
 //
 // The cloud grid holds a *margin* — how far the cloud field stands above the
@@ -786,6 +821,15 @@ public:
     // sway or a margin against, so nothing has to guess at the envelope.
     float WindReach() const;
 
+    // The same gust as a share of the strongest one there can be, in [-1,1].
+    //
+    // What everything blown about by the wind should actually read, and the reason
+    // it exists as one function: the two lines that turn a speed into a share were
+    // written out at every call site — the grass, the crowns, each kind of leaf —
+    // and a rule spelled out in five places is a rule that will one day mean five
+    // different things. Nothing outside this class should divide by WindReach.
+    float PushAt(float worldX) const;
+
     // How unsettled the weather is, in [0,1].
     //
     // Cover and rain together. Either alone gets it wrong in a way that shows:
@@ -815,6 +859,30 @@ public:
     // waiting a year for it. Negative clears.
     void ForceSeason(int index) { forcedSeason_ = index; }
     int ForcedSeason() const { return forcedSeason_; }
+
+    // Holds one kind of weather, for looking at one rather than waiting for it.
+    //
+    // The same hook ForceSeason is, and it exists for the same reason. Which
+    // weather is blowing is a pure function of the spell index and the world seed
+    // — deliberately, so the sequence never has to be stored — and the only way to
+    // see a storm is therefore to wait for the sky to offer one. That is no way to
+    // judge what a storm does, and everything a storm does is something to be
+    // judged by eye: the rain, the shade, the gusts, and everything blowing about
+    // in them.
+    //
+    // Negative hands the sky back to its own sequence, which is the state it
+    // starts in and the one the world is actually played in.
+    void ForceMood(int index) { forcedMood_ = (index >= 0) ? (index % kMoodCount) : -1; }
+    int ForcedMood() const { return forcedMood_; }
+
+    // Steps through the moods and then back to the sky's own weather, which is one
+    // more stop than there are moods.
+    void CycleMood() { forcedMood_ = (forcedMood_ + 2 > kMoodCount) ? -1 : forcedMood_ + 1; }
+
+    // What is blowing right now, by name. The forced mood where one is held, and
+    // otherwise whatever the spell is doing — including the name of the weather it
+    // is crossing into.
+    const char *MoodName() const { return now_.name; }
 
     // What a place gets on average: daylight over one whole turn of the day, and
     // rain over the moods in the table weighted by how often each comes up.
@@ -963,6 +1031,7 @@ private:
 
     // Which season is being held, or negative for whatever the clock says.
     int forcedSeason_ = -1;
+    int forcedMood_   = -1;
 
     // Derived from the clock by Advance. Held rather than recomputed because every
     // column asks for the same answer.

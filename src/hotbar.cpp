@@ -38,7 +38,7 @@ bool hotbar::Contains(Vector2 screen) {
     return CheckCollisionPointRec(screen, Bounds());
 }
 
-void hotbar::Update(Inventory &inventory) {
+void hotbar::Update(Inventory &inventory, bool wheelTaken) {
     // One through nine, which is exactly the bar now that it is nine slots
     // wide. The palette needed a tenth key for a tenth material and a rule about
     // what the ones past that did; there is nothing past this.
@@ -46,7 +46,7 @@ void hotbar::Update(Inventory &inventory) {
         if (IsKeyPressed(KEY_ONE + slot)) inventory.Select(slot);
     }
 
-    const float wheel = GetMouseWheelMove();
+    const float wheel = wheelTaken ? 0.0f : GetMouseWheelMove();
     if (wheel != 0.0f) inventory.Select(inventory.Selected() - static_cast<int>(wheel));
 
     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {

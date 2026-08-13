@@ -114,7 +114,14 @@ public:
     // the material ran out instead of continuing for free. It is tested before
     // anything is cleared, so the brush never digs out ground it cannot afford
     // to replace.
-    Stroke Place(Element element, Vector2 world, float radius, int budget);
+    //
+    // `keepClear` is a region no material a body cannot walk through may be laid
+    // in — the character's own body, in practice. Without it a player aiming at
+    // their own feet walls themselves in, and the ground they built is the one
+    // ground they cannot dig back out of, because a body already inside the rock
+    // is refused every move it tries to make. Liquids ignore it: standing in
+    // water is swimming and not being buried.
+    Stroke Place(Element element, Vector2 world, float radius, int budget, Rectangle keepClear = {});
 
     // Empties every vertex within `radius` and reports what came out. This is
     // the shape the mining action takes: the world performs the removal, the
@@ -222,6 +229,10 @@ public:
     // Holds the next season, and wraps back to whatever the clock says after the
     // fourth. For looking at the year before there is one.
     void CycleSeason() { sky_.ForceSeason((sky_.ForcedSeason() + 1) % 4); }
+
+    // Steps the weather through clear, fair, overcast, storm and back to the sky's
+    // own sequence. See weather::Sky::ForceMood.
+    void CycleWeather() { sky_.CycleMood(); }
 
     // How hard it is raining over a world position, in [0,1].
     //
@@ -376,7 +387,11 @@ private:
         std::optional<Element> element;
     };
 
+    // Two indices packed into one, for the maps keyed by a pair of them. Named
+    // for the chunk grid it was written for, and used unchanged for the lattice
+    // one that sown_ is kept on: a pair of ints is a pair of ints.
     static std::int64_t Key(int cx, int cy);
+    static void FromKey(std::int64_t key, int &outI, int &outJ);
 
     // Chunk coordinate containing a world position. Floor division, so it stays
     // correct left of and above the origin where truncation would round the
@@ -411,6 +426,18 @@ private:
     // rather than with the size of the view. So walking far enough from
     // something built and coming back found it gone.
     void Remember(Vector2 vertex, std::optional<Element> element);
+
+    // Notes that a lattice position was turned over by hand just now, so the
+    // grass over it has to be earned again rather than being there the moment the
+    // block lands.
+    //
+    // Every disturbed vertex and not one per column, because which of them is the
+    // one the grass would grow on is not knowable when the brush passes: filling a
+    // hole makes the highest vertex the new surface and digging a pit makes the
+    // lowest one, and the same column can be both within a stroke. ReadSod asks
+    // the question the other way round — it already knows where the surface is,
+    // and only has to ask whether the vertex sitting there was disturbed.
+    void Disturb(Vector2 vertex);
 
     // Replays every remembered edit that lands in a freshly generated chunk.
     //
@@ -459,7 +486,17 @@ private:
     // Both edits a brush can make. Placing clears the vertex first, so it is
     // the same edit as digging with a second half. `budget` bounds how many
     // vertices the placed material may newly take, and is ignored when digging.
-    Stroke ApplyBrush(Vector2 world, float radius, std::optional<Element> place, int budget);
+    // `keepClear` is the region solids may not be laid in — see Place.
+    Stroke ApplyBrush(Vector2 world, float radius, std::optional<Element> place, int budget, Rectangle keepClear);
+
+    // Whether the square a vertex owns meets a rectangle.
+    //
+    // The same square OverlapsSolid tests a body against, and deliberately the
+    // same test: a vertex it would report as overlapping the character is exactly
+    // a vertex nothing solid may be written to, and two different answers to one
+    // question is how a body ends up inside a block that was never meant to
+    // reach it.
+    bool VertexMeets(Vector2 vertex, Rectangle rect) const;
 
     // Signed margin by which the solids of at least `minPrecedence` fill each
     // vertex of a chunk: positive inside one of them, negative outside, and
@@ -521,6 +558,20 @@ private:
     // it. Called once a frame, before anything reads either.
     void ReadSod(Rectangle view);
 
+    // Takes the grass back off the columns whose earth was turned over lately, and
+    // lets it back on at the speed the front crosses them.
+    //
+    // Split out of ReadSod because it is a different question asked of the same
+    // band: that one works out where grass could grow, and this one works out
+    // where it has had the time to. Runs after it, and only ever subtracts.
+    //
+    // Run again by a brush that turned any earth over, which is what keeps a
+    // stroke from drawing one frame of grass on ground it has just dug: the band
+    // was worked out at the top of the frame and the stroke happens well after
+    // it. Idempotent, so running it twice over a frame costs a second pass and
+    // changes nothing else.
+    void ReadSown();
+
     // The field the grass is drawn from, derived from a chunk's own soil and from
     // the silhouette of the ground as a whole.
     //
@@ -573,6 +624,28 @@ private:
     // dropped. So unlike edits_, which only ever grows, this tracks what is
     // outstanding rather than everything that has ever happened.
     std::unordered_map<std::int64_t, float> mown_;
+
+    // The lattice positions a brush turned over, and when — bare earth, until
+    // grass reaches it.
+    //
+    // Kept on the same terms as mown_ above and for the same reason: an entry has
+    // something to say only until the ground there is as established as the ground
+    // around it, and then the world can describe it again on its own. That is what
+    // bounds this against edits_, which has to keep everything for ever.
+    std::unordered_map<std::int64_t, float> sown_;
+
+    // How fresh the turned earth is under each column of the band, on the plant
+    // grid ReadSod works in, and how far each column is from the nearest
+    // established grass.
+    //
+    // Held here rather than built per frame so the two vectors are allocated once.
+    // The second is the whole of the spreading: grass arrives at a column a delay
+    // after it arrived at the one beside it, so a filled hole greens from its rim
+    // inwards and the middle of a laid platform is the last of it to turn — which
+    // is what the ground does in Minecraft, and it is the reason a dirt block
+    // there is a thing you notice rather than a thing you never see.
+    std::vector<float> sodSown_;
+    std::vector<float> sodSpread_;
 
     // Occupying materials in ascending order of precedence. A chunk is carved
     // in this order so that when a material is clamped, everything that

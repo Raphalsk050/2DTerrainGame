@@ -161,6 +161,20 @@ Mood Sky::MoodOfSpell(long spell) const {
 }
 
 Weather Sky::WeatherAt(float seconds) const {
+    // Held at one kind of weather, with no spell and no crossing — see ForceMood.
+    // Taken before anything else, so the whole of the rest of this module goes on
+    // reading one weather and knows nothing about being held at it.
+    if (forcedMood_ >= 0) {
+        const MoodDef &held = settings_.moods[forcedMood_ % kMoodCount];
+
+        return {.name     = held.name,
+                .cover    = held.cover,
+                .rain     = held.rain,
+                .shade    = held.shade,
+                .sunlight = held.sunlight,
+                .ambient  = held.ambient};
+    }
+
     const float spellLength = std::max(settings_.spellMinutes, 0.1f) * 60.0f;
     const float crossLength = std::clamp(settings_.crossMinutes * 60.0f, 0.0f, spellLength);
 
@@ -703,6 +717,10 @@ float Sky::WindAt(float worldX) const {
 }
 
 float Sky::WindReach() const { return std::fabs(settings_.wind) * (1.0f + settings_.gust.strength); }
+
+float Sky::PushAt(float worldX) const {
+    return std::clamp(WindAt(worldX) / std::max(WindReach(), 1e-3f), -1.0f, 1.0f);
+}
 
 Sky::Season Sky::Turn() const {
     // Held, for looking at one season rather than waiting for it.

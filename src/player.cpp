@@ -92,9 +92,13 @@ void Player::UpdateAttack(const PlayerInput &input) {
 }
 
 void Player::UpdateVelocity(const PlayerInput &input, float dt) {
-    const float topSpeed = crouched_      ? player_config::kCrouchSpeed
-                           : IsSwimming() ? player_config::kSwimSpeed
-                                          : player_config::kRunSpeed;
+    // Walking or running on open ground, and neither once the stance or the water
+    // has taken the choice away: a crouch is slow because it is a crouch, and a
+    // stroke is as fast as a stroke is however hard the key is held.
+    float topSpeed = input.sprintHeld ? player_config::kSprintSpeed : player_config::kRunSpeed;
+
+    if (IsSwimming()) topSpeed = player_config::kSwimSpeed;
+    if (crouched_) topSpeed = player_config::kCrouchSpeed;
 
     const float accel       = grounded_ ? player_config::kGroundAccel : player_config::kAirAccel;
     const float targetSpeed = input.moveX * topSpeed;
@@ -151,7 +155,7 @@ void Player::TryJump(const PlayerInput &input) {
 }
 
 void Player::Fly(const PlayerInput &input, float dt) {
-    const float topSpeed = input.boostHeld ? player_config::kFlyBoostSpeed : player_config::kFlySpeed;
+    const float topSpeed = input.sprintHeld ? player_config::kFlyBoostSpeed : player_config::kFlySpeed;
 
     // Normalised, so travelling diagonally is not faster than travelling along
     // an axis.
@@ -235,7 +239,49 @@ bool Player::Sidestep(const World &terrain) {
     return false;
 }
 
+bool Player::Unstick(const World &terrain) {
+    // Whole pixels outwards, taking the first place that clears, so the body ends
+    // up against the face of whatever closed over it rather than a stride clear
+    // of it.
+    for (float out = 1.0f; out <= player_config::kUnstickReach; out += 1.0f) {
+        // Up first, and by a distance rather than in turn with the rest: ground
+        // grows from below in this world — a floor laid under the feet, a hill
+        // regenerated — so the sky is where the room is, and standing on top of
+        // what appeared is what the character would have done had it arrived a
+        // moment earlier.
+        //
+        // Then sideways, then down, which is the order of how much of a surprise
+        // each one is to somebody watching.
+        const Vector2 tries[] = {
+            {position_.x, position_.y - out},
+            {position_.x - out, position_.y},
+            {position_.x + out, position_.y},
+            {position_.x, position_.y + out},
+        };
+
+        for (const Vector2 &at : tries) {
+            if (terrain.OverlapsSolid(BodyRect(at, crouched_))) continue;
+
+            position_ = at;
+
+            // Whatever speed the body had belonged to a move that never happened.
+            // Carrying it out of the ground would fling the character off the
+            // block it was just freed from.
+            velocity_ = {};
+
+            return true;
+        }
+    }
+
+    return false;
+}
+
 void Player::MoveAndCollide(const World &terrain, float dt) {
+    // Freed before anything is asked of the move, because a body inside the
+    // ground has no move to make: every direction out of it is refused by the
+    // same test that should have let it go.
+    if (terrain.OverlapsSolid(Bounds())) Unstick(terrain);
+
     // Remembered before the move, because whether the body should be held against
     // the ground is a question about where it started, not where it ended up.
     // Walking off a step leaves it airborne by the time the move is over, which is
@@ -248,29 +294,48 @@ void Player::MoveAndCollide(const World &terrain, float dt) {
     const float distance = std::max(std::fabs(delta.x), std::fabs(delta.y));
     const int steps      = std::max(1, static_cast<int>(std::ceil(distance / maxStep)));
 
-    const Vector2 step = {delta.x / steps, delta.y / steps};
+    Vector2 step = {delta.x / steps, delta.y / steps};
 
     for (int s = 0; s < steps; s++) {
-        position_.x += step.x;
-        if (terrain.OverlapsSolid(Bounds())) {
+        // An axis that has hit something is retired for the rest of the move, and
+        // the other one carries on without it.
+        //
+        // This is the whole of what standing on the ground costs the character,
+        // and it used to cost the run itself: a blocked descent left the loop
+        // outright, and a body resting on the floor is blocked on its descent
+        // every single frame. What that abandoned was every sub-step of the
+        // horizontal move after the first — a run of two sub-steps delivered half
+        // its distance, one of three delivered a third, and since the count comes
+        // from the speed, asking the character to run faster bought almost
+        // nothing. The velocity was right the whole time and the body was moving
+        // at half of it, which is exactly what walking through glue feels like.
+        if (step.x != 0.0f) {
+            position_.x += step.x;
+
             // Blocked sideways, which on this terrain is usually a step rather
             // than a wall. Stopping the body outright is what made running across
             // open ground catch, so the ledge is tried first and only a genuine
             // wall takes the speed away.
-            if (!StepOver(terrain)) {
+            if (terrain.OverlapsSolid(Bounds()) && !StepOver(terrain)) {
                 position_.x -= step.x;
                 velocity_.x = 0.0f;
+                step.x      = 0.0f;
             }
         }
 
-        position_.y += step.y;
-        if (terrain.OverlapsSolid(Bounds())) {
-            if (!Sidestep(terrain)) {
+        if (step.y != 0.0f) {
+            position_.y += step.y;
+
+            if (terrain.OverlapsSolid(Bounds()) && !Sidestep(terrain)) {
                 position_.y -= step.y;
                 velocity_.y = 0.0f;
-                break;
+                step.y      = 0.0f;
             }
         }
+
+        // Nothing left to move on either axis, which is what the old loop left
+        // early for and the only thing it was right to leave early for.
+        if (step.x == 0.0f && step.y == 0.0f) break;
     }
 
     // Probed separately rather than inferred from the collision above: gravity

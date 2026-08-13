@@ -59,8 +59,11 @@ public:
 
     // Leaves coming off the crowns, over the plants and inside the light.
     //
-    // A field rather than a particle system: see the constants beside it. The
-    // season decides how hard the wood is shedding.
+    // Two kinds, drawn together because they are the same thing to look at. The
+    // drift is a field rather than a particle system — see the constants beside it
+    // — and the season decides how hard the wood is shedding. The bursts are what
+    // an axe knocks loose, and they run whatever the season is: a tree taking a
+    // blow in January still sheds.
     void DrawLeaves(const weather::Sky &sky, flora::Season season, Rectangle view, float now) const;
 
     // The whole sheet, at one screen pixel per texel, for checking that what was
@@ -89,7 +92,11 @@ public:
     //
     // Reported for the reason World::RememberedEdits is: it is the price of the
     // wood remembering what was done to it, and it should be visible rather than
-    // suspected. Unlike the edits, it goes back down — see TreeState.
+    // suspected.
+    //
+    // It goes back down for a plant that healed and stayed standing, and never
+    // for one that came down: a felled cell has to be remembered for good or the
+    // tree grows back in it. See Forget.
     int RememberedPlants() const { return static_cast<int>(remembered_.size()); }
 
     const Drops &Fallen() const { return drops_; }
@@ -113,9 +120,23 @@ private:
     // record means a mature, undamaged tree**, and that is the case for every
     // tree in the world at the start.
     //
-    // It also gives records back, which World::edits_ does not: once a felled
-    // tree has regrown there is nothing to remember about it, so the entry is
-    // dropped and the procedural pass answers for it again.
+    // It gives records back where it can: a tree that was struck and left to heal
+    // ends up indistinguishable from one nobody touched, so its entry goes and the
+    // procedural pass answers for it again. A felled one never can — the absence
+    // of a tree is exactly what an absent record cannot say — so those are kept
+    // for good, on the same terms as World::edits_.
+    // How many blows a plant remembers for the sake of what came off it.
+    //
+    // Three. A burst of leaves lasts a little under a second and the swing itself
+    // cannot repeat faster than about a third of one, so three is exactly as many
+    // as can ever be in the air at once.
+    //
+    // A single timestamp was not enough, and the fault was plain to watch: each
+    // blow overwrote the last, so the leaves already falling from the previous one
+    // jumped back into the crown and started again. What a second blow does is add
+    // leaves to the air, not replace the ones in it.
+    static constexpr int kBlows = 3;
+
     struct TreeState {
         // Seconds on the weather clock. Negative means never.
         float plantedAt = -1.0f;
@@ -124,11 +145,23 @@ private:
         float felledAt  = -1.0f;
         float fruitAt   = -1.0f;
 
+        // When the last few blows landed, as a ring. `struckAt` above is the
+        // newest of them and is what the wound and the wobble are measured from;
+        // these are what is still in the air.
+        float blowAt[kBlows] = {-1.0f, -1.0f, -1.0f};
+        int blowSlot         = 0;
+
         // Towards mature, in [0,1]. One for anything the world grew itself.
         float growth = 1.0f;
 
         // Share of its toughness left, in [0,1].
         float health = 1.0f;
+
+        // And of the stump's, once the tree is down. Kept apart from the trunk's
+        // own because they are two things to cut through: felling the tree spends
+        // the first and leaves the second untouched, which is what makes a stump
+        // a second job rather than a leftover.
+        float stumpHealth = 1.0f;
 
         // Which way it went over. Held rather than recomputed because the player
         // moves, and a tree halfway down must not change its mind.
@@ -136,6 +169,13 @@ private:
 
         // Whether it has already given up its wood. An impact happens once.
         bool dropped = false;
+
+        // Whether the stump has been cut out too, leaving bare ground.
+        //
+        // The record outlives it, and has to: a plant with no record is a mature
+        // tree, so forgetting a cleared cell is the same as growing the tree back
+        // in it. This is the one bit that has to be kept for good — see Forget.
+        bool cleared = false;
 
         // Only meaningful for a plant the overlay asserts rather than modifies —
         // one somebody put there, which the procedural pass knows nothing about.
@@ -152,15 +192,35 @@ private:
         flora::Stage stage = flora::Stage::Mature;
         float shake        = 0.0f;  // Horizontal wobble from a recent blow, in world px.
         float felling      = -1.0f; // Seconds into its fall, or negative if upright.
-        float fade         = 1.0f;  // What is left of it while it lies there.
+        float fade         = 1.0f;  // What is left of the trunk as it goes.
         bool fallLeft      = false;
         bool stump         = false; // Down and gone; only the cut trunk is left.
+        bool cleared       = false; // And the stump cut out after it: nothing there.
+
+        // Seconds since the last blow landed, or negative if it has never been
+        // struck. Distinct from `shake`, which is what that blow does to a crown:
+        // a stump has no crown, and what a blow does to one is its own thing.
+        float struck = -1.0f;
+
+        // How far through the stump the axe has got, in [0,1]. What every blow so
+        // far adds up to, as against the one jolt the last of them caused.
+        float wear = 0.0f;
     };
 
     Standing Read(const flora::Plant &plant, float now) const;
 
-    // What is left where a tree came down.
-    void DrawStump(const flora::Plant &plant) const;
+    // What is left where a tree came down, as the rectangle it occupies.
+    //
+    // One answer for both the drawing and the axe. Two would be two of them
+    // disagreeing the first time either changes, and a stump that cannot be hit
+    // where it is drawn is a stump the player decides is unbreakable.
+    // `stage` is how far along the tree was when it came down — a stump is the
+    // foot of the tree that stood there, not of the tree it would have become.
+    Rectangle StumpRect(const flora::Plant &plant, flora::Stage stage) const;
+
+    // `standing` is what carries the blow: how long ago the axe landed, and how
+    // far through the stump it has got.
+    void DrawStump(const flora::Plant &plant, const Standing &standing) const;
 
     // The record for a plant, made if there is not one yet.
     TreeState &Remember(const flora::Plant &plant, float now);
@@ -172,7 +232,13 @@ private:
     // Throws a felled plant's drop table onto the ground. Resolved from the
     // plant's own cell, so the same tree always gives the same wood however many
     // times it is grown and cut.
-    void Yield(const flora::Plant &plant, const TreeState &state, float now);
+    //
+    // `share` scales every count, and `woodOnly` drops everything but the timber:
+    // together they are what a cleared stump gives. A stump is the bottom of the
+    // trunk and nothing else, so it cannot hand over the apples and the saplings
+    // that were in the crown — those came down with the tree.
+    void Yield(const flora::Plant &plant, const TreeState &state, float now, float share = 1.0f,
+               bool woodOnly = false);
 
     // Advances every growing plant in view to `now`.
     //
@@ -196,6 +262,49 @@ private:
 
     // Clears the undergrowth out of the trunks and thins it by the shade over it.
     void Thin();
+
+    // The two halves of DrawLeaves: the year's own shedding, and what has been
+    // knocked out of a crown lately.
+    void DrawDrift(const weather::Sky &sky, flora::Season season, Rectangle view, float now) const;
+    void DrawBurst(const weather::Sky &sky, flora::Season season, float now) const;
+
+    // Records a blow against a plant, for the wound, the wobble and the leaves.
+    void Blow(TreeState &state, float now) const;
+
+    // The chips an axe throws out of the wood it lands in, `since` seconds after
+    // the blow. Bark rather than leaves, and thrown from where the axe struck
+    // rather than off the crown.
+    void Chips(const flora::Plant &plant, Vector2 at, float since, int salt, float push) const;
+
+    // One burst of leaves off a crown, and the few things that separate an axe
+    // landing in a trunk from a whole tree landing on the ground.
+    struct Burst {
+        float since = 0.0f; // Seconds since the leaves were knocked loose.
+        int rounds  = 1;    // How many times over kBurstLeaves is thrown.
+
+        // Keeps the two bursts one tree can throw from being the same leaves
+        // twice: everything about a leaf is hashed out of the plant's id, so two
+        // bursts with one salt are one burst drawn twice.
+        int salt = 0;
+
+        // Where the crown is when it sheds. Zero is a standing tree; a felled one
+        // is laid over by the same angle the fall drew it at, so the leaves come
+        // off the crown where the crown actually is rather than where the tree
+        // used to be standing.
+        float angle = 0.0f;
+
+        // How hard they leave it. A blow shakes them loose; the ground throws
+        // them.
+        float vigour = 1.0f;
+
+        // What the wind does to them on the way down, as a share of the strongest
+        // gust. A leaf off a crown is in the same air as one the year shed, and
+        // the two have to be carried by it alike or the burst reads as debris
+        // falling through a still room.
+        float wind = 0.0f;
+    };
+
+    void Spray(const flora::Plant &plant, flora::Season season, const Burst &burst) const;
 
     // The averages the off-screen rate is credited at. Measured from the sky once,
     // at Configure.

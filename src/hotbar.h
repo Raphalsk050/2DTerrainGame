@@ -33,7 +33,12 @@ inline constexpr float kPadding = 6.0f;
 inline constexpr float kMargin  = 12.0f;
 
 // Number keys select a slot directly; the wheel steps through them.
-void Update(Inventory &inventory);
+//
+// `wheelTaken` says the wheel belongs to somebody else this frame — the view,
+// while the zoom modifier is held. Told rather than worked out here, so that the
+// two readers of one control cannot come to different conclusions about who has
+// it.
+void Update(Inventory &inventory, bool wheelTaken);
 
 void Draw(const Inventory &inventory);
 

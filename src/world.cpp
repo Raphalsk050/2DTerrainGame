@@ -553,6 +553,24 @@ void World::Remember(Vector2 vertex, std::optional<Element> element) {
     bucket.push_back({i, j, element});
 }
 
+void World::FromKey(std::int64_t key, int &outI, int &outJ) {
+    outI = static_cast<int>(key >> 32);
+    outJ = static_cast<int>(static_cast<std::uint32_t>(key));
+}
+
+void World::Disturb(Vector2 vertex) {
+    const float step = static_cast<float>(spacing_);
+
+    const int i = static_cast<int>(std::lround(vertex.x / step));
+    const int j = static_cast<int>(std::lround(vertex.y / step));
+
+    // Overwritten rather than kept alongside, so turning the same ground over
+    // twice starts the clock again instead of leaving the first record to expire
+    // on its own. Which is what happens out in the world: ground disturbed again
+    // is disturbed ground, however established it had become.
+    sown_[Key(i, j)] = sky_.Time();
+}
+
 void World::ApplyEdits(Chunk &chunk, int cx, int cy) const {
     if (edits_.empty()) return;
 
@@ -655,6 +673,10 @@ void World::Reset() {
     // The edits too, or the world would come back with everything ever built in
     // it still standing. Regenerating means from the noise alone.
     edits_.clear();
+
+    // And what was outstanding about them. A world with nothing built in it has
+    // no turned earth waiting to green over.
+    sown_.clear();
 }
 
 int World::PinnedChunks() const {
@@ -908,8 +930,39 @@ bool World::ClearVertex(Vector2 vertex, Yield &yield) {
     return removed;
 }
 
-World::Stroke World::ApplyBrush(Vector2 world, float radius, std::optional<Element> place, int budget) {
+bool World::VertexMeets(Vector2 vertex, Rectangle rect) const {
+    // Empty stands for "nothing to keep clear", which is what a caller with no
+    // body to protect passes. Tested rather than assumed, since a zero-width
+    // rectangle at the origin would otherwise still claim the vertices around it.
+    if (rect.width <= 0.0f || rect.height <= 0.0f) return false;
+
+    const float half = static_cast<float>(spacing_) / 2.0f;
+
+    if (vertex.x + half < rect.x || vertex.x - half > rect.x + rect.width) return false;
+    if (vertex.y + half < rect.y || vertex.y - half > rect.y + rect.height) return false;
+
+    return true;
+}
+
+World::Stroke World::ApplyBrush(Vector2 world, float radius, std::optional<Element> place, int budget,
+                                Rectangle keepClear) {
     Stroke edit{};
+
+    // Whether the stroke changed any ground at all, which is what the grass has
+    // to be told about. Every way out of the loop below goes through `finish`, so
+    // the telling cannot be skipped by the budget running out mid-stroke.
+    bool turned = false;
+
+    const auto finish = [&] {
+        // The band was worked out at the top of the frame, before this stroke
+        // existed. Left alone it would draw one frame of established grass over
+        // ground the stroke has just turned over — and since a held brush turns
+        // fresh ground every frame it moves, that single frame is a green fringe
+        // running along the leading edge of the stroke for as long as it is swept.
+        if (turned) ReadSown();
+
+        return edit;
+    };
 
     const Rectangle brush = {world.x - radius, world.y - radius, radius * 2.0f, radius * 2.0f};
 
@@ -931,7 +984,7 @@ World::Stroke World::ApplyBrush(Vector2 world, float radius, std::optional<Eleme
             if (place.has_value() && Def(*place).rules.flows) {
                 if (OccupantAt(vertex).has_value()) continue;
 
-                if (edit.filled >= budget) return edit;
+                if (edit.filled >= budget) return finish();
 
                 WriteVertex(*place, vertex, water::kMaxMass);
                 edit.filled++;
@@ -939,6 +992,13 @@ World::Stroke World::ApplyBrush(Vector2 world, float radius, std::optional<Eleme
             }
 
             if (place.has_value()) {
+                // Not into the character standing there. Skipped outright rather
+                // than refused as a stroke, so a brush wider than the body still
+                // lays the ground around the feet and only leaves the body's own
+                // room out of it — which is what a player aiming down at their own
+                // feet to build a floor is asking for.
+                if (Def(*place).rules.blocksBodies && VertexMeets(vertex, keepClear)) continue;
+
                 // Whether this vertex is one the material does not already hold.
                 // Only those are paid for, and only those may exhaust the
                 // budget: a stroke laid over its own work costs nothing because
@@ -949,7 +1009,7 @@ World::Stroke World::ApplyBrush(Vector2 world, float radius, std::optional<Eleme
                 // vertex and then finds there is nothing left to fill it with,
                 // which leaves a hole the player was never charged for and never
                 // asked for.
-                if (gained && edit.filled >= budget) return edit;
+                if (gained && edit.filled >= budget) return finish();
 
                 // What the vertex gave up, except any of the material now going
                 // into it.
@@ -972,6 +1032,22 @@ World::Stroke World::ApplyBrush(Vector2 world, float radius, std::optional<Eleme
                 MarkEdited(vertex);
                 Remember(vertex, *place);
 
+                // Only where the vertex actually changed hands, and only for the
+                // one material grass grows on. A brush swept back over its own
+                // wall gains nothing, and a stroke held over the same spot would
+                // otherwise keep resetting the clock on ground it was not
+                // changing — so grass could never take under a player standing
+                // still with the button down.
+                //
+                // Laying anything else over a lawn already puts the grass out, by
+                // the ordinary rule that what the surface holds is what grows
+                // there; digging that same block back off is what starts the
+                // clock, and the other hand below is where that is noted.
+                if (gained && *place == Element::Soil) {
+                    Disturb(vertex);
+                    turned = true;
+                }
+
                 if (gained) edit.filled++;
                 continue;
             }
@@ -983,19 +1059,46 @@ World::Stroke World::ApplyBrush(Vector2 world, float radius, std::optional<Eleme
             // sky has not changed the world and must not be remembered as
             // having: the memory is what makes an edit outlive its chunk, and it
             // is the one thing here that never shrinks.
-            if (ClearVertex(vertex, edit.freed)) Remember(vertex, std::nullopt);
+            //
+            // The earth a dig uncovered is turned earth as much as the earth a
+            // hand laid, so it is noted on the same terms: the floor of a scoop
+            // taken out of a hillside was inside the ground a moment ago, and
+            // grass has to reach it the way it reaches anything else.
+            //
+            // Where there is soil to uncover, and nowhere else. Read before the
+            // vertex is emptied, since afterwards there is nothing left to ask.
+            // Either the vertex is soil, which a dig into a hillside takes and
+            // leaves more of underneath, or the one below it is, which is a dig
+            // taking the last of whatever was standing on a lawn.
+            //
+            // What this spares is the mine. A tunnel driven through rock turns
+            // over hundreds of vertices a second, not one of which any grass will
+            // ever stand on, and every one of them would otherwise be carried in
+            // the record and walked over once a frame until it expired.
+            const bool overSoil = ValueAt(Element::Soil, vertex) > Def(Element::Soil).threshold
+                               || ValueAt(Element::Soil, {vertex.x, vertex.y + step}) > Def(Element::Soil).threshold;
+
+            if (ClearVertex(vertex, edit.freed)) {
+                Remember(vertex, std::nullopt);
+
+                if (overSoil) {
+                    Disturb(vertex);
+                    turned = true;
+                }
+            }
         }
     }
 
-    return edit;
+    return finish();
 }
 
-World::Stroke World::Place(Element element, Vector2 world, float radius, int budget) {
-    return ApplyBrush(world, radius, element, budget);
+World::Stroke World::Place(Element element, Vector2 world, float radius, int budget, Rectangle keepClear) {
+    return ApplyBrush(world, radius, element, budget, keepClear);
 }
 
 World::Stroke World::Excavate(Vector2 world, float radius) {
-    return ApplyBrush(world, radius, std::nullopt, 0);
+    // Nothing to keep clear: digging can only ever make room.
+    return ApplyBrush(world, radius, std::nullopt, 0, {});
 }
 
 void World::StepWater(Rectangle active) {
@@ -1480,6 +1583,13 @@ void World::ReadSod(Rectangle view) {
     // column they grew in and the band is drawn a whole chunk at a time.
     constexpr float kMargin = 256.0f;
 
+    // And because the grass spreading across turned earth measures how far it is
+    // from grass that is already there, over this same band. A reach wider than
+    // the margin would have a column on screen find a source only once the view
+    // had scrolled far enough to include it, so how long it took the grass to
+    // arrive would depend on where the player was standing.
+    static_assert(sod::kCreepReach <= kMargin, "the creep must be measurable inside the band it is measured over");
+
     sodFirstColumn_ = static_cast<int>(std::floor((view.x - kMargin) / step));
 
     const int columns = static_cast<int>(std::ceil((view.width + 2.0f * kMargin) / step)) + 2;
@@ -1524,6 +1634,8 @@ void World::ReadSod(Rectangle view) {
             sodTop_.clear();
             sodPush_.clear();
             sodStanding_.clear();
+            sodSown_.clear();
+            sodSpread_.clear();
 
             return;
         }
@@ -1534,10 +1646,13 @@ void World::ReadSod(Rectangle view) {
     sodTop_.assign(static_cast<std::size_t>(columns), 0.0f);
     sodPush_.assign(static_cast<std::size_t>(columns), 0.0f);
 
+    // Negative for ground nobody has touched, which is every column until a brush
+    // says otherwise.
+    sodSown_.assign(static_cast<std::size_t>(columns), -1.0f);
+
     const weather::Sky::Season turn = sky_.Turn();
     const auto season               = static_cast<flora::Season>(turn.index % flora::kSeasonCount);
 
-    const float reach = std::max(sky_.WindReach(), 1e-3f);
 
     for (int i = 0; i < columns; i++) {
         const float x = static_cast<float>(sodFirstColumn_ + i) * step;
@@ -1549,7 +1664,7 @@ void World::ReadSod(Rectangle view) {
         // on a still day and near its limit in a storm. Per column rather than
         // per view, because a gust is a wave crossing the world and the whole
         // point of it is that it arrives somewhere before it arrives everywhere.
-        sodPush_[static_cast<std::size_t>(i)] = std::clamp(sky_.WindAt(x) / reach, -1.0f, 1.0f);
+        sodPush_[static_cast<std::size_t>(i)] = sky_.PushAt(x);
 
         float top   = 0.0f;
         float cover = 0.0f;
@@ -1568,6 +1683,8 @@ void World::ReadSod(Rectangle view) {
         sodCover_[static_cast<std::size_t>(i)] = cover;
     }
 
+    ReadSown();
+
     // Then the tufts' own grid, which is a different one — see Blades::standing.
     sodFirstCell_ = static_cast<std::int64_t>(std::floor(static_cast<float>(sodFirstColumn_) * step / sod::kTuftSpan));
 
@@ -1575,28 +1692,129 @@ void World::ReadSod(Rectangle view) {
 
     sodStanding_.assign(static_cast<std::size_t>(cells), 1.0f);
 
-    const float now    = sky_.Time();
-    const float regrow = std::max(sod::kMowMinutes * 60.0f, 1e-3f);
+    // Cut grass is gone, and stays gone.
+    //
+    // It used to grow back on a timer, which made a field of grass an endless
+    // supply of fibre to anybody willing to stand in it and keep swinging — and
+    // the timer was not even the thing that let them: a cut tuft was left as
+    // stubble, and stubble is still a tuft, so the same patch could be harvested
+    // again on the very next swing without waiting for anything.
+    //
+    // Both are the same mistake, which is treating a cut as damage to a plant that
+    // is still there. It is not: the plant has been taken. What puts grass back is
+    // something the player does — a bonemeal, when there is one — and until then
+    // an empty patch is a record of what was cleared, kept for good on the same
+    // terms as a felled tree and a hand-laid block.
+    for (const auto &[cell, at] : mown_) {
+        const std::int64_t index = cell - sodFirstCell_;
 
-    for (auto it = mown_.begin(); it != mown_.end();) {
-        const float grown = std::clamp((now - it->second) / regrow, 0.0f, 1.0f);
+        if (index >= 0 && index < cells) sodStanding_[static_cast<std::size_t>(index)] = 0.0f;
+    }
+}
 
-        // A tuft that is back has nothing left to say about itself, so the record
-        // is dropped and the procedural answer stands again. This is what keeps
-        // the cost of mowing a field proportional to what is still short rather
-        // than to everything that was ever cut.
-        if (grown >= 1.0f) {
-            it = mown_.erase(it);
+void World::ReadSown() {
+    const auto span = sodSown_.size();
+    if (span == 0) return;
+
+    const int columns = static_cast<int>(span);
+    const float step  = config::kFloraPixel;
+
+    const float now = sky_.Time();
+
+    const float take = std::max(sod::kTakeMinutes * 60.0f, 1e-3f);
+    const float half = static_cast<float>(spacing_) / 2.0f;
+
+    // Which columns of the band are standing on earth that was turned over, and
+    // when it was.
+    //
+    // Walked from the record rather than looked up per column, the way the mowing
+    // is: the record holds what the player has changed lately and nothing else, so
+    // this costs what has been dug rather than what is on screen. A world nobody
+    // has touched pays for an empty loop.
+    for (auto it = sown_.begin(); it != sown_.end();) {
+        // Long enough ago that the front has reached anywhere it was ever going
+        // to. Dropping it is what keeps the record the size of the outstanding
+        // work instead of the size of everything ever dug.
+        if (now - it->second >= sod::kSettleSeconds) {
+            it = sown_.erase(it);
             continue;
         }
 
-        const std::int64_t at = it->first - sodFirstCell_;
+        int i = 0;
+        int j = 0;
+        FromKey(it->first, i, j);
 
-        if (at >= 0 && at < cells) {
-            sodStanding_[static_cast<std::size_t>(at)] = sod::kStubble + (1.0f - sod::kStubble) * grown;
+        const float vx = static_cast<float>(i) * static_cast<float>(spacing_);
+        const float vy = static_cast<float>(j) * static_cast<float>(spacing_);
+
+        // The plant-grid columns this lattice vertex stands under. A vertex owns
+        // half a lattice step either side of itself, which at six pixels against
+        // two is three of them.
+        const int from = static_cast<int>(std::ceil((vx - half) / step)) - sodFirstColumn_;
+        const int to   = static_cast<int>(std::floor((vx + half) / step)) - sodFirstColumn_;
+
+        for (int c = std::max(from, 0); c <= std::min(to, columns - 1); c++) {
+            const float top = sodTop_[static_cast<std::size_t>(c)];
+
+            // Only where this vertex is the ground the grass would be growing on.
+            //
+            // Without the test a tunnel dug a long way under a meadow would strip
+            // the meadow of its grass, because the column it was dug in is the
+            // column the meadow stands in. The band runs from a lattice step above
+            // the surface — a scoop taken out of a hillside leaves the vertex it
+            // removed just over the floor it exposed — down to the depth a sod
+            // reaches, which is as far as any of this can matter.
+            if (vy < top - static_cast<float>(spacing_) || vy > top + sod::kSodDepth) continue;
+
+            // The latest disturbance wins, so ground turned over twice is as new as
+            // the second time.
+            sodSown_[static_cast<std::size_t>(c)] = std::max(sodSown_[static_cast<std::size_t>(c)], it->second);
         }
 
         ++it;
+    }
+
+    // How far each column is from grass that is already established, in world
+    // pixels, as two sweeps across the band.
+    //
+    // A column that is waiting for nothing and does carry grass is a source and
+    // sits at zero; everything else takes its distance from the nearer of its two
+    // sides. Bare rock and open sky are neither sources nor walls — the front
+    // crosses them and arrives on the far side, which is the answer that stays
+    // sane when a player bridges a gap and then fills it in.
+    sodSpread_.assign(span, sod::kCreepReach);
+
+    const auto established = [this](std::size_t c) { return sodSown_[c] < 0.0f && sodCover_[c] > 0.0f; };
+
+    float reach = sod::kCreepReach;
+
+    for (std::size_t c = 0; c < span; c++) {
+        reach         = established(c) ? 0.0f : std::min(reach + step, sod::kCreepReach);
+        sodSpread_[c] = reach;
+    }
+
+    reach = sod::kCreepReach;
+
+    for (std::size_t c = span; c-- > 0;) {
+        reach         = established(c) ? 0.0f : std::min(reach + step, sod::kCreepReach);
+        sodSpread_[c] = std::min(sodSpread_[c], reach);
+    }
+
+    // And what that comes to on the ground: the front arrives after the time it
+    // takes to travel there, and the grass then takes hold over kTakeMinutes.
+    //
+    // Held against the cover rather than replacing it, so nothing here can grow
+    // grass where there was none to grow — a column of bare rock the player turned
+    // over is bare rock still, and this only ever takes away.
+    const float creep = std::max(sod::kCreepPerMinute, 1e-3f);
+
+    for (std::size_t c = 0; c < span; c++) {
+        if (sodSown_[c] < 0.0f) continue;
+
+        const float arrives = sodSpread_[c] / creep * 60.0f;
+        const float taken   = std::clamp((now - sodSown_[c] - arrives) / take, 0.0f, 1.0f);
+
+        sodCover_[c] = std::min(sodCover_[c], taken);
     }
 }
 
@@ -1666,12 +1884,20 @@ int World::MowGrass(Rectangle hitbox, float now) {
     constexpr int kRoom = 16;
 
     std::int64_t cut[kRoom];
+    bool ripe[kRoom];
 
-    const int taken = sod::Cut(Grass(), hitbox, settings_.seed, cut, kRoom);
+    const int taken = sod::Cut(Grass(), hitbox, settings_.seed, cut, ripe, kRoom);
 
-    for (int i = 0; i < taken; i++) mown_[cut[i]] = now;
+    int paid = 0;
 
-    return taken;
+    for (int i = 0; i < taken; i++) {
+        mown_[cut[i]] = now;
+
+        // Cleared either way; paid for only where the grass had finished growing.
+        if (ripe[i]) paid++;
+    }
+
+    return paid;
 }
 
 float World::CoverDepth(float worldX, float surfaceY) const {

@@ -390,7 +390,7 @@ void DrawTufts(const Blades &ground, Rectangle view, float now, int seed) {
     }
 }
 
-int Cut(const Blades &ground, Rectangle hitbox, int seed, std::int64_t *into, int room) {
+int Cut(const Blades &ground, Rectangle hitbox, int seed, std::int64_t *into, bool *ripe, int room) {
     if (ground.Empty() || room <= 0) return 0;
 
     const float pixel = config::kFloraPixel;
@@ -417,7 +417,15 @@ int Cut(const Blades &ground, Rectangle hitbox, int seed, std::int64_t *into, in
 
         const Rectangle tuft = {baseX - kTuftSpan * 0.5f, foot - tall, kTuftSpan, tall};
 
-        if (CheckCollisionRecs(hitbox, tuft)) into[taken++] = cell;
+        if (!CheckCollisionRecs(hitbox, tuft)) continue;
+
+        // Grow has already refused a cell whose tuft is gone, so anything reaching
+        // here is grass that is standing — which is what stops one patch of ground
+        // being harvested twice.
+        into[taken] = cell;
+        ripe[taken] = at.cover >= kRipe;
+
+        taken++;
     }
 
     return taken;

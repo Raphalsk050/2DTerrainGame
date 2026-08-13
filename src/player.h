@@ -17,6 +17,21 @@ inline constexpr float kCrouchSpeed = 90.0f;
 inline constexpr float kGroundAccel = 2200.0f; // Pixels per second squared.
 inline constexpr float kAirAccel    = 1200.0f; // Reduced control while airborne.
 
+// Held speed, on the shift key.
+//
+// A little over one and a half times the walk, which is the ratio a pair of
+// Terraria's boots gives and is about the smallest one that reads as a different
+// gait rather than as the same one tuned up. It is also what makes the jump worth
+// running into: the arc lasts six tenths of a second whatever the speed, so a
+// standing jump carries the body 132 pixels and a sprinting one 228 — the
+// difference between clearing a hole and landing in it.
+//
+// Measured against the frame rather than against the character, because what a
+// player is actually asking for when they ask to run is to spend less time
+// crossing ground they have already seen: at this speed the thousand pixels of
+// the window go by in two and a half seconds instead of four and a half.
+inline constexpr float kSprintSpeed = 380.0f;
+
 inline constexpr float kGravity      = 1600.0f;
 inline constexpr float kMaxFallSpeed = 900.0f;
 
@@ -52,6 +67,22 @@ inline constexpr float kSnapDistance = 14.0f;
 // vertex, which is unreadable: nothing visible was in the way. Under half the body
 // width, so it can never move the character somewhere it could not already stand.
 inline constexpr float kCornerNudge = 5.0f;
+
+// How far the body is carried to get out of ground that closed around it.
+//
+// Nothing in ordinary play puts a body inside rock — the brush now refuses to
+// lay a block where the character is standing, which is where this used to come
+// from — but a few paths still can: leaving free flight inside a hill, a chunk
+// regenerating under a body resting on it, liquid turning to something solid.
+// Every one of them ends the same way if nothing catches it, because a body
+// already overlapping is blocked whichever direction it tries, so it is not stuck
+// in the ground so much as stuck against every wall of it at once.
+//
+// Two body heights, and no further. What this is for is the pixel or the block
+// that closed over the character, not tunnelling out of a mountain: past this
+// distance the honest answer is that the character is buried, and lifting one out
+// of solid rock across half a screen would be a worse surprise than the burial.
+inline constexpr float kUnstickReach = 2.0f * kHeight;
 
 // A jump still fires this long after walking off a ledge.
 inline constexpr float kCoyoteTime = 0.10f;
@@ -122,8 +153,12 @@ struct PlayerInput {
     // about the keyboard.
     bool flyToggled = false;
 
-    // Crosses ground quickly while flying.
-    bool boostHeld = false;
+    // Asks for speed: a run on the ground, and a much faster crossing in flight.
+    //
+    // One field for both, the way moveY above is one field for two meanings, and
+    // for the same reason — the two can never be asked for at once, because a
+    // flying body is not walking.
+    bool sprintHeld = false;
 };
 
 // Platform character colliding against the terrain grid.
@@ -205,6 +240,15 @@ private:
 
     // Shifts the body sideways past a corner that blocked it going up.
     bool Sidestep(const World &terrain);
+
+    // Carries a body that is already inside the ground to the nearest place it
+    // is not, and reports whether it found one.
+    //
+    // The three above are about a move that was interrupted; this one is about a
+    // body that has nowhere to move from. Collision alone cannot answer it —
+    // every direction out of solid ground starts in solid ground, so every move
+    // is refused and the character is held where it stands for good.
+    bool Unstick(const World &terrain);
 
     bool CanStandUp(const World &terrain) const;
     void UpdateState();

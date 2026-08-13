@@ -53,20 +53,37 @@ constexpr float kSwayUrgency = 0.45f;
 // enough to be its own place, bright enough to walk through.
 constexpr float kCanopyShade = 0.5f;
 
-// Seconds a tree takes to go over, and how long it lies there before it fades.
+// Seconds a tree takes to go over, and how long the trunk takes to go once it
+// has landed.
 //
-// Just over a second. Faster reads as the tree being deleted; slower and the
-// player is waiting on an animation to finish before the wood arrives.
-constexpr float kFallTime = 1.15f;
-constexpr float kLieTime  = 1.4f;
-constexpr float kFadeTime = 0.7f;
+// Just over a second for the fall. Faster reads as the tree being deleted;
+// slower and the player is waiting on an animation to finish before the wood
+// arrives.
+//
+// And then it is gone, in a tenth of a second, at the moment of impact. This was
+// a long pause with the trunk lying on the ground and a slow fade after it, on
+// the reasoning that vanishing at the instant of impact reads as deletion — and
+// that reasoning was wrong about which moment carries the fall. The impact is the
+// event; a trunk lying still for two and a half seconds afterwards is the tree
+// having already happened, and it puts the reward that far behind the swing that
+// earned it. What sells the landing is what comes off it — see the burst — not
+// how long the corpse stays on screen.
+constexpr float kFallTime   = 1.15f;
+constexpr float kVanishTime = 0.10f;
 
 // The blow: how long the trunk rings for, how fast, and how far the crown moves
 // at the top of it.
-constexpr float kShakeTime  = 0.32f;
-constexpr float kShakeDecay = 8.0f;
-constexpr float kShakeRate  = 40.0f;
-constexpr float kShakeReach = 0.035f;
+//
+// The reach was 0.035, which on an oak is four and a half pixels at the top of
+// the crown and under two thirds of one at the height a person swings at. A blow
+// that moves the thing struck by half a pixel is a blow nobody can see landing,
+// and the wobble was over in a third of a second on top of that. At these figures
+// an oak's crown swings ten pixels and rings for half a second, which is a tree
+// taking a hit.
+constexpr float kShakeTime  = 0.50f;
+constexpr float kShakeDecay = 5.5f;
+constexpr float kShakeRate  = 34.0f;
+constexpr float kShakeReach = 0.080f;
 
 // Weather minutes are what everything else in the world is timed in, and the
 // tree clock is the same one, so a fall runs at the same speed under F7 as the
@@ -115,6 +132,114 @@ constexpr float kHealMinutes = 3.0f;
 // How far a tree turns as it goes over. Not quite flat, so the crown ends up
 // resting on the ground rather than driven through it.
 constexpr float kFallAngle = 84.0f;
+
+// What is left standing where a tree came down, in world pixels.
+//
+// A share of the tree's own height, bounded at both ends. Height and not trunk
+// width, which is what it was: a pine's trunk is the narrowest in the table and
+// its tree the tallest, so the biggest thing in the wood left the smallest mark
+// in it — eight pixels, which beside a character of twenty-six is a scuff on the
+// ground rather than a stump.
+//
+// The bounds are what keep it a stump. Below the floor it stops reading as
+// something to walk up to and swing at; above the ceiling it is as tall as the
+// player, and the thing left behind starts to compete with the thing that was
+// felled.
+constexpr float kStumpHeight  = 0.14f;
+constexpr float kStumpFloor   = 14.0f;
+constexpr float kStumpCeiling = 20.0f;
+
+// How far the cut flares past the trunk that stood on it, as a share of the
+// trunk's own width. A stump is the root collar and is wider than the wood above
+// it.
+constexpr float kStumpWiden = 1.5f;
+
+// The stump taking a blow: how long it jolts for, how fast, and how far.
+//
+// Sharper and shorter than the crown's ring above, because they are two different
+// things being hit. A crown is a mass on a springy trunk and it swings; a stump is
+// a block of wood in the ground, and what an axe does to one is knock it a couple
+// of pixels sideways and stop.
+//
+// Four pixels is two of the texels a stump is drawn on, which is what makes the
+// jolt read at all — this is a thing twelve texels wide, and moving it by less
+// than one is moving it by nothing.
+constexpr float kJoltTime  = 0.24f;
+constexpr float kJoltDecay = 13.0f;
+constexpr float kJoltRate  = 58.0f;
+constexpr float kJolt      = 4.0f;
+
+// How long the cut face stays pale after a blow.
+//
+// Two frames at sixty. The eye reads it as the axe biting rather than as the
+// stump changing colour, which is the whole of what a flash is for — and any
+// longer and it becomes the second of those.
+constexpr float kJoltFlash = 0.035f;
+
+// How far into a stump the axe has eaten by the time it is about to break, in
+// texels off the top.
+//
+// The part that answers "it does not feel like I am getting anywhere". A jolt says
+// the blow landed and says nothing about the one before it; this is the record of
+// every blow so far, standing in the world where the player can see it. Bounded
+// well short of the whole stump: it has to still read as a stump at the moment it
+// gives way, or the last blow lands on something that already looks cleared.
+constexpr float kStumpChew = 3.0f;
+
+// The chips an axe throws out of wood: how many, how long they last, and how they
+// travel.
+//
+// Faster and much heavier than a leaf, and they do not flutter. A chip is a
+// splinter of the trunk — it leaves fast, it drops fast, and it is gone before it
+// can be looked at, which is exactly the difference between debris and a leaf.
+constexpr int kChipCount  = 7;
+constexpr float kChipLife = 0.45f;
+constexpr float kChipOut  = 86.0f;
+constexpr float kChipUp   = 104.0f;
+constexpr float kChipFall = 620.0f;
+
+// Share of a standing tree's toughness that the stump left behind still has.
+//
+// Under half. Clearing a stump is a chore rather than a second tree: the player
+// has already paid for this trunk once, and what the second round of swings buys
+// is the ground back, plus the last of the wood that was in the root.
+constexpr float kStumpShare = 0.4f;
+
+// And the share of the tree's wood that comes out of the stump when it is
+// cleared, never less than one piece.
+constexpr float kStumpYield = 0.35f;
+
+// The burst of leaves a blow knocks out of a crown: how many, how long they last,
+// and how they travel.
+//
+// A real particle rather than a cell of the drifting field below, and this is the
+// one thing that field cannot say — *this* leaf came off *that* tree just now. It
+// still keeps no state: a burst is a pure function of the plant's own id, the
+// clock the blow was struck on, and the time since, all three of which the record
+// already holds. Nothing is spawned and nothing has to be reaped.
+//
+// The impact of a falling trunk uses the same burst several times over, which is
+// what covers the moment the tree goes: the crown that was there is replaced by
+// what came off it rather than by nothing.
+constexpr int kBurstLeaves = 10;
+constexpr float kBurstLife = 0.85f;
+
+// Pixels per second outwards and upwards at the moment of the blow, and the
+// gravity that takes them back down. Leaves are light: they barely arc, and what
+// they mostly do is come off and flutter.
+constexpr float kBurstOut  = 34.0f;
+constexpr float kBurstUp   = 26.0f;
+constexpr float kBurstFall = 130.0f;
+
+// How far a leaf swings across its own path as it falls, and how fast. The same
+// swing the drifting field uses, which is what keeps a knocked-off leaf and a
+// shed one the same kind of thing.
+constexpr float kBurstSwing = 5.0f;
+constexpr float kBurstRate  = 9.0f;
+
+// How much bigger the burst is when the whole tree lands. A blow takes leaves off
+// one branch; the ground takes them off all of it.
+constexpr int kImpactBurst = 5;
 
 // Deterministic value in [0,1) from a cell, a salt and the world seed.
 //
@@ -201,8 +326,18 @@ constexpr float kLeafSpan  = 170.0f;
 constexpr float kLeafSwing = 13.0f;
 constexpr float kLeafSide  = 0.9f;
 
-// Share of the cells that hold a leaf at all, before the season thins them.
+// Share of the cells that hold a leaf at all, before the season and the weather
+// thin them.
 constexpr float kLeafDensity = 0.9f;
+
+// Share of the season's shedding that happens on a dead still day.
+//
+// The rest of it is the wind's to release. A wood in autumn drops leaves whether
+// or not anything is blowing, so this cannot be zero; but what a gust does is
+// strip a crown, and at the old arrangement — season alone, wind nowhere in it —
+// a gale and a calm afternoon shed exactly the same number of leaves, which is
+// the one thing anybody watching a storm would notice was wrong.
+constexpr float kCalmShed = 0.35f;
 
 // How far a plant is through its fall, eased the way a rod hinged at its foot
 // goes over: barely at first, then all at once.
@@ -227,8 +362,7 @@ float Lean(const weather::Sky &sky, const flora::Plant &plant, float now) {
 
     // As a share of what the strongest gust could do, so the whole wood is at
     // rest on a still day and near its limit in a storm.
-    const float reach = std::max(sky.WindReach(), 1e-3f);
-    const float push  = std::clamp(sky.WindAt(plant.base.x) / reach, -1.0f, 1.0f);
+    const float push = sky.PushAt(plant.base.x);
 
     // Each tree keeps its own phase, so a stand does not beat as one object.
     // Taken from the cell, so a tree sways the same way every time it is met.
@@ -342,13 +476,19 @@ void Grove::Update(const World &world, Rectangle view, Vector2 player, float now
     // Done here rather than at the moment of the killing blow, because what the
     // player is owed arrives when the trunk hits the ground — the whole point of
     // drawing the fall is that the reward is at the end of it.
+    //
+    // And after the trunk has gone rather than at the instant it lands, which is
+    // the order the eye can follow: the tree comes down, the tree is not there any
+    // more, and the wood is lying where it was. Thrown a tenth of a second earlier
+    // the pieces appear underneath a trunk that is still drawn over them, and what
+    // reads is wood arriving out of the ground.
     for (const flora::Plant &plant : plants_) {
         const auto found = remembered_.find(plant.id);
         if (found == remembered_.end()) continue;
 
         TreeState &state = found->second;
 
-        if (state.dropped || state.felledAt < 0.0f || now - state.felledAt < kFallTime) continue;
+        if (state.dropped || state.felledAt < 0.0f || now - state.felledAt < kFallTime + kVanishTime) continue;
 
         state.dropped = true;
 
@@ -424,6 +564,11 @@ void Grove::Thin() {
 void Grove::Planted(Rectangle view) {
     for (const auto &[cell, state] : remembered_) {
         if (!state.planted) continue;
+
+        // Broken and taken away. A planted plant exists only because its record
+        // says so, so a cleared one is a plant that is simply not there.
+        if (state.cleared) continue;
+
         if (state.at.x < view.x - kLead || state.at.x > view.x + view.width + kLead) continue;
 
         flora::Plant plant;
@@ -526,7 +671,7 @@ void Grove::Ripen(const World &world, float now, float dt) {
     }
 }
 
-void Grove::Yield(const flora::Plant &plant, const TreeState &state, float now) {
+void Grove::Yield(const flora::Plant &plant, const TreeState &state, float now, float share, bool woodOnly) {
     const flora::SpeciesDef &def = flora::Def(plant.species);
 
     const float height = def.height[flora::StageIndex(flora::Stage::Mature)] * plant.scale;
@@ -545,18 +690,28 @@ void Grove::Yield(const flora::Plant &plant, const TreeState &state, float now) 
     for (const flora::DropRule &rule : def.drops) {
         if (rule.chance <= 0.0f || rule.most <= 0) continue;
 
-        // The tree's own cell decides, so felling the same tree twice — after a
-        // regrowth, or in another session — gives the same wood. Nothing about a
-        // drop is left to the moment it happened in.
+        // Timber alone, where the caller asked for it. Everything else on the
+        // table hung in the crown and came down with it.
+        if (woodOnly && rule.item != Item::Wood) continue;
+
+        // The tree's own cell decides, so the same tree gives the same wood in
+        // any session. Nothing about a drop is left to the moment it happened in.
         const float roll = Chance(plant.id, static_cast<int>(rule.item) * 71 + 3, settings_.seed);
 
         if (roll >= rule.chance) continue;
 
         const float amount = Chance(plant.id, static_cast<int>(rule.item) * 71 + 11, settings_.seed);
 
-        const int count = rule.least + static_cast<int>(amount * static_cast<float>(rule.most - rule.least + 1));
+        const int whole = rule.least + static_cast<int>(amount * static_cast<float>(rule.most - rule.least + 1));
 
-        drops_.Scatter(ItemsOf(rule.item, std::clamp(count, rule.least, rule.most)), from, away, now);
+        // Rounded up, so a share of a small drop is a piece rather than nothing:
+        // a stump that gives no wood at all is a stump nobody has a reason to cut.
+        const int count = static_cast<int>(std::ceil(static_cast<float>(std::clamp(whole, rule.least, rule.most)) *
+                                                     std::clamp(share, 0.0f, 1.0f)));
+
+        if (count <= 0) continue;
+
+        drops_.Scatter(ItemsOf(rule.item, count), from, away, now);
     }
 }
 
@@ -586,10 +741,14 @@ void Grove::Draw(const weather::Sky &sky, flora::Season season, float now) const
         // is no record, which is what an untouched wood is.
         const Standing standing = Read(plant, now);
 
-        // Down and gone: the cut trunk is all that is left, and it stays until the
-        // species' own regrowth takes it.
+        // Cut out root and all. Bare ground, and it stays bare: nothing grows here
+        // again unless somebody plants it.
+        if (standing.cleared) continue;
+
+        // Down: the cut trunk is all that is left, and it stays until the player
+        // takes an axe to that too.
         if (standing.stump) {
-            DrawStump(plant);
+            DrawStump(plant, standing);
             continue;
         }
 
@@ -627,7 +786,7 @@ void Grove::Draw(const weather::Sky &sky, flora::Season season, float now) const
 
             // The stump is under it from the moment it starts to go, so there is
             // never a frame with nothing where the tree was.
-            DrawStump(plant);
+            DrawStump(plant, standing);
             continue;
         }
 
@@ -690,6 +849,9 @@ Grove::Standing Grove::Read(const flora::Plant &plant, float now) const {
     const TreeState &state = found->second;
 
     standing.stage = StageOf(state.growth);
+    standing.wear  = std::clamp(1.0f - state.stumpHealth, 0.0f, 1.0f);
+
+    if (state.struckAt >= 0.0f) standing.struck = now - state.struckAt;
 
     // Struck lately: the trunk still rings. A decaying oscillation, and the two
     // numbers it needs are already in the record, so this costs no state of its
@@ -710,17 +872,27 @@ Grove::Standing Grove::Read(const flora::Plant &plant, float now) const {
 
         standing.felling  = since;
         standing.fallLeft = state.fallLeft;
-        standing.stump    = since > kFallTime + kLieTime + kFadeTime;
+        standing.stump    = since > kFallTime + kVanishTime;
+        standing.cleared  = state.cleared;
 
-        // Lies where it landed for a moment and then goes. The pause matters:
-        // without it the tree vanishes at the instant of impact and the fall
-        // reads as the tree being deleted rather than as it coming down.
-        const float lying = since - kFallTime - kLieTime;
+        // Gone on impact, over the few frames kVanishTime allows. The trunk is
+        // whole for the whole of the turn and then it is not there, which is the
+        // moment the burst of leaves is thrown into.
+        const float down = since - kFallTime;
 
-        standing.fade = (lying <= 0.0f) ? 1.0f : std::clamp(1.0f - lying / kFadeTime, 0.0f, 1.0f);
+        standing.fade = (down <= 0.0f) ? 1.0f : std::clamp(1.0f - down / kVanishTime, 0.0f, 1.0f);
     }
 
     return standing;
+}
+
+void Grove::Blow(TreeState &state, float now) const {
+    state.struckAt = now;
+
+    // Into the next slot of the ring rather than over the last one, so the leaves
+    // this blow knocks loose join whatever the one before it left in the air.
+    state.blowSlot                = (state.blowSlot + 1) % kBlows;
+    state.blowAt[state.blowSlot] = now;
 }
 
 Grove::TreeState &Grove::Remember(const flora::Plant &plant, float now) {
@@ -738,19 +910,36 @@ void Grove::Forget(float now) {
     for (auto it = remembered_.begin(); it != remembered_.end();) {
         const TreeState &state = it->second;
 
-        // A planted one is the overlay's own assertion and can never be dropped:
-        // the procedural pass does not know it is there.
+        // A planted one is the overlay's own assertion and can never be dropped
+        // while it is standing: the procedural pass does not know it is there.
+        //
+        // Once it has been cleared, though, the assertion is that nothing is
+        // there — and nothing is what an absent record already says. So this is
+        // the one felled plant whose record does go, and it has to: a player who
+        // plants and breaks the same sapling a hundred times would otherwise leave
+        // a hundred entries behind saying nothing.
         if (state.planted) {
-            ++it;
+            it = state.cleared ? remembered_.erase(it) : std::next(it);
             continue;
         }
 
+        // Felled, and kept for good — whether the stump is still standing or has
+        // been cut out after it.
+        //
+        // This used to expire, and the tree grew back in the same cell. It was the
+        // one place the overlay could shed a record without lying, and it was
+        // lying anyway: a tree that comes back where it was cut is not something
+        // that happens, and a wood that repairs itself behind the player is a wood
+        // that cannot be cleared. Stardew Valley is the reference and it is
+        // unambiguous — what you cut stays cut, and what grows again grows from a
+        // seed somebody planted.
+        //
+        // So this is the one record that never goes, and it is the same bargain
+        // World::edits_ makes for the same reason: a plant with no record is a
+        // mature tree, so the fact that a cell is empty can only be held by
+        // keeping something in it. The count is on screen beside the edits.
         if (state.felledAt >= 0.0f) {
-            // Regrown. The species table decides how long a stump stays, and
-            // kNever leaves it for good.
-            const float regrow = flora::kSpecies[state.species].growth.regrowMinutes * kMinute;
-
-            it = (now - state.felledAt > regrow) ? remembered_.erase(it) : std::next(it);
+            ++it;
             continue;
         }
 
@@ -767,10 +956,80 @@ void Grove::Strike(Rectangle hitbox, float damage, Vector2 from, float now) {
         const flora::SpeciesDef &def = flora::Def(plant.species);
 
         const Standing standing = Read(plant, now);
+
+        // Nothing there at all.
+        if (standing.cleared) continue;
+
+        // The stump left where a tree came down, which is the second half of the
+        // job and the reason the wood is not simply gone when the tree is. Taken
+        // before the guard below, because to that guard a stump is a felled tree
+        // and a felled tree is not something to swing at.
+        if (standing.stump) {
+            if (!CheckCollisionRecs(hitbox, StumpRect(plant, standing.stage))) continue;
+
+            TreeState &state = Remember(plant, now);
+
+            Blow(state, now);
+            state.stumpHealth -= damage / std::max(def.growth.toughness * kStumpShare, 0.5f);
+
+            if (state.stumpHealth > 0.0f) return;
+
+            state.cleared = true;
+
+            // Thrown away from this swing rather than along the line the tree
+            // went down: the player has walked round the stump since, and what
+            // decides which way a chip flies is where the axe came from now.
+            state.fallLeft = from.x > plant.base.x;
+
+            // And the last of the wood, out of the root.
+            Yield(plant, state, now, kStumpYield, true);
+
+            return;
+        }
+
+        // On its way over. A tree in the air is not something an axe can reach,
+        // and a second blow on one would only start its fall again.
         if (standing.felling >= 0.0f) continue;
 
-        const float height = def.height[flora::StageIndex(flora::Stage::Mature)] * plant.scale;
-        const float width  = def.canopyWidth[flora::StageIndex(flora::Stage::Mature)] * plant.scale;
+        // The size it actually is, rather than the size it will be.
+        //
+        // This read the mature row whatever stage the plant was at, so a sapling
+        // ankle-high on the ground carried an oak's hitbox: a swing anywhere in
+        // the fifty pixels of empty air above it connected, and connected with a
+        // trunk that was not there.
+        const std::size_t grown = flora::StageIndex(standing.stage);
+
+        const float height = def.height[grown] * plant.scale;
+        const float width  = def.canopyWidth[grown] * plant.scale;
+
+        // A sapling is not a tree and does not come down like one.
+        //
+        // One blow, no fall, no stump, and the seed back in the hand that put it
+        // there — which is what Minecraft does and the only thing that makes sense
+        // of planting one by mistake. Felling it instead spent a second and a half
+        // on an animation of a twig going over and then paid out a mature tree's
+        // worth of timber for it.
+        if (standing.stage == flora::Stage::Sapling) {
+            const float reach = std::max(width * 0.5f, kStrikeSlack);
+
+            const Rectangle body = {plant.base.x - reach, plant.base.y - height, reach * 2.0f, height};
+
+            if (!CheckCollisionRecs(hitbox, body)) continue;
+
+            TreeState &state = Remember(plant, now);
+
+            // Straight to gone: nothing was left standing, so there is no stump to
+            // clear afterwards and nothing for the fall to drop.
+            state.felledAt = now;
+            state.cleared  = true;
+            state.dropped  = true;
+            state.fallLeft = from.x > plant.base.x;
+
+            drops_.Scatter(ItemsOf(Item::Sapling, 1), {plant.base.x, plant.base.y - height * 0.5f},
+                           state.fallLeft ? -1.0f : 1.0f, now);
+
+            return;
+        }
 
         // The trunk alone. Swinging at the crown of a tree twenty pixels over
         // your head should not fell it.
@@ -783,7 +1042,7 @@ void Grove::Strike(Rectangle hitbox, float damage, Vector2 from, float now) {
 
         TreeState &state = Remember(plant, now);
 
-        state.struckAt = now;
+        Blow(state, now);
         state.health -= damage / std::max(def.growth.toughness, 0.5f);
 
         if (state.health > 0.0f) return;
@@ -877,23 +1136,124 @@ bool Grove::Plant(flora::Species species, Vector2 world, float now) {
     return true;
 }
 
-void Grove::DrawStump(const flora::Plant &plant) const {
+Rectangle Grove::StumpRect(const flora::Plant &plant, flora::Stage stage) const {
     const flora::SpeciesDef &def = flora::Def(plant.species);
 
-    const float width = def.canopyWidth[flora::StageIndex(flora::Stage::Mature)] * plant.scale;
+    const std::size_t grown = flora::StageIndex(stage);
 
-    // A little wider than the trunk, the way a cut one flares, and just tall
-    // enough to read as something left behind rather than as a mark on the ground.
-    const float half = std::max(width * def.shape.trunkWidth * 0.75f, config::kFloraPixel);
-    const float tall = std::max(half * 1.1f, config::kFloraPixel * 2.0f);
+    const float width  = def.canopyWidth[grown] * plant.scale;
+    const float height = def.height[grown] * plant.scale;
+
+    const float half = std::max(width * def.shape.trunkWidth * 0.5f * kStumpWiden, config::kFloraPixel);
+    const float tall = std::clamp(height * kStumpHeight, kStumpFloor, kStumpCeiling);
+
+    // Snapped, because it is what a rectangle is drawn from and what an axe is
+    // tested against, and the two have to be the same rectangle to the pixel.
+    const float left = Snap(plant.base.x - half);
+    const float top  = Snap(plant.base.y - tall);
+
+    return {left, top, Snap(plant.base.x + half) - left, Snap(plant.base.y) - top};
+}
+
+void Grove::DrawStump(const flora::Plant &plant, const Standing &standing) const {
+    const flora::SpeciesDef &def = flora::Def(plant.species);
 
     const flora::SpeciesPalette &palette = def.palette[flora::SeasonIndex(flora::Season::Summer)];
 
-    DrawRectangleV({Snap(plant.base.x - half), Snap(plant.base.y - tall)}, {half * 2.0f, tall}, palette.bark);
+    const Rectangle stump = StumpRect(plant, standing.stage);
 
-    // The cut face, which is the only part of a stump anybody looks at.
-    DrawRectangleV({Snap(plant.base.x - half), Snap(plant.base.y - tall)}, {half * 2.0f, config::kFloraPixel},
-                   palette.barkLight);
+    const float pixel = config::kFloraPixel;
+
+    const int columns = std::max(static_cast<int>(std::round(stump.width / pixel)), 1);
+    const int rows    = std::max(static_cast<int>(std::round(stump.height / pixel)), 1);
+
+    // What the last blow is still doing to it: a jolt sideways, dying away, and
+    // for the first two frames a cut face gone pale where the axe went in.
+    //
+    // Snapped to a whole texel, because the whole stump moves together and a
+    // fraction of one reads as the thing blurring rather than as it being hit.
+    float jolt   = 0.0f;
+    bool struck  = false;
+
+    if (standing.struck >= 0.0f && standing.struck < kJoltTime) {
+        jolt = std::round(kJolt * std::exp(-kJoltDecay * standing.struck) * std::sin(kJoltRate * standing.struck) /
+                          pixel) *
+               pixel;
+
+        struck = standing.struck < kJoltFlash;
+    }
+
+    // And what every blow so far adds up to: the axe eats into the top of it,
+    // column by column and unevenly, so a player halfway through a stump can see
+    // that they are halfway through it.
+    const float bite = std::clamp(standing.wear, 0.0f, 1.0f);
+
+    // How many rows the cut face takes. Two, so the ring inside it has somewhere
+    // to sit; on a stump too short for that, one.
+    const int face = (rows >= 5) ? 2 : 1;
+
+    // Drawn texel by texel rather than as two rectangles.
+    //
+    // It was two flat rectangles, and at the size a stump used to be that was
+    // nearly defensible. At this size it is a brown brick sitting on the grass:
+    // the thing left where a tree stood is now something the player walks up to
+    // and swings at, so it has to carry what everything else in the wood does —
+    // a lit side, a shaded one, the grain between them, and an edge where the cut
+    // is. Twelve by nine texels, which is a hundred squares.
+    for (int i = 0; i < columns; i++) {
+        // Across the stump, in [0,1], and then to the same axis the trunk's own
+        // bark is shaded on so the light lands the same way on both.
+        const float across = (static_cast<float>(i) + 0.5f) / static_cast<float>(columns) * 2.0f - 1.0f;
+
+        // How many texels the axe has taken off this column. Its own share of the
+        // bite, so the top goes ragged rather than sinking level.
+        const int gone = static_cast<int>(bite * kStumpChew *
+                                          (0.35f + 0.65f * Chance(plant.id, 600 + i * 23, settings_.seed)));
+
+        for (int j = gone; j < rows; j++) {
+            Color colour = (across < -0.15f) ? palette.barkLight : (across < 0.45f ? palette.bark : palette.barkDark);
+
+            if (j < face + gone) {
+                // The cut face: raw wood, which is the palest thing on a stump and
+                // the only part of it anybody looks at. Ringed rather than flat —
+                // the heartwood is darker than the sapwood around it, and that ring
+                // is what says the trunk was cut through rather than worn down.
+                const bool heart = std::fabs(across) < 0.42f;
+
+                colour = heart ? palette.bark : palette.barkLight;
+
+                // And a nick out of the rim here and there, so the cut is a saw
+                // line and not a ruled one.
+                if (Chance(plant.id, 400 + i * 7 + j * 3, settings_.seed) > 0.82f) colour = palette.barkDark;
+
+                // Raw where the axe just went in. Two frames of the palest wood
+                // the species has, across the whole face — the bite, not a state.
+                if (struck) colour = palette.barkLight;
+            } else {
+                // Bark, with the same two marks the trunk carries: a scatter of
+                // darker texels and the occasional notch. Taken from the plant's
+                // own id, so a stump looks the same every time it is met.
+                if (Chance(plant.id, 200 + i * 13 + j * 5, settings_.seed) > 0.72f) {
+                    colour = (across < 0.45f) ? palette.bark : palette.barkDark;
+                }
+
+                if (Chance(plant.id, 300 + i * 5 + j * 11, settings_.seed) > 0.88f) colour = palette.barkDark;
+            }
+
+            // The foot, where it goes into the ground. Dark all the way across,
+            // which is the contact shadow a thing standing on soil has and the
+            // difference between a stump in the grass and one drawn over it.
+            if (j == rows - 1) colour = palette.barkDark;
+
+            // The jolt fades out towards the foot: a stump is held by its roots,
+            // so what a blow moves is the top of it.
+            const float held = 1.0f - static_cast<float>(j) / static_cast<float>(rows);
+
+            DrawRectangleV({stump.x + static_cast<float>(i) * pixel + jolt * held,
+                            stump.y + static_cast<float>(j) * pixel},
+                           {pixel, pixel}, colour);
+        }
+    }
 }
 
 void Grove::Shade(World &world, float now) const {
@@ -984,6 +1344,205 @@ void Grove::DrawFruit(flora::Season season, float now) const {
 }
 
 void Grove::DrawLeaves(const weather::Sky &sky, flora::Season season, Rectangle view, float now) const {
+    DrawDrift(sky, season, view, now);
+    DrawBurst(sky, season, now);
+}
+
+void Grove::Spray(const flora::Plant &plant, flora::Season season, const Burst &burst) const {
+    const flora::SpeciesDef &def = flora::Def(plant.species);
+
+    const std::size_t mature = flora::StageIndex(flora::Stage::Mature);
+
+    const float height = def.height[mature] * plant.scale;
+    const float width  = def.canopyWidth[mature] * plant.scale;
+
+    // The crown alone, which is what sheds. Nothing comes off the bare trunk
+    // under it however hard it is hit.
+    const float foot = -height * def.shape.clearance;
+    const float top  = -height;
+
+    // Where the crown is now, as the turn the fall left it at. The leaves are
+    // hung on the tree and then the tree is put where it went, rather than each
+    // leaf being placed in the world twice.
+    const float turn = burst.angle * 3.14159265f / 180.0f;
+
+    const float sine   = std::sin(turn);
+    const float cosine = std::cos(turn);
+
+    const flora::SpeciesPalette &palette = def.palette[flora::SeasonIndex(season)];
+
+    const float pixel = config::kFloraPixel;
+
+    for (int leaf = 0; leaf < kBurstLeaves * burst.rounds; leaf++) {
+        const int salt = burst.salt + leaf * 17;
+
+        // Staggered, so a burst comes off over a few frames rather than as one
+        // ring leaving the crown together.
+        const float age = burst.since - Chance(plant.id, salt + 1, settings_.seed) * 0.14f;
+        if (age <= 0.0f || age >= kBurstLife) continue;
+
+        // Where on the crown it grew, before the tree was turned.
+        const float ax = (Chance(plant.id, salt + 2, settings_.seed) - 0.5f) * width * 0.86f;
+        const float ay = foot + Chance(plant.id, salt + 3, settings_.seed) * (top - foot);
+
+        const Vector2 from = {plant.base.x + ax * cosine - ay * sine, plant.base.y + ax * sine + ay * cosine};
+
+        // Outwards from the trunk rather than in a random direction: what a blow
+        // does is knock leaves off the crown, and each one leaves by its own side
+        // of it.
+        const float side = (ax >= 0.0f) ? 1.0f : -1.0f;
+
+        const float out = kBurstOut * burst.vigour * (0.35f + 0.65f * Chance(plant.id, salt + 4, settings_.seed));
+        const float up  = kBurstUp * burst.vigour * (0.25f + 0.75f * Chance(plant.id, salt + 5, settings_.seed));
+
+        // Thrown, and then gravity. Light enough that the arc is shallow and most
+        // of what is seen is the flutter across it.
+        const float swing =
+            std::sin(age * kBurstRate + Chance(plant.id, salt + 6, settings_.seed) * 6.28318f) * kBurstSwing;
+
+        // And the air it is falling through, by the one rule everything loose in
+        // this world is carried by.
+        const float carried = weather::Carry(burst.wind, age / kBurstLife, weather::kLeafDrag);
+
+        const float x = from.x + side * out * age + swing + carried;
+        const float y = from.y - up * age + 0.5f * kBurstFall * age * age;
+
+        // Never below the foot of the tree, so a leaf settles on the ground it
+        // came off instead of sinking through the hill.
+        if (y > plant.base.y) continue;
+
+        // Faded out over the last third, so a burst thins rather than being
+        // switched off.
+        const float fade = std::clamp((1.0f - age / kBurstLife) * 3.0f, 0.0f, 1.0f);
+
+        // Two texels, turned with the swing — the same leaf the drifting field
+        // draws, because it is the same leaf.
+        const float lead = Snap(x);
+        const float over = Snap(y);
+
+        DrawRectangleV({lead, over}, {pixel, pixel}, Fade(palette.leaf[3], fade));
+        DrawRectangleV({lead + (swing >= 0.0f ? pixel : -pixel), over + pixel}, {pixel, pixel},
+                       Fade(palette.leaf[1], fade));
+    }
+}
+
+void Grove::Chips(const flora::Plant &plant, Vector2 at, float since, int salt, float push) const {
+    if (since <= 0.0f || since >= kChipLife) return;
+
+    const flora::SpeciesPalette &palette = flora::Def(plant.species).palette[flora::SeasonIndex(flora::Season::Summer)];
+
+    const float pixel = config::kFloraPixel;
+
+    for (int chip = 0; chip < kChipCount; chip++) {
+        const int seed = salt + chip * 29;
+
+        // Out to both sides rather than away from the swing. An axe biting into
+        // wood throws splinters off the near face and the far one alike, and a
+        // spray that only ever goes one way reads as the stump leaking.
+        const float side = (Chance(plant.id, seed + 1, settings_.seed) < 0.5f) ? -1.0f : 1.0f;
+
+        const float out = kChipOut * (0.30f + 0.70f * Chance(plant.id, seed + 2, settings_.seed));
+        const float up  = kChipUp * (0.35f + 0.65f * Chance(plant.id, seed + 3, settings_.seed));
+
+        // Along the cut rather than from one point, so the spray has the width of
+        // the thing it came out of.
+        const float from = (Chance(plant.id, seed + 4, settings_.seed) - 0.5f) * pixel * 4.0f;
+
+        // Blown, like everything else, and barely: a chip of wood is heavy and
+        // the gale that carries a leaf across a clearing nudges one of these.
+        const float x = at.x + from + side * out * since + weather::Carry(push, since / kChipLife, weather::kChipDrag);
+        const float y = at.y - up * since + 0.5f * kChipFall * since * since;
+
+        if (y > at.y + pixel) continue;
+
+        const float fade = std::clamp((1.0f - since / kChipLife) * 2.2f, 0.0f, 1.0f);
+
+        // One texel of pale sapwood, which is what the inside of a trunk is and
+        // what makes a chip read as wood rather than as bark falling off.
+        DrawRectangleV({Snap(x), Snap(y)}, {pixel, pixel},
+                       Fade((chip % 3 == 0) ? palette.bark : palette.barkLight, fade));
+    }
+}
+
+void Grove::DrawBurst(const weather::Sky &sky, flora::Season season, float now) const {
+    // Past this there is nothing left of any burst to draw, and it is worth
+    // testing before the work rather than inside it: the record holds the last
+    // blow for as long as the wound takes to heal, which is minutes.
+    const float spent = kBurstLife + 0.2f;
+
+    for (const flora::Plant &plant : plants_) {
+        const auto found = remembered_.find(plant.id);
+        if (found == remembered_.end()) continue;
+
+        const TreeState &state = found->second;
+
+        // The air everything off this tree is falling through.
+        const float push = sky.PushAt(plant.base.x);
+
+        if (state.felledAt < 0.0f) {
+            // Every blow still in the air, and not merely the last of them.
+            //
+            // One timestamp meant one burst, and a second swing landed on top of
+            // the first: the leaves already falling were put back in the crown and
+            // thrown again. Three slots, three bursts, and a blow adds to what is
+            // falling instead of replacing it.
+            for (int slot = 0; slot < kBlows; slot++) {
+                const float blow = state.blowAt[slot];
+                if (blow < 0.0f || now - blow >= spent) continue;
+
+                // Each slot salted apart, or two overlapping bursts would be the
+                // same ten leaves drawn twice.
+                Spray(plant, season, {.since = now - blow, .salt = 500 + slot * 131, .wind = push});
+            }
+
+            // And the chips out of the trunk, halfway up the clear stretch of it,
+            // which is where a person swings.
+            if (state.struckAt >= 0.0f) {
+                const flora::SpeciesDef &def = flora::Def(plant.species);
+
+                const float height = def.height[flora::StageIndex(flora::Stage::Mature)] * plant.scale;
+
+                Chips(plant, {plant.base.x, plant.base.y - height * def.shape.clearance * 0.5f}, now - state.struckAt,
+                      700, push);
+            }
+
+            continue;
+        }
+
+        // The stump, taking the second half of the job. No crown left to shed, so
+        // what comes off it is wood.
+        if (now - state.felledAt > kFallTime + kVanishTime) {
+            if (state.struckAt >= 0.0f && !state.cleared) {
+                const Rectangle stump = StumpRect(plant, StageOf(state.growth));
+
+                Chips(plant, {stump.x + stump.width * 0.5f, stump.y}, now - state.struckAt, 800, push);
+            }
+
+            continue;
+        }
+
+        // And what the ground knocked out of it, at the moment the crown arrived.
+        //
+        // This is what carries the tree going. The trunk is drawn for the whole of
+        // its turn and is then gone within a tenth of a second, and left on its
+        // own that reads as a tree being switched off rather than as one landing.
+        // Five bursts over and thrown twice as hard, because what hit the ground
+        // was the whole crown and not one branch of it.
+        const float landed = now - state.felledAt - kFallTime;
+
+        if (landed <= 0.0f || landed >= spent) continue;
+
+        Spray(plant, season,
+              {.since  = landed,
+               .rounds = kImpactBurst,
+               .salt   = 900,
+               .angle  = kFallAngle * (state.fallLeft ? -1.0f : 1.0f),
+               .vigour = 2.0f,
+               .wind   = push});
+    }
+}
+
+void Grove::DrawDrift(const weather::Sky &sky, flora::Season season, Rectangle view, float now) const {
     // Autumn sheds and the rest of the year barely does, which is the whole of
     // what a season means to a leaf. Winter has nothing left to drop.
     // Autumn sheds and the rest of the year barely does — but "barely" still has
@@ -997,17 +1556,24 @@ void Grove::DrawLeaves(const weather::Sky &sky, flora::Season season, Rectangle 
 
     const float pixel = config::kFloraPixel;
 
-    // Blown along with everything else, so the leaves and the crowns they came
-    // off lean the same way.
-    const float wind = sky.WindAt(view.x + view.width * 0.5f);
-
     const int first = static_cast<int>(std::floor(view.x / kLeafCell)) - 1;
     const int last  = static_cast<int>(std::ceil((view.x + view.width) / kLeafCell)) + 1;
 
     for (int cell = first; cell <= last; cell++) {
-        if (Chance(cell, 13, settings_.seed) > kLeafDensity * shedding) continue;
-
         const float column = (static_cast<float>(cell) + Chance(cell, 17, settings_.seed)) * kLeafCell;
+
+        // The wind at this cell, not at the middle of the view: a gust is a wave
+        // crossing the world, so one end of a wood can be blowing while the other
+        // is still. The same reading the grass and the crowns take.
+        const float push = sky.PushAt(column);
+
+        // How hard the wood is shedding here, which is the season and the weather
+        // together. On a still day a tree lets go of what it was going to let go
+        // of anyway; a gale strips it, and the difference between the two is most
+        // of what makes weather worth watching.
+        const float loosened = shedding * (kCalmShed + (1.0f - kCalmShed) * std::fabs(push));
+
+        if (Chance(cell, 13, settings_.seed) > kLeafDensity * loosened) continue;
 
         // Only where something is standing to have shed it. A leaf falling in an
         // open field is the one thing that would give the trick away.
@@ -1062,7 +1628,10 @@ void Grove::DrawLeaves(const weather::Sky &sky, flora::Season season, Rectangle 
         // and the swing is most of what says leaf rather than raindrop.
         const float swing = std::sin((drift / kLeafSwing) + Chance(cell, 31, settings_.seed) * 6.28318f);
 
-        const float x = column + swing * kLeafSwing * kLeafSide + wind * (drift / kLeafSpan) * 0.5f;
+        // And carried, by the same rule as everything else loose in the air.
+        const float carried = weather::Carry(push, drift / kLeafSpan, weather::kLeafDrag);
+
+        const float x = column + swing * kLeafSwing * kLeafSide + carried;
 
         // The species' own tones, so what falls is the colour of what it fell
         // from.

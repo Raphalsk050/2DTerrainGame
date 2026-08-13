@@ -32,10 +32,16 @@ public:
     // Reads the mouse and applies whichever hand was used. What it digs up goes
     // into the inventory, and what will not fit goes on the ground.
     //
+    // `body` is the character, and it does two jobs: the reach is measured from
+    // its middle, and nothing solid is laid inside it. The whole rectangle rather
+    // than the point, because where the reach starts and where the character
+    // stands are the same fact asked twice, and a hand holding only the point
+    // cannot answer the second.
+    //
     // Returns what the world had to say back, or nothing. A refusal that is
     // never spoken is the same to a player as a button that is broken, and the
     // caller is where the notice is already kept.
-    const char *Update(World &world, Inventory &inventory, Grove &grove, const Camera2D &camera, Vector2 player,
+    const char *Update(World &world, Inventory &inventory, Grove &grove, const Camera2D &camera, Rectangle body,
                        float now);
 
     // Outline of the area the next click affects, drawn in world space so it
@@ -81,8 +87,9 @@ private:
     void Bank(const World::Yield &freed, Inventory &inventory, Drops &drops, Vector2 at, float away, float now);
 
     // Lays the material in hand under the brush, spending it. Returns what to
-    // say, or nothing.
-    const char *Lay(World &world, Inventory &inventory, Drops &drops, Vector2 target, float away, float now);
+    // say, or nothing. `body` is left out of the stroke — see World::Place.
+    const char *Lay(World &world, Inventory &inventory, Drops &drops, Vector2 target, Rectangle body, float away,
+                    float now);
 
     float radius_ = 16.0f;
 

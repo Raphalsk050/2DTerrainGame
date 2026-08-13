@@ -68,9 +68,18 @@ light::Radiance Lantern(float strength) {
 // The world region the frame covers. Read from the window rather than from the
 // configured size, so a resized window shows more of the world instead of the same
 // amount of it stretched.
+// Divided by the zoom, so that what it describes is the ground the frame covers
+// rather than the pixels it is drawn with. Zoomed in, that is less world for the
+// same window — which is exactly what everything reading this wants to be told,
+// since a chunk off the edge of a zoomed-in view is a chunk nobody has to
+// generate, light or grow grass on.
 Rectangle ViewBounds(const Camera2D &camera) {
-    return {camera.target.x - camera.offset.x, camera.target.y - camera.offset.y, static_cast<float>(GetScreenWidth()),
-            static_cast<float>(GetScreenHeight())};
+    const float zoom = (camera.zoom > 0.0f) ? camera.zoom : 1.0f;
+
+    const float width  = static_cast<float>(GetScreenWidth()) / zoom;
+    const float height = static_cast<float>(GetScreenHeight()) / zoom;
+
+    return {camera.target.x - camera.offset.x / zoom, camera.target.y - camera.offset.y / zoom, width, height};
 }
 
 Rectangle Expand(Rectangle rect, float margin) {
@@ -95,11 +104,53 @@ PlayerInput ReadPlayerInput(const Camera2D &camera) {
     if (input.crouchHeld) input.moveY += 1.0f;
 
     input.flyToggled = IsKeyPressed(KEY_F);
-    input.boostHeld  = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
+    input.sprintHeld = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
 
     input.aimWorld = GetScreenToWorld2D(GetMousePosition(), camera);
 
     return input;
+}
+
+// Whether the hand is asking for the view rather than for the bar.
+//
+// The wheel already steps through the hotbar, and control-wheel is what every
+// other program on the machine zooms with, so the modifier is read in one place
+// and both readers are told about it — otherwise a zoom would also change the
+// slot in hand.
+bool ZoomModifier() {
+    return IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL) || IsKeyDown(KEY_LEFT_SUPER)
+        || IsKeyDown(KEY_RIGHT_SUPER);
+}
+
+// Steps the view in and out, in whole multiples and nothing between them.
+//
+// Whole, and that is not a matter of taste. Everything in the world is drawn on
+// one of two pixel grids — five world units for the terrain's outline, two for a
+// plant's texel — and both are chosen to be a whole number of screen pixels. A
+// multiplier of one and a half turns the first into seven and a half, which
+// rasterises as columns alternating seven pixels wide and eight, and that is the
+// one thing art at this size may never do. At a whole multiple every texel keeps
+// its shape whatever the view is doing, so the picture zooms rather than
+// resamples.
+//
+// One is the floor because it is what the world was framed against: it shows the
+// most ground of any setting, and there is nothing to be gained by pulling
+// further back except a character too small to read. Everything above it is the
+// player's own comfort.
+void ReadZoom(Camera2D &camera) {
+    int level = static_cast<int>(std::lround(camera.zoom));
+
+    if (IsKeyPressed(KEY_PAGE_UP)) level++;
+    if (IsKeyPressed(KEY_PAGE_DOWN)) level--;
+
+    if (ZoomModifier()) {
+        const float wheel = GetMouseWheelMove();
+
+        if (wheel > 0.0f) level++;
+        if (wheel < 0.0f) level--;
+    }
+
+    camera.zoom = static_cast<float>(std::clamp(level, config::kMinZoom, config::kMaxZoom));
 }
 
 void FollowPlayer(Camera2D &camera, const Player &player, float dt) {
@@ -1288,15 +1339,18 @@ void DrawHud(const World &world, const Grove &grove, const Player &player, const
     // And the wet lines keep their meaning by going pale blue rather than dark.
     const Color wet = {152, 206, 255, 255};
 
-    DrawLabel("A/D: move  |  space: jump  |  S: crouch  |  J: chop  |  mouse: aim  |  F: fly", 10, 10, ink);
+    DrawLabel("A/D: move  |  shift: run  |  space: jump  |  S: crouch  |  J: chop  |  mouse: aim  |  F: fly  |"
+              "  pg up/dn or ctrl+wheel: zoom",
+              10, 10, ink);
     DrawLabel("left: dig  |  right: place what is held  |  1-9 or wheel: slot  |  tab: inventory  |"
               "  - / +: brush size  |  R: regenerate",
               10, 28, ink);
     DrawLabel(TextFormat("V: vertices  |  F3: chunks  |  F4: height grid  |  F5: light probes  |  F6: unlit %s  |"
                          "  F7: fast weather %s  |  F8: next quarter  |  F9: season %s  |  F10: sheet  |"
-                         "  F11: stock up  |  , . : lantern %.1f",
-                         debug.unlit ? "on" : "off", debug.fastWeather ? "on" : "off", kSeasonNames[world.Sky().Turn().index],
-                         lantern),
+                         "  F11: stock up  |  F12: weather %s  |  , . : lantern %.1f",
+                         debug.unlit ? "on" : "off", debug.fastWeather ? "on" : "off",
+                         kSeasonNames[world.Sky().Turn().index],
+                         (world.Sky().ForcedMood() < 0) ? "auto" : world.Sky().MoodName(), lantern),
               10, 46, ink);
 
     DrawLabel(TextFormat("chunks: %d (%d pinned)   edits kept: %d   plants: %d (%d drawn, %d kept)   rays: %ld",
@@ -2120,7 +2174,7 @@ int main(int argc, char **argv) {
     Camera2D camera = {};
     camera.offset   = {GetScreenWidth() / 2.0f, GetScreenHeight() / 2.0f};
     camera.target   = player.Centre();
-    camera.zoom     = 1.0f;
+    camera.zoom     = static_cast<float>(config::kMinZoom);
 
     float accumulated = 0.0f;
     float lantern     = config::kLanternStrength;
@@ -2158,6 +2212,12 @@ int main(int argc, char **argv) {
         camera.offset = {GetScreenWidth() / 2.0f, GetScreenHeight() / 2.0f + GetScreenHeight() / 4.0f};
         liquids.Fit(GetScreenWidth(), GetScreenHeight());
         backdrop.Fit(GetScreenWidth(), GetScreenHeight());
+
+        // How far in the view is set, read before anything asks what the view
+        // covers. Outside the panel gate, unlike everything else about the world:
+        // a player who opened the inventory to look at something and wants to look
+        // at it closer is asking about the screen and not about the world.
+        ReadZoom(camera);
 
         // Chunks are generated over the simulated band, not merely the visible
         // one. A write-back to a vertex whose chunk is absent is dropped, which
@@ -2222,14 +2282,16 @@ int main(int argc, char **argv) {
             // panel; the plants above do not, since nothing about them is a
             // click.
             if (!holdOff) {
-                hotbar::Update(inventory);
+                hotbar::Update(inventory, ZoomModifier());
 
-                // Handed the player's position from before it moves this frame,
-                // which is what the reach is measured from and which side an
-                // overflowing dig throws its blocks out on. A frame of lag at a
-                // run is two pixels against a reach of ninety-six.
+                // Handed the player's body from before it moves this frame, which
+                // is what the reach is measured from, which side an overflowing
+                // dig throws its blocks out on, and the room no block may be laid
+                // in. A frame of lag at a run is six pixels against a reach of
+                // ninety-six, and a block laid into where the body is about to be
+                // is a block the body is stopped by rather than buried in.
                 const char *said =
-                    editor.Update(world, inventory, grove, camera, player.Centre(), world.Sky().Time());
+                    editor.Update(world, inventory, grove, camera, player.Bounds(), world.Sky().Time());
 
                 if (said != nullptr) {
                     notice    = said;
@@ -2251,6 +2313,13 @@ int main(int argc, char **argv) {
         // exactly why the key exists: the whole seasonal path can be exercised and
         // judged before there is a calendar to drive it.
         if (IsKeyPressed(KEY_F9)) world.CycleSeason();
+
+        // And holds a weather, for the same reason one stop further on: which
+        // weather blows is a pure function of the spell and the seed, so a storm
+        // is something to be waited for rather than something to be looked at.
+        // Everything a gale does — the rain, the shade, the gusts, the leaves
+        // coming off a wood — has to be judged with one blowing.
+        if (IsKeyPressed(KEY_F12)) world.CycleWeather();
 
         // An action beside the other two, and for the reason F8 gives: the debug
         // toggles hold the state of the screen, and this is not a state.

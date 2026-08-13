@@ -208,10 +208,6 @@ struct SpeciesGrowth {
     // runs fast under F7 with everything else.
     float maturityMinutes = 16.0f;
 
-    // Weather minutes after felling before the stump is gone and the species
-    // stands again. kNever leaves the stump where it fell.
-    float regrowMinutes = 12.0f;
-
     // How much of the growth rate hangs on light and on water, in [0,1]. At zero
     // the species grows at its own pace wherever it is; at one it stops entirely
     // in the dark or in the dry.
@@ -311,7 +307,6 @@ inline constexpr SpeciesDef
                         .abundance        = 1.0f,
                     },
                 .growth = {.maturityMinutes = 6.0f,
-                           .regrowMinutes   = 12.0f,
                            .lightNeed       = 0.55f,
                            .waterNeed       = 0.5f,
                            .toughness       = 5.0f},
@@ -386,7 +381,6 @@ inline constexpr SpeciesDef
                         .abundance        = 1.0f,
                     },
                 .growth = {.maturityMinutes = 8.0f,
-                           .regrowMinutes   = 16.0f,
                            .lightNeed       = 0.4f,
                            .waterNeed       = 0.35f,
                            .toughness       = 6.0f},
@@ -451,7 +445,6 @@ inline constexpr SpeciesDef
                         .abundance        = 0.75f,
                     },
                 .growth = {.maturityMinutes = 5.0f,
-                           .regrowMinutes   = 9.0f,
                            .lightNeed       = 0.65f,
                            .waterNeed       = 0.6f,
                            .toughness       = 3.5f},
@@ -516,7 +509,6 @@ inline constexpr SpeciesDef
                         .abundance        = 0.35f,
                     },
                 .growth = {.maturityMinutes = 4.0f,
-                           .regrowMinutes   = 10.0f,
                            .lightNeed       = 0.7f,
                            .waterNeed       = 0.65f,
                            .toughness       = 3.0f},
@@ -584,7 +576,6 @@ inline constexpr SpeciesDef
                         .abundance        = 1.0f,
                     },
                 .growth = {.maturityMinutes = 4.0f,
-                           .regrowMinutes   = 3.0f,
                            .lightNeed       = 0.2f,
                            .waterNeed       = 0.8f,
                            .toughness       = 1.0f},

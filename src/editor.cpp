@@ -42,7 +42,8 @@ void Editor::Bank(const World::Yield &freed, Inventory &inventory, Drops &drops,
     }
 }
 
-const char *Editor::Lay(World &world, Inventory &inventory, Drops &drops, Vector2 target, float away, float now) {
+const char *Editor::Lay(World &world, Inventory &inventory, Drops &drops, Vector2 target, Rectangle body, float away,
+                        float now) {
     const Stack &held = inventory.Held();
 
     const Element element = held.AsElement();
@@ -56,7 +57,7 @@ const char *Editor::Lay(World &world, Inventory &inventory, Drops &drops, Vector
 
     if (budget <= 0) return nullptr;
 
-    const World::Stroke stroke = world.Place(element, target, radius_, budget);
+    const World::Stroke stroke = world.Place(element, target, radius_, budget, body);
 
     // What is left is what was there minus what went into the ground, and the
     // slot is then set to however many whole blocks that comes to. Recomputing
@@ -76,8 +77,12 @@ const char *Editor::Lay(World &world, Inventory &inventory, Drops &drops, Vector
     return nullptr;
 }
 
-const char *Editor::Update(World &world, Inventory &inventory, Grove &grove, const Camera2D &camera, Vector2 player,
+const char *Editor::Update(World &world, Inventory &inventory, Grove &grove, const Camera2D &camera, Rectangle body,
                            float now) {
+    // Where the character is, for the reach and for which side a spilled block
+    // is thrown out on. The middle of the body, which is where the arm is.
+    const Vector2 player = {body.x + body.width / 2.0f, body.y + body.height / 2.0f};
+
     // Sized with keys rather than the wheel, which already steps through the
     // hotbar. Two meanings on one control is exactly the kind of thing having a
     // button per hand is here to avoid.
@@ -130,7 +135,7 @@ const char *Editor::Update(World &world, Inventory &inventory, Grove &grove, con
 
     const Stack &held = inventory.Held();
 
-    if (held.holds == Holds::Material) return Lay(world, inventory, grove.Fallen(), target, away, now);
+    if (held.holds == Holds::Material) return Lay(world, inventory, grove.Fallen(), target, body, away, now);
 
     // Everything past here answers the press rather than the hold. A brush lays
     // material for as long as the button is down because a stroke is a continuous

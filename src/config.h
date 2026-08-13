@@ -18,6 +18,17 @@ inline constexpr int kMinScreenHeight = 400;
 
 inline constexpr int kTargetFps = 60;
 
+// How far the view may be pushed in, as whole multiples of one screen pixel per
+// world pixel. See ReadZoom for why nothing between them is offered.
+//
+// One is the floor: it is the framing every size in this world was chosen
+// against, and it shows more ground than any other setting. Three is as far in as
+// is worth going — at that the thousand pixels of the window are three hundred
+// and thirty of world, which is a couple of mature trees across, and past it the
+// player can no longer see far enough ahead to run.
+inline constexpr int kMinZoom = 1;
+inline constexpr int kMaxZoom = 3;
+
 // Spacing in pixels between neighbouring grid vertices.
 inline constexpr int kResolution = 6;
 
@@ -74,9 +85,10 @@ inline constexpr float kPixelSize = 5.0f;
 // with room for the notches and the dark accents the reference art is made of.
 //
 // Two and not two and a half, which is what half of kPixelSize would have been.
-// The camera does not zoom, so a square of this size is exactly this many pixels
-// on screen, and at two and a half every sprite would have been drawn with its
-// columns alternating two pixels wide and three. An integer is the whole of the
+// The camera zooms only by whole multiples — see kMaxZoom — so a square of this
+// size is always exactly this many pixels on screen times the zoom, and at two
+// and a half every sprite would have been drawn with its columns alternating two
+// pixels wide and three however the view was set. An integer is the whole of the
 // requirement; nesting inside the ground's squares is not one, since the terrain
 // fills its interior a whole lattice cell at a time and only steps its outline
 // at kPixelSize — there is no texel grid there for this to line up with.

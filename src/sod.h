@@ -228,12 +228,17 @@ struct Blades {
     int firstColumn = 0;
     float spacing   = 1.0f;
 
-    // How much of each tuft has grown back since it was cut, in [0,1], on the
-    // tuft's own grid rather than on the lattice.
+    // What is left of each tuft, in [0,1], on the tuft's own grid rather than on
+    // the lattice. One where nobody has touched it and zero where it has been
+    // cut, and nothing in between: cut grass is gone.
     //
-    // Its own array because a tuft is nine pixels wide and a column is six: what
+    // Its own array because a tuft is ten pixels wide and a column is six: what
     // has happened to one tuft is not a property of any column, and rounding it
     // onto the lattice would have a cut take its neighbour's grass with it.
+    //
+    // Kept as a share rather than as a flag because what it is is a height, and
+    // whatever puts grass back — a bonemeal in the hand, most likely — will want
+    // to bring one up rather than switch it on.
     const float *standing   = nullptr;
     int cells               = 0;
     std::int64_t firstCell  = 0;
@@ -241,18 +246,68 @@ struct Blades {
     bool Empty() const { return ramp == nullptr || count <= 0; }
 };
 
-// Weather minutes a cut tuft takes to stand again.
+// How established the grass in a column has to be before a tuft standing in it
+// is worth anything.
 //
-// On the same clock the plants grow and the weather runs on, so F7 shows a mown
-// field coming back in seconds rather than leaving it to be taken on trust.
-inline constexpr float kMowMinutes = 2.5f;
+// All of it. Grass creeping back onto turned earth is grass that has not finished
+// growing, and cutting it takes it away without paying for it — the same rule
+// Minecraft applies to a crop, and the reason a player waits rather than
+// harvesting the moment a blade shows.
+//
+// Just under one rather than one exactly, so a column that has finished
+// establishing counts on the frame it finishes and not on whichever later frame
+// the arithmetic lands on the number itself.
+inline constexpr float kRipe = 0.995f;
 
-// How much of a tuft is left the moment it is cut.
+// Weather minutes it takes grass to establish on earth that has just been turned
+// over, once it has something to spread from.
 //
-// Not zero, and that is deliberate: grass cut to the ground is bare earth, and
-// what a blow with a hand tool actually leaves is stubble. It also means a cut
-// reads as a change to the grass rather than as the grass disappearing.
-inline constexpr float kStubble = 0.18f;
+// Turned over covers both hands: soil the player laid down, and soil a dig
+// uncovered. They are the same event to the ground — a face of bare earth that
+// had no grass on it a moment ago — and a rule that treated them differently
+// would have a shovel make lawn out of a hillside while a trowel could not.
+//
+// On the clock the mowing already runs on, and a little under it: coming back
+// after a cut is regrowth from living roots, and this is a colony arriving
+// somewhere it was not.
+inline constexpr float kTakeMinutes = 1.5f;
+
+// How fast the edge of a field advances into it, in world pixels per weather
+// minute.
+//
+// Six blocks a minute. What this decides is the shape of the thing rather than
+// its speed: a column is turfed a delay after the column beside it, so the green
+// crosses new ground as a front and a wide platform is still bare in the middle
+// long after its edges have taken. Set it high enough and the whole platform
+// greens at once, which is the fault this was written to fix wearing a slower
+// coat.
+//
+// At this rate a hole five blocks across closes from both sides in forty seconds
+// and a platform thirty blocks wide takes two and a half minutes to meet in the
+// middle, which is the range a player actually builds in.
+inline constexpr float kCreepPerMinute = 96.0f;
+
+// How far the front will travel at all, in world pixels.
+//
+// Grass spreads from grass, so ground further than this from any is ground with
+// nothing to spread from. Rather than leave it bare for ever — which is what
+// Minecraft does, and which here would mean a platform built out over a canyon
+// that never greened and never said why — the front simply stops advancing and
+// the delay saturates, so the far middle of a very large build is the last thing
+// to turn and turns at a known time. That bound is also what lets a record be
+// dropped: past kTakeMinutes plus this distance's worth of creep, no column can
+// still be waiting.
+//
+// Bounded from above by something other than taste: the distance is measured
+// across the band ReadSod works out, so it can only find grass that band reaches.
+// Keeping it inside the margin that band is widened by means every column on
+// screen can see every source within reach of it, and the answer therefore does
+// not change as the view scrolls over it. The static assertion in ReadSod is what
+// holds the two together.
+inline constexpr float kCreepReach = 240.0f;
+
+// The longest any turned column can be waiting, in weather seconds.
+inline constexpr float kSettleSeconds = (kTakeMinutes + kCreepReach / kCreepPerMinute) * 60.0f;
 
 // The tufts standing on the band, drawn texel by texel on the plant grid.
 //
@@ -270,6 +325,11 @@ void DrawTufts(const Blades &ground, Rectangle view, float now, int seed);
 //
 // Reported rather than acted on: what a cut tuft is worth belongs to the caller,
 // exactly as World::Excavate reports a yield rather than deciding what it buys.
-int Cut(const Blades &ground, Rectangle hitbox, int seed, std::int64_t *into, int room);
+//
+// `ripe` is filled alongside `into` and says, of each cell taken, whether the
+// grass there was fully established — see kRipe. Both are reported because they
+// are two different facts and the caller needs both: every cell taken is a cell
+// that has been cleared, and only the ripe ones are cells that pay.
+int Cut(const Blades &ground, Rectangle hitbox, int seed, std::int64_t *into, bool *ripe, int room);
 
 } // namespace sod
