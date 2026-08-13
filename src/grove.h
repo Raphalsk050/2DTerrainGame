@@ -209,6 +209,14 @@ private:
 
     std::unordered_map<std::int64_t, TreeState> remembered_;
 
+    // How many trees the player has planted, which is also the next one's key.
+    //
+    // Planted trees live in the same map as everything else, keyed from a base no
+    // cell index can reach — see kPlantedBase. One map means Remember, Read,
+    // Strike, Yield and Forget go on answering for a planted tree exactly as they
+    // do for a grown one, and none of them has to know which it is holding.
+    std::int64_t nextPlanted_ = 0;
+
     Drops drops_;
 
     flora::Settings settings_{};

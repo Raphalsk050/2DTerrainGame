@@ -82,11 +82,27 @@ constexpr float kStrikeSlack = 8.0f;
 // over a hole. See Grove::Undermine for why one is not enough.
 constexpr int kFootingProbe = 3;
 
-// Cells either side the planting looks in when the one asked for is taken.
+// How close together two trunks may be planted, in world pixels.
 //
-// One. Two put the sapling far enough away that the player could not see where
-// it had gone, which reads as the seed having been eaten.
-constexpr int kPlantReach = 1;
+// One block, which is to say very nearly touching. What this replaces was a
+// spacing of a hundred and ten — the width of the scatter's cell — and that is a
+// rule about how a wood arranges itself when it grows on its own, not about what
+// a player may do with a sapling in their hand. Minecraft lets saplings sit in
+// neighbouring blocks and so does this.
+//
+// Not zero, because two trunks in the same place are one trunk drawn twice.
+constexpr float kPlantApart = 16.0f;
+
+// Where the ids of planted trees begin.
+//
+// Records are keyed by cell index for everything the world grew itself, so a
+// planted tree needs a key no cell can ever be. A cell index is a world position
+// over the cell span, and a world position is a float — which stops counting in
+// whole pixels above two to the twenty-fourth, about sixteen million. Over a
+// span of a hundred and ten that is an index under a hundred and fifty thousand,
+// and this base clears the largest one the world can produce by seven million
+// times.
+constexpr std::int64_t kPlantedBase = 1LL << 40;
 
 // Weather minutes a tree takes to close over a blow it survived.
 //
@@ -810,44 +826,33 @@ flora::Species Grove::Suited(float worldX) const {
 }
 
 bool Grove::Plant(flora::Species species, Vector2 world, float now) {
-    // One per cell, the same rule the scatter follows — otherwise a planted wood
-    // could be packed tighter than any wood the world grows. But a cell holding
-    // nothing but a stump is free: cutting a tree and putting one back where it
-    // stood is the most natural thing a player does, and refusing it silently was
-    // the worst of both answers.
-    const auto vacant = [this](std::int64_t cell) {
-        if (const auto found = remembered_.find(cell); found != remembered_.end()) {
-            const TreeState &state = found->second;
+    // A planted tree is not part of the scatter, and so is not bound by the
+    // scatter's one-per-cell rule.
+    //
+    // That rule is what makes a wood cost nothing — every procedural plant is a
+    // pure function of its cell index, and a cell grows one. But a planted tree
+    // is the single plant the procedural pass knows nothing about: it carries its
+    // own position rather than deriving one, and its record is the only evidence
+    // it exists at all. Keeping it inside the cell space bought nothing and cost
+    // the player a hundred and ten pixels between saplings, which is the width of
+    // an oak's canopy and not a rule anybody asked for.
+    //
+    // Nor could that be tuned away. The span has to be at least the widest canopy
+    // in the layer or the scatter's bound stops holding, and at a hundred and ten
+    // against an oak's hundred and five it is already as low as it goes.
+    //
+    // So the spacing here is its own, it is small, and it is only about trunks
+    // standing on top of one another.
+    for (const flora::Plant &standing : plants_) {
+        if (std::fabs(standing.base.x - world.x) >= kPlantApart) continue;
 
-            if (state.planted || state.felledAt < 0.0f) return false;
-        }
+        // Read before believing it. `plants_` is what the world *would* grow
+        // rather than what is standing, so a felled tree is still in it — and the
+        // stump of one is the commonest place a player puts a sapling.
+        const Standing state = Read(standing, now);
+        if (state.felling >= 0.0f || state.stump) continue;
 
-        for (const flora::Plant &standing : plants_) {
-            if (standing.id != cell) continue;
-
-            // Standing timber, unless it is the felled one whose record said so.
-            const auto found = remembered_.find(cell);
-            if (found == remembered_.end() || found->second.felledAt < 0.0f) return false;
-        }
-
-        return true;
-    };
-
-    std::int64_t cell = flora::CellAt(flora::Layer::Canopy, settings_, world.x);
-
-    // And if the spot really is taken, the next one over will do. Walking a
-    // player two paces to find a gap is a worse game than putting the sapling
-    // where a sapling can go.
-    if (!vacant(cell)) {
-        const std::int64_t wanted = cell;
-
-        cell = wanted;
-
-        for (int step = 1; step <= kPlantReach && !vacant(cell); step++) {
-            cell = vacant(wanted + step) ? wanted + step : wanted - step;
-        }
-
-        if (!vacant(cell)) return false;
+        return false;
     }
 
     TreeState fresh;
@@ -858,25 +863,16 @@ bool Grove::Plant(flora::Species species, Vector2 world, float now) {
     fresh.planted   = true;
     fresh.species   = static_cast<std::uint8_t>(flora::SpeciesIndex(species));
 
-    // Where the player asked, held inside whichever cell took it.
+    // Exactly where the player asked, standing on the ground under that point.
     //
-    // The centre of the cell is what this was, and it made planting look broken:
-    // when the spot asked for was taken, the search moved a cell or two over and
-    // then put the sapling in the *middle* of that one — up to a couple of
-    // hundred pixels away, off the edge of what the player was looking at. The
-    // sapling went in, the seed was spent, and nothing appeared to have happened.
-    //
-    // Clamped rather than centred, so it lands at the player's feet when the cell
-    // is theirs and against the near edge when it is not.
-    const float span  = settings_.layer[flora::LayerIndex(flora::Layer::Canopy)].cellSpan;
-    const float inset = span * 0.15f;
+    // It used to be clamped into whichever cell had taken the sapling, which was
+    // itself a fix for putting it at that cell's centre — a sapling could land a
+    // couple of hundred pixels from the cursor, off the edge of what the player
+    // was looking at, and read as the seed having been eaten. With no cell to be
+    // held inside, both go away.
+    fresh.at = {world.x, flora::GroundAt(ground_, world.x) + ground_.spacing * 0.5f};
 
-    const float where =
-        std::clamp(world.x, static_cast<float>(cell) * span + inset, static_cast<float>(cell + 1) * span - inset);
-
-    fresh.at = {where, flora::GroundAt(ground_, where) + ground_.spacing * 0.5f};
-
-    remembered_.emplace(cell, fresh);
+    remembered_.emplace(kPlantedBase + nextPlanted_++, fresh);
 
     return true;
 }
