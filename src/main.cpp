@@ -579,6 +579,11 @@ void ReportCaves(const terrain::Settings &settings, Rectangle region) {
     }
 
     const auto count = static_cast<std::size_t>(cols) * static_cast<std::size_t>(rows);
+
+    // Read and discarded, so that what is reported below is this scan's own work
+    // rather than the world's calibration, which samples scattered points at
+    // startup and misses every one of them by construction.
+    terrain::Effort();
     const auto index = [cols](int i, int j) { return static_cast<std::size_t>(j) * cols + i; };
 
     // The whole region held at once. The flood fill has to see it as one
@@ -769,6 +774,17 @@ void ReportCaves(const terrain::Settings &settings, Rectangle region) {
 
     std::printf("region %.0f x %.0f px at (%.0f, %.0f)   %d x %d cells of %.0f px\n\n", region.width, region.height,
                 region.x, region.y, cols, rows, step);
+
+    {
+        const terrain::Work work = terrain::Effort();
+
+        std::printf("cave memo\n");
+        std::printf("  %ld lookups, %ld rebuilt (%.1f%% missed), %ld placement tests\n", work.asked, work.built,
+                    100.0 * static_cast<double>(work.built) / std::max(work.asked, 1L), work.sited);
+        std::printf("  %.1f lookups and %.2f rebuilds per sample\n\n",
+                    static_cast<double>(work.asked) / std::max(count, std::size_t{1}),
+                    static_cast<double>(work.built) / std::max(count, std::size_t{1}));
+    }
 
     std::printf("volume\n");
     std::printf("%14s %9s %12s %12s\n", "depth", "void", "of it open", "cells");
@@ -1488,8 +1504,8 @@ int main(int argc, char **argv) {
                     // doing it. Snapping to a coarser figure would put them four
                     // times further apart and make each one a waterfall.
                     .level = {.frequency = 0.006f, .octaves = 1, .seed = 4430},
-                    .depth = 3000.0f,
-                    .swing = 1200.0f,
+                    .depth = 3600.0f,
+                    .swing = 1100.0f,
                     .step  = 12.0f,
                 },
 

@@ -477,6 +477,16 @@ struct Ground {
 
 Ground SampleGround(Vector2 world, const Settings &s);
 
+// What the cave memo did since this was last called, on this thread. Reading it
+// resets the count.
+struct Work {
+    long asked; // Systems() calls.
+    long built; // Of those, the ones that had to be dug again.
+    long sited; // Placement tests, each of which costs a surface evaluation.
+};
+
+Work Effort();
+
 // Density thresholded into ground or air. The threshold is passed in rather
 // than stored here: it belongs to the element the field represents, and keeping
 // a second copy alongside the noise settings is what let drawing and collision

@@ -1,6 +1,9 @@
 #include "grove.h"
 
 #include "config.h"
+#include "marching_squares.h"
+
+#include "config.h"
 
 #include <algorithm>
 #include <cmath>
@@ -288,7 +291,16 @@ void Grove::ReadGround(const World &world, Rectangle view) {
     for (int i = 0; i < count; i++) {
         const float x = static_cast<float>(first + i) * spacing;
 
-        surface_[static_cast<std::size_t>(i)] = world.Skyline(first + i);
+        // The top of the ground as it is *drawn*, not where the contour says it
+        // is. A square is filled when its centre is inside, so the drawn surface
+        // is the first such row at or below the crossing — up to most of a texel
+        // below it, by a different amount in every column. A trunk based on the
+        // crossing therefore stands that far above the ground it grew in, and
+        // beside a character standing on the drawn surface it is the character
+        // that reads as floating. The grass has always been placed this way; the
+        // trees were not, and the two disagreeing by a texel is the whole of it.
+        surface_[static_cast<std::size_t>(i)] =
+            marching_squares::DrawnTop(world.Skyline(first + i), config::kPixelSize);
         sunk_[static_cast<std::size_t>(i)] =
             surface_[static_cast<std::size_t>(i)] - terrain::Height(x, world.Settings());
     }

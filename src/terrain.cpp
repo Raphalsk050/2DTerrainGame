@@ -447,19 +447,66 @@ namespace {
 // a chunk needs are asked for over and over and then never again; a handful of
 // entries is the whole of what there is to gain, and an unbounded map would keep
 // every system the player ever walked past.
+// Every system that could reach a position, built once and kept.
+//
+// The memo is not state in any sense that matters: it holds the value of a pure
+// function of the cell index, and throwing it away changes nothing but the time.
+// Per thread, because the light solve runs on several and a shared one would need
+// a lock on the hottest path in the generator.
+//
+// **Indexed by the low bits of the cell, and that is not an optimisation to be
+// traded away.** Two earlier versions were measured and both were the whole cost
+// of the generator:
+//
+//   - Searching the entries in turn is the obvious thing and cost forty
+//     microseconds a sample, fifty times the whole of the old generator. An entry
+//     carries a system, so entries are large, and walking thirty-two of them
+//     fifteen times per vertex is hundreds of cache misses to answer a question
+//     one probe can answer.
+//   - Hashing the cell into a slot fixed that and was *worse*, at twenty-two
+//     rebuilds a sample. A hash scatters, and what is being cached here is a
+//     contiguous block of cells that is walked in full for every vertex — so any
+//     two of them that happened to share a slot evicted each other every time,
+//     for ever. Nothing about a random slot suits a working set that is a
+//     rectangle.
+//
+// The low bits of the cell coordinates are the right index precisely because the
+// working set is that rectangle: no two cells of any four-by-eight block can
+// collide, the query walks three by five, and the miss rate is therefore zero
+// once a chunk is under way rather than merely small.
+//
+// Keys are held apart from the systems so that a probe touches sixteen bytes and
+// a whole chunk's lookups stay inside a couple of cache lines.
+// What the memo is actually doing, for the probe. A generator that spends its
+// time rebuilding what it already had looks exactly like one that is slow.
+thread_local long gAsked  = 0;
+thread_local long gBuilt  = 0;
+thread_local long gSited  = 0;
+
 struct Memo {
-    struct Entry {
+    static constexpr std::size_t kEntries = 32;
+
+    struct Key {
         std::int64_t cellX = 0;
         std::int64_t cellY = 0;
         int seed           = 0;
         bool built         = false;
-        cave::System system;
     };
 
-    static constexpr std::size_t kEntries = 32;
+    std::array<Key, kEntries> keys{};
+    std::array<cave::System, kEntries> systems{};
 
-    std::array<Entry, kEntries> entries{};
-    std::size_t next = 0;
+    // Four cells across by eight down, which the three-by-five window a query
+    // walks fits inside whatever it is aligned to.
+    static constexpr std::size_t kAcross = 4;
+    static constexpr std::size_t kDown   = 8;
+
+    static std::size_t Slot(std::int64_t cellX, std::int64_t cellY) {
+        const auto across = static_cast<std::size_t>(cellX & static_cast<std::int64_t>(kAcross - 1));
+        const auto down   = static_cast<std::size_t>(cellY & static_cast<std::int64_t>(kDown - 1));
+
+        return across * kDown + down;
+    }
 };
 
 // Whether a cell holds a system, and where it starts.
@@ -469,6 +516,8 @@ struct Memo {
 // along the walk, so a system is one thing — a cave either is here or is not,
 // rather than fading out along its own length the way a thresholded field does.
 bool Sited(std::int64_t cellX, std::int64_t cellY, const Settings &s, Vector2 &outOrigin, float &outDepth) {
+    gSited++;
+
     const CaveSettings &caves = s.caves;
 
     if (!cave::Origin(cellX, cellY, caves.systems, s.seed, outOrigin)) return false;
@@ -485,28 +534,32 @@ bool Sited(std::int64_t cellX, std::int64_t cellY, const Settings &s, Vector2 &o
 
 const cave::System &Systems(std::int64_t cellX, std::int64_t cellY, const Settings &s) {
     static thread_local Memo memo;
-    static const cave::System kNone;
 
-    for (const Memo::Entry &entry : memo.entries) {
-        if (entry.built && entry.cellX == cellX && entry.cellY == cellY && entry.seed == s.seed) return entry.system;
-    }
+    gAsked++;
 
-    Memo::Entry &slot = memo.entries[memo.next];
+    const std::size_t slot = Memo::Slot(cellX, cellY);
 
-    memo.next = (memo.next + 1) % Memo::kEntries;
+    Memo::Key &key = memo.keys[slot];
 
-    slot.cellX  = cellX;
-    slot.cellY  = cellY;
-    slot.seed   = s.seed;
-    slot.built  = true;
-    slot.system = cave::System{};
+    if (key.built && key.cellX == cellX && key.cellY == cellY && key.seed == s.seed) return memo.systems[slot];
+
+    key.cellX = cellX;
+    key.cellY = cellY;
+    key.seed  = s.seed;
+    key.built = true;
+
+    gBuilt++;
+
+    cave::System &built = memo.systems[slot];
+
+    built = cave::System{};
 
     const CaveSettings &caves = s.caves;
 
     Vector2 origin{};
     float depth = 0.0f;
 
-    if (!Sited(cellX, cellY, s, origin, depth)) return slot.system;
+    if (!Sited(cellX, cellY, s, origin, depth)) return built;
 
     // The four neighbours, so the corridors between systems can be aimed. Each
     // side digs to the midpoint of the two origins, so both halves meet without
@@ -535,10 +588,10 @@ const cave::System &Systems(std::int64_t cellX, std::int64_t cellY, const Settin
         highest = std::min(highest, Height(origin.x + bound * (static_cast<float>(i) / 4.0f - 1.0f), s));
     }
 
-    slot.system = cave::Build(cellX, cellY, caves.systems, s.seed, origin, depth,
+    built = cave::Build(cellX, cellY, caves.systems, s.seed, origin, depth,
                               highest + caves.crust + caves.crustFade, surface, around);
 
-    return slot.system;
+    return built;
 }
 
 // Solidity at a position whose depth below the surface has already been found.
@@ -568,7 +621,12 @@ float SolidityBelow(Vector2 world, float depth, const Settings &s) {
     // which is what makes that a fact rather than a hope.
     float into = -kFar;
 
-    for (std::int64_t dy = -1; dy <= 1; dy++) {
+    // Two cells up and down, one either side. A link is allowed half again the
+    // cell's height so that it can reach the system below it, so a cell two rows
+    // away *can* have dug here and leaving it out would put a seam across every
+    // second row of cells. Sideways a walk is bounded by the cell's own width, so
+    // one is enough there.
+    for (std::int64_t dy = -2; dy <= 2; dy++) {
         for (std::int64_t dx = -1; dx <= 1; dx++) {
             into = std::max(into, -cave::Carve(world, Systems(cellX + dx, cellY + dy, s)));
         }
@@ -642,6 +700,16 @@ Image ToImage(const Field &field) {
     }
 
     return image;
+}
+
+Work Effort() {
+    const Work work{gAsked, gBuilt, gSited};
+
+    gAsked = 0;
+    gBuilt = 0;
+    gSited = 0;
+
+    return work;
 }
 
 } // namespace terrain
