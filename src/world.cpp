@@ -1453,6 +1453,51 @@ void World::ReadSod(Rectangle view) {
 
     const int columns = static_cast<int>(std::ceil((view.width + 2.0f * kMargin) / step)) + 2;
 
+    // Nothing at all when the ground is nowhere near the view, and this is the
+    // difference between sixty frames a second and eight.
+    //
+    // Grass is only ever drawn on the surface, but the work of finding the
+    // surface was done wherever the player happened to be looking. Each column
+    // walks SurfaceOf, which steps the lattice through some seven hundred pixels
+    // asking GroundValueAt — every occupying material — at each step; over the
+    // seven hundred and sixty columns of a view that is a hundred thousand
+    // lattice reads a frame. Near the ground they land in resident chunks and
+    // cost nothing much. Fly a screen away and they land outside every resident
+    // chunk, where a read is answered by generating that vertex from the noise,
+    // contest and all — and the same pass costs a hundred milliseconds.
+    //
+    // The band is taken from terrain::Height rather than from the built surface,
+    // because it has to be cheap and because it does not need to be exact: it is
+    // only deciding whether the ground is within reach of the view at all, and
+    // the margins below are far wider than anything digging can move it by.
+    {
+        constexpr float kProbeStep = 64.0f;
+
+        // What SurfaceOf itself would search, either side of the ground.
+        constexpr float kAbove = 160.0f;
+        constexpr float kBelow = 704.0f;
+
+        float highest = kUnboundedDepth;
+        float lowest  = -kUnboundedDepth;
+
+        for (float x = view.x - kMargin; x <= view.x + view.width + kMargin; x += kProbeStep) {
+            const float top = terrain::Height(x, settings_);
+
+            highest = std::min(highest, top);
+            lowest  = std::max(lowest, top);
+        }
+
+        if (highest - kAbove > view.y + view.height || lowest + kBelow < view.y) {
+            sodRamp_.clear();
+            sodCover_.clear();
+            sodTop_.clear();
+            sodPush_.clear();
+            sodStanding_.clear();
+
+            return;
+        }
+    }
+
     sodRamp_.resize(static_cast<std::size_t>(columns));
     sodCover_.assign(static_cast<std::size_t>(columns), 1.0f);
     sodTop_.assign(static_cast<std::size_t>(columns), 0.0f);

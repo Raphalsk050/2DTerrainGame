@@ -1087,6 +1087,85 @@ void ReportSettling(World &world, Rectangle region, int steps) {
                 world.TotalWater(region));
 }
 
+// Where a frame's time actually goes, at a place in the world.
+//
+// Every phase the loop runs, in the order it runs them, timed separately. It
+// exists because a frame that has gone slow says nothing about which of six
+// things did it, and the two costs worth finding — the ones that grow with
+// distance from the surface — are invisible from any single-phase measurement.
+//
+// Run twice over: the first pass pays for whatever the region needed generating,
+// which is a real cost but a one-off, and the second is what a frame standing
+// still actually costs.
+void ReportFrame(World &world, Grove &grove, Harvest &gathered, Vector2 at, int frames) {
+    const Rectangle view   = {at.x - 500.0f, at.y - 300.0f, 1000.0f, 600.0f};
+    const Rectangle active = Expand(view, kSimulationMargin);
+
+    constexpr float kStep = 1.0f / 60.0f;
+
+    std::printf("at (%.0f, %.0f), surface y %.0f, %d frames\n\n", at.x, at.y,
+                terrain::Height(at.x, world.Settings()), frames);
+    std::printf("%-14s %10s %10s\n", "", "first ms", "then ms");
+
+    struct Phase {
+        const char *name;
+        double first;
+        double rest;
+    };
+
+    std::array<Phase, 5> phases = {{{"world.Update", 0, 0},
+                                    {"grove.Update", 0, 0},
+                                    {"StepWater", 0, 0},
+                                    {"StepWeather", 0, 0},
+                                    {"StepLight", 0, 0}}};
+
+    for (int f = 0; f < frames; f++) {
+        double marks[5]{};
+
+        double t0 = GetTime();
+        world.Update(active);
+        marks[0] = (GetTime() - t0) * 1000.0;
+
+        t0 = GetTime();
+        grove.Update(world, view, at, world.Sky().Time(), kStep, gathered);
+        marks[1] = (GetTime() - t0) * 1000.0;
+
+        t0 = GetTime();
+        world.StepWater(active);
+        marks[2] = (GetTime() - t0) * 1000.0;
+
+        t0 = GetTime();
+        world.StepWeather(kStep);
+        marks[3] = (GetTime() - t0) * 1000.0;
+
+        t0 = GetTime();
+        grove.Shade(world, world.Sky().Time());
+        world.StepLight(active);
+        marks[4] = (GetTime() - t0) * 1000.0;
+
+        for (std::size_t p = 0; p < phases.size(); p++) {
+            if (f == 0) {
+                phases[p].first = marks[p];
+            } else {
+                phases[p].rest += marks[p];
+            }
+        }
+    }
+
+    double total = 0.0;
+
+    for (const Phase &phase : phases) {
+        const double rest = phase.rest / std::max(frames - 1, 1);
+
+        total += rest;
+
+        std::printf("%-14s %10.2f %10.2f\n", phase.name, phase.first, rest);
+    }
+
+    std::printf("%-14s %10s %10.2f   (%.0f fps)\n\n", "steady frame", "", total, (total > 0.0) ? 1000.0 / total : 0.0);
+    std::printf("chunks resident %d, pinned %d\n", world.ResidentChunks(), world.PinnedChunks());
+}
+
 void Draw(const World &world, const Grove &grove, const Harvest &gathered, const Player &player,
           const Hotbar &hotbar, const Editor &editor, const LiquidLayer &liquids, const LightLayer &lights,
           const Camera2D &camera, const debug_view::Toggles &debug, float lantern, const char *notice,
@@ -1316,9 +1395,13 @@ int main(int argc, char **argv) {
     // is simulated. See ReportSettling.
     const bool settling = argc >= 6 && TextIsEqual(argv[1], "--settle");
 
+    // `--frame x y [frames]` times every phase of the loop at a place. See
+    // ReportFrame.
+    const bool timing = argc >= 4 && TextIsEqual(argv[1], "--frame");
+
     // Resizable, with a floor under it: below the minimum the hotbar is wider than
     // the frame and the head-up display runs off the side of it.
-    SetConfigFlags((probing || counting || weighing || reading || digging || assaying || settling)
+    SetConfigFlags((probing || counting || weighing || reading || digging || assaying || settling || timing)
                        ? FLAG_WINDOW_HIDDEN
                        : FLAG_WINDOW_RESIZABLE);
 
@@ -1867,6 +1950,17 @@ int main(int argc, char **argv) {
     if (counting) {
         ReportCovers(settings, static_cast<float>(std::atof(argv[2])), static_cast<float>(std::atof(argv[3])),
                      static_cast<float>(std::atof(argv[4])));
+
+        CloseWindow();
+        return 0;
+    }
+
+    if (timing) {
+        Harvest timed{};
+
+        ReportFrame(world, grove, timed,
+                    {static_cast<float>(std::atof(argv[2])), static_cast<float>(std::atof(argv[3]))},
+                    (argc >= 5) ? std::atoi(argv[4]) : 20);
 
         CloseWindow();
         return 0;
