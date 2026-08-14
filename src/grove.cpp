@@ -53,16 +53,20 @@ constexpr int kSwayBands = 8;
 // a root the growth is steepest exactly where the numbers are smallest, which is
 // where it was needed.
 
-// Seconds one full sway takes at rest, and how much faster a hard wind drives it.
-// A branch has its own period and the wind sets how hard it is pushed, not how
-// fast it swings — but a stiff wind does shorten it, so the two are related and
-// neither is a constant.
+// Seconds one full sway takes in still air, and seconds it takes when the wind is
+// hard on. A branch has its own period and the wind sets how hard it is pushed, not
+// how fast it swings — but a stiff wind does shorten it, so there are two.
 //
-// The urgency is double what it was, and only now means what it says: it used to
-// multiply a share that never left the middle of its range, so every tree in every
-// weather swung at about the same rate whatever the figure said.
+// Two periods rather than one period and a multiplier, because the wind has to
+// choose between fixed rates rather than set a rate. See Lean for what setting one
+// costs; in short, a rate multiplied by the absolute clock is not a frequency.
+//
+// `kSwayUrgency` is now how much of the wind it takes to hear the quick one alone:
+// at this figure a gale is entirely the quick sway and a light breeze is almost
+// entirely the slow one.
 constexpr float kSwayPeriod  = 3.1f;
-constexpr float kSwayUrgency = 0.90f;
+constexpr float kSwayHurry   = 1.6f;
+constexpr float kSwayUrgency = 1.30f;
 
 // Share of the sky a crown holds back from the ground under it.
 //
@@ -438,9 +442,30 @@ float Lean(const weather::Sky &sky, const flora::Plant &plant, float now) {
     // Taken from the cell, so a tree sways the same way every time it is met.
     const float phase = static_cast<float>((plant.id * 2654435761LL) & 0xffff) / 65536.0f;
 
-    const float rate = (1.0f + std::fabs(push) * kSwayUrgency) / kSwayPeriod;
+    // Two oscillators at fixed rates, crossfaded by the wind — never one oscillator
+    // whose rate the wind sets.
+    //
+    // This is the difference between modulating a frequency and multiplying by one,
+    // and getting it wrong is spectacular. Written `sin(now * rate)` with `rate`
+    // varying, the angle's true speed is `rate + now * d(rate)/dt`: the second term
+    // carries the *absolute clock* as a factor, so as a session runs on, an ordinary
+    // gust rising and falling whips the phase round faster and faster. At an hour of
+    // weather time a wood swaying twice a second was vibrating at eighty. It showed
+    // up first after F7, which reaches that hour in a minute and a half, and read as
+    // the fast-weather animation carrying on after the fast weather stopped — but it
+    // was never the toggle. It was the clock.
+    //
+    // Both rates here are constants, so the angle only ever advances at the rate it
+    // says, and the wind changes which of the two is heard rather than how fast
+    // either runs.
+    const float turn = (now + phase * kSwayPeriod) * 2.0f * 3.14159265f;
 
-    const float swing = std::sin((now * rate + phase) * 2.0f * 3.14159265f);
+    const float easy  = std::sin(turn / kSwayPeriod);
+    const float hurry = std::sin(turn / kSwayHurry + phase);
+
+    const float urgency = std::clamp(std::fabs(push) * kSwayUrgency, 0.0f, 1.0f);
+
+    const float swing = easy * (1.0f - urgency) + hurry * urgency;
 
     // Held over by the wind, and ringing about wherever it is being held. In a gale
     // the hold is several times the quiver, so the tree never crosses upright —
@@ -546,6 +571,15 @@ void Grove::Update(const World &world, Rectangle view, Vector2 player, float now
     flora::Scatter(flora::Layer::Canopy, view.x - kLead, view.x + view.width + kLead, settings_, terrain_, ground_,
                    plants_);
 
+    // The hand-planted ones appended before anything walks the list, and that
+    // placement is load-bearing rather than tidy. `Scatter` fills `plants_` with
+    // what the world grows, which a planted tree is by definition not; everything
+    // below — the yield of a felled trunk, the thinning of the undergrowth beneath
+    // one — reads `plants_` and would simply not see them. It ran last, so a planted
+    // tree that was chopped down was never in the list on the frame its wood was due
+    // and gave up nothing, however big it had grown.
+    Planted(view);
+
     // Trees that have just finished going over give up what they were carrying.
     //
     // Done here rather than at the moment of the killing blow, because what the
@@ -578,7 +612,6 @@ void Grove::Update(const World &world, Rectangle view, Vector2 player, float now
 
     Thin();
 
-    Planted(view);
     Undermine(world, now);
     Ripen(world, now, dt);
 

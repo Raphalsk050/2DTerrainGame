@@ -325,6 +325,37 @@ void Sky::SkipToQuarter() {
 void Sky::Advance(float dt) {
     time_ += dt;
 
+    // How far the deck has travelled, carried forward rather than worked out from
+    // the clock — the one quantity in this module that is accumulated, and the
+    // reasoning for the exception is worth setting down because everything else here
+    // is deliberately a pure function of time.
+    //
+    // The deck has to go the way the wind goes, or a storm blows the trees one way
+    // while the sky over them slides the other. That means its position is the
+    // integral of a wind that turns, and the integral of a noise field has no closed
+    // form: computed as `time_ * wind` instead, the whole sky teleports sideways the
+    // instant the wind changes, because it is a distance built from the *current*
+    // speed and the *whole* of elapsed time.
+    //
+    // What makes accumulating it safe here, where it would not be for anything else,
+    // is that this is the one figure in the world nobody can check. A cloud is fixed
+    // to nothing: there is no landmark beside it, so its absolute offset is
+    // unobservable and only its velocity can be seen. Two sessions disagreeing about
+    // where the deck has got to is a disagreement about a number that does not
+    // appear on screen — where two sessions disagreeing about the shape of a cloud,
+    // or where a tree grew, would be a different world.
+    //
+    // What is carried is the integral of the bearing alone, in seconds, rather than
+    // any one layer's distance. Every layer aloft travels the same way at its own
+    // steady pace, so each is this times its own figure — and one accumulator cannot
+    // drift out of step with another the way two would.
+    swept_ += Bearing() * dt;
+
+    // Wrapped well past any feature of any field it feeds, so a long session cannot
+    // walk it out of the precision a float has left — the same guard the day's
+    // offset carries, and for the same reason.
+    swept_ = std::fmod(swept_, 1.0e6f);
+
     // Any skip still owed, paid out over a few seconds rather than in one step. What
     // is usually being looked at *is* the transition, and a jump lands on the far
     // side of it.
@@ -404,7 +435,7 @@ float Sky::Field(Vector2 world) const {
     // What the whole sky does: travel with the wind. Everything below is written
     // against it, so the three layers hold together as one cloud however fast each
     // one is moving through itself.
-    const float drift = time_ * settings_.cloudWind;
+    const float drift = swept_ * settings_.cloudWind;
 
     // Perlin-Worley, the base of every volumetric cloud since Nubis.
     //
@@ -600,7 +631,9 @@ Column Sky::ColumnAt(float worldX) const {
     // The front, drifting past on its own, and the climate underneath. Both only
     // ripple the level the weather set — a storm has to stay overcast everywhere in
     // it, and a clear afternoon clear.
-    const float front = Share({worldX - time_ * settings_.frontWind, 0.0f}, settings_.front);
+    // On the same swept bearing as the deck above it, so the ripple in the cover
+    // travels the way the weather is going rather than the one way it used to.
+    const float front = Share({worldX - swept_ * settings_.frontWind, 0.0f}, settings_.front);
 
     const terrain::Climate climate = terrain::ClimateAt(worldX, terrain_);
 

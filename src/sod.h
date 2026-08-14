@@ -217,7 +217,8 @@ inline constexpr float kBladeHold    = 0.45f;
 inline constexpr float kBladeSwing   = 0.20f;
 inline constexpr float kBladeIdle    = 0.55f;
 inline constexpr float kBladePeriod  = 1.5f;
-inline constexpr float kBladeUrgency = 0.90f;
+inline constexpr float kBladeHurry   = 0.75f;
+inline constexpr float kBladeUrgency = 1.30f;
 
 // The grass under the view, as everything standing on it needs to be handed it.
 //

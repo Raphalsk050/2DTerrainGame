@@ -436,7 +436,7 @@ void LayFoliage(const flora::Skeleton &skeleton, const flora::SpeciesShape &art,
 }
 
 // The trunk and the limbs.
-void LayWood(const flora::Skeleton &skeleton, const Frame &frame, bool bare, Canvas &canvas) {
+void LayWood(const flora::Skeleton &skeleton, const Frame &frame, bool bare, int seed, Canvas &canvas) {
     const auto sweep = [&canvas](Vector2 a, Vector2 b, float halfA, float halfB) {
         const float widest = std::max(halfA, halfB) + 1.0f;
 
@@ -484,19 +484,103 @@ void LayWood(const flora::Skeleton &skeleton, const Frame &frame, bool bare, Can
         sweep(a, b, std::max(halfA, 0.6f), std::max(halfB, 0.5f));
     }
 
+    // The thinnest a limb may be drawn, in texels of half-width.
+    //
+    // Not a half, which is what it was. A texel is claimed when the segment passes
+    // within `half` of its centre, and the centres of two diagonally neighbouring
+    // texels are 1.41 apart — so at a half-width of 0.5 a near-horizontal limb
+    // running between two rows of centres claims neither, and comes out as a line of
+    // floating dashes with sky between them. Just over the half-diagonal is the
+    // figure at which a limb is guaranteed to be one connected thing at any angle.
+    constexpr float kThinnestLimb = 0.72f;
+
     for (int i = 0; i < skeleton.branchCount; i++) {
         const flora::Branch &branch = skeleton.branches[i];
 
-        // Bare, a limb is drawn the whole way to where its leaves would have
-        // been, because in winter the limbs are the tree.
-        const Vector2 end = bare ? branch.tip : branch.to;
-
         const Vector2 a = {frame.ToX(branch.from.x), frame.ToY(branch.from.y)};
-        const Vector2 b = {frame.ToX(end.x), frame.ToY(end.y)};
 
-        const float half = std::max(branch.width * 0.5f / frame.pixel, 0.5f);
+        const float half = std::max(branch.width * 0.5f / frame.pixel, kThinnestLimb);
 
-        sweep(a, b, half, std::max(half * 0.55f, 0.5f));
+        if (!bare) {
+            const Vector2 b = {frame.ToX(branch.to.x), frame.ToY(branch.to.y)};
+
+            sweep(a, b, half, std::max(half * 0.55f, kThinnestLimb));
+            continue;
+        }
+
+        // Bare, the limb is the tree, and a straight spar out to where the leaves
+        // would have been is a telephone pole rather than a branch.
+        //
+        // Three things separate the two, and all of them are here. A limb *rises* as
+        // it goes out, so it is walked as an arc rather than a chord — a bare tree
+        // is a bundle of upswept lines and a horizontal one reads as a crosstree.
+        // It *tapers* the whole way, to nothing rather than to half. And it *forks*:
+        // most of what the eye reads as a winter tree is the fine spray at the ends,
+        // and a limb that simply stops has no silhouette at all.
+        const Vector2 end = {frame.ToX(branch.tip.x), frame.ToY(branch.tip.y)};
+
+        const float run  = end.x - a.x;
+        const float rise = end.y - a.y;
+
+        // Each limb its own arc, fork angle and fork length, drawn off the tree's
+        // seed and the limb's index. Without this every branch is the same curve
+        // turned about the trunk, and a wood of them reads as a row of candelabra —
+        // the regularity of the tiers underneath is invisible under summer foliage
+        // and is the whole silhouette once the leaves are off.
+        const auto roll = [&](int salt) { return static_cast<float>(Bits(i, salt, seed) & 0xffffu) / 65536.0f; };
+
+        // How far the arc stands off its own chord, against the reach of the limb.
+        // Y grows downward in the canvas, so lifting is subtracting.
+        const float lift = std::fabs(run) * (0.18f + 0.24f * roll(11));
+
+        constexpr int kJoints = 4;
+
+        Vector2 walk  = a;
+        float carried = half;
+
+        for (int j = 1; j <= kJoints; j++) {
+            const float t = static_cast<float>(j) / static_cast<float>(kJoints);
+
+            // A parabola through both ends, at its furthest from the chord halfway
+            // along, which is the shape a loaded limb actually takes.
+            const Vector2 node = {a.x + run * t, a.y + rise * t - lift * (t - t * t) * 4.0f};
+
+            const float shrink = std::max(half * (1.0f - 0.80f * t), kThinnestLimb);
+
+            sweep(walk, node, carried, shrink);
+
+            walk    = node;
+            carried = shrink;
+        }
+
+        // And the fork at the end. Two twigs, thrown out at a shallow angle from the
+        // limb's own heading and lifted, so the tip breaks into a Y rather than
+        // stopping dead. Short — a fifth of the limb — because what is wanted is a
+        // broken silhouette, not a second generation of branches.
+        const float away = std::sqrt(run * run + rise * rise);
+
+        if (away > 3.0f) {
+            const float ux = run / away;
+            const float uy = rise / away;
+
+            for (int side = -1; side <= 1; side += 2) {
+                // Not every tip forks both ways. A wood in which every limb ends in
+                // a perfect Y is as regular as one in which none of them fork.
+                if (roll(side * 7 + 23) < 0.18f) continue;
+
+                const float reach = away * (0.16f + 0.16f * roll(side * 7 + 31));
+                const float splay = 0.40f + 0.34f * roll(side * 7 + 41);
+
+                // Turned off the heading and lifted, both. The lift is what keeps a
+                // fork reading as growth rather than as a dead spike.
+                const float spread = std::sqrt(std::max(1.0f - splay * splay, 0.0f));
+
+                const float tx = ux * spread - uy * splay * static_cast<float>(side);
+                const float ty = uy * spread + ux * splay * static_cast<float>(side) - 0.30f;
+
+                sweep(walk, {walk.x + tx * reach, walk.y + ty * reach}, carried, kThinnestLimb);
+            }
+        }
     }
 }
 
@@ -829,7 +913,7 @@ void Render(const flora::Plant &plant, flora::Stage stage, flora::Season season,
     // gives rather than the one it would have given unbroken.
     LaySun(canvas);
 
-    LayWood(skeleton, frame, bare, canvas);
+    LayWood(skeleton, frame, bare, seed, canvas);
     Paint(canvas, def.palette[flora::SeasonIndex(season)], seed, pixels);
 
     width  = canvas.w;

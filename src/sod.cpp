@@ -100,8 +100,18 @@ float Phase(std::int64_t cell, int blade) {
 // makes a gust read as a shove followed by a wobble instead of a shake that
 // happens to coincide with one.
 float Lean(float height, float push, float phase, float now) {
-    const float rate  = (1.0f + std::fabs(push) * kBladeUrgency) / kBladePeriod;
-    const float swing = std::sin((now * rate + phase) * 2.0f * 3.14159265f);
+    // Two fixed rates crossfaded by the wind, exactly as the trees do it — and for
+    // the reason set out at length beside Lean in grove.cpp: a rate the wind sets,
+    // multiplied by the absolute clock, is not a frequency, and after an hour of
+    // weather it shakes a meadow to pieces.
+    const float turn = (now + phase * kBladePeriod) * 2.0f * 3.14159265f;
+
+    const float easy  = std::sin(turn / kBladePeriod);
+    const float hurry = std::sin(turn / kBladeHurry + phase);
+
+    const float urgency = std::clamp(std::fabs(push) * kBladeUrgency, 0.0f, 1.0f);
+
+    const float swing = easy * (1.0f - urgency) + hurry * urgency;
 
     const float hold   = kBladeHold * push;
     const float quiver = kBladeSwing * (kBladeIdle + (1.0f - kBladeIdle) * std::sqrt(std::fabs(push))) * swing;

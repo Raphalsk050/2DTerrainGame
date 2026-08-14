@@ -38,6 +38,12 @@
 // Nothing is simulated. The weather is a pure function of elapsed time and the
 // cloud a pure function of position, exactly as the terrain is, so there is no
 // state to keep and two views of the same world at the same moment agree.
+//
+// One exception, and it is deliberate: how far the deck aloft has travelled is
+// carried forward rather than derived, because the wind turns and the integral of a
+// turning wind has no closed form. It is the only figure here nobody can check — a
+// cloud is fixed to nothing, so its offset is unobservable and only its speed is
+// seen. See Sky::Advance.
 namespace weather {
 
 // What share of the air's own speed a loose thing is travelling at by the end of
@@ -87,6 +93,7 @@ inline constexpr float kCloudEdge = 0.0f;
 // the palette and the shade all move together because they are the same fact about
 // the same afternoon. Crossing between two moods interpolates every field of the
 // row at once, so a storm gathers rather than switching on.
+//
 // Blustery sits between fair and overcast because that is where its sky belongs,
 // and its wind is the highest in the table bar the storm's. It is the mood that
 // only exists because the wind is written down rather than derived: a bright,
@@ -1137,6 +1144,13 @@ private:
     // full gust on top. Measured in Configure alongside the erosion, for the same
     // reason — see Gale.
     float gale_ = 1.0f;
+
+    // The wind's bearing, integrated — seconds of travel, signed, and the distance
+    // any one layer aloft has covered is this times its own speed. Carried forward
+    // by Advance rather than worked out from the clock, which is the one exception
+    // this module makes to being a pure function of time; the argument for it is
+    // with the line that advances it.
+    float swept_ = 0.0f;
 
     float time_ = 0.0f;
 
