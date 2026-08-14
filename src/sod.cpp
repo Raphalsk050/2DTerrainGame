@@ -103,7 +103,10 @@ float Lean(float height, float push, float phase, float now) {
     const float rate  = (1.0f + std::fabs(push) * kBladeUrgency) / kBladePeriod;
     const float swing = std::sin((now * rate + phase) * 2.0f * 3.14159265f);
 
-    return height * kBladeReach * push * (0.66f + 0.34f * swing);
+    const float hold   = kBladeHold * push;
+    const float quiver = kBladeSwing * (kBladeIdle + (1.0f - kBladeIdle) * std::sqrt(std::fabs(push))) * swing;
+
+    return height * (hold + quiver);
 }
 
 // The four tones of one cover at one moment of the year.
@@ -257,8 +260,12 @@ void DrawTufts(const Blades &ground, Rectangle view, float now, int seed) {
 
     const float pixel = config::kFloraPixel;
 
-    // A margin, because a blade leans out of the cell it grew in.
-    const float reach = static_cast<float>(kBladeTall) * pixel * (kBladeReach + kBladeCurve) + kTuftSpan;
+    // A margin, because a blade leans out of the cell it grew in. Both halves of
+    // the sway are in it: laid over as far as it goes *and* at the far end of its
+    // quiver is the furthest a blade can reach, and a margin short of that pops a
+    // tuft into being at the edge of the view on the frame the wind gets up.
+    const float reach =
+        static_cast<float>(kBladeTall) * pixel * (kBladeHold + kBladeSwing + kBladeCurve) + kTuftSpan;
 
     const std::int64_t from = CellAt(view.x - reach);
     const std::int64_t to   = CellAt(view.x + view.width + reach);

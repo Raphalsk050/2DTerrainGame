@@ -237,7 +237,15 @@ void DrawBrushSize(const Editor &editor) {
 // doing and what the light is doing to it are two questions, and answering them
 // together is how a palette gets tuned against a time of day.
 void DrawProbe(World &world, Grove &grove, Inventory &gathered, Rectangle strip, const char *path, int zoom,
-               float seconds, bool plants, int lit) {
+               float seconds, bool plants, int lit, int mood, int quarter) {
+    // Held at one weather and one season where asked for, and this is what makes the
+    // probe worth anything for judging the wind: what a gale does is only legible
+    // against the calm afternoon beside it, and two pictures taken of whatever the
+    // spell happened to be doing are not a comparison. Taken before the clock is run
+    // on, so the whole of that run happens under the weather being asked about.
+    if (mood >= 0) world.ForceWeather(mood);
+    for (int step = 0; step <= quarter; step++) world.CycleSeason();
+
     // Run the clock on before drawing, so a still picture can be taken of a world
     // that has been blowing for a while. The sway and the gust are both pure
     // functions of this clock, so two probes a second apart are two frames of the
@@ -280,6 +288,15 @@ void DrawProbe(World &world, Grove &grove, Inventory &gathered, Rectangle strip,
     // holes by design, and any test that cannot tell one of those from a tuft
     // hanging in the air will report the wrong thing every time.
     if (plants) grove.Draw(world.Sky(), season, world.Sky().Time());
+
+    // The fruit and the falling leaves too, in the frame's own order. Left out of
+    // this probe for a long time, which is exactly why the leaf field could be
+    // judged only by eye in a live window — the one part of the world whose whole
+    // point is how it answers the weather had no still picture to be looked at.
+    if (plants) {
+        grove.DrawFruit(world.Sky(), season, world.Sky().Time());
+        grove.DrawLeaves(world.Sky(), season, strip, world.Sky().Time());
+    }
 
     world.DrawLiquids(strip);
 
@@ -546,6 +563,161 @@ void ReportSun(const World &world, Rectangle region) {
         std::printf("%6.0f %6.0f %8.2f %8.1f %8.3f\n", at.x, at.y, field.SolidAt(i, first),
                     field.SunDepthAt(i, first), light::Luminance(field.SunlitAt(i, first)));
     }
+}
+
+// The wind each kind of weather actually produces, and what it does to the things
+// that read it.
+//
+// This exists because the wind is the one field in the world whose whole purpose is
+// a *difference* between two weathers, and a difference is the hardest thing to
+// judge by eye — a wood in a gale looks windy on its own; only the calm afternoon
+// beside it says whether the gale is doing anything. The failure this is built to
+// catch is exactly that: the shares everything rooted to the ground reads were once
+// normalised by the current weather's own envelope, so a storm and a clear day both
+// came back about a half and every gale in the world was drawn as a breeze.
+//
+// The last two columns are the ones with a floor under them. The sway is drawn in
+// whole plant texels, so a crown or a blade moving less than one of them does not
+// move at all — a calm row whose lean rounds to zero is a wood that stands frozen,
+// and no amount of looking at a storm will show it.
+void ReportWind(World &world, Grove &grove, Inventory &gathered, Rectangle strip) {
+    const float pixel = config::kFloraPixel;
+
+    // The tallest thing that sways, so the sway is judged where it is largest. A
+    // shorter tree moves proportionally less and hits the texel floor sooner.
+    float tallest = 0.0f;
+
+    for (std::size_t s = 0; s < flora::kSpeciesCount; s++) {
+        const flora::SpeciesDef &def = flora::Def(static_cast<flora::Species>(s));
+        tallest = std::max(tallest, def.height[flora::StageIndex(flora::Stage::Mature)]);
+    }
+
+    std::printf("gale %.1f px/s   tallest crown %.0f px   plant texel %.0f px\n\n", world.Sky().Gale(), tallest, pixel);
+
+    std::printf("%-9s %7s %15s %9s %9s %9s %9s\n", "mood", "mean", "|push|", "held", "shake", "grass", "leaf");
+    std::printf("%-9s %7s %15s %9s %9s %9s %9s\n", "", "px/s", "min..max", "px max", "px min", "px min", "px max");
+
+    for (int mood = 0; mood < weather::kMoodCount; mood++) {
+        world.ForceWeather(mood);
+        world.StepWeather(1.0f / 60.0f);
+
+        const weather::Sky &sky = world.Sky();
+
+        float lowest = 1.0f, highest = 0.0f;
+
+        // How far the wind holds a crown over, and how far it shakes one. They are
+        // measured apart because they fail apart: the hold is what says a gale is
+        // blowing, and the shake is the one that has to clear the texel grid or a
+        // calm afternoon is a photograph.
+        // The hold is taken at its largest and the shake at its smallest, because
+        // that is where each one fails: a gale is judged by how far over it holds a
+        // crown at its hardest, and a calm is judged by whether anything is still
+        // moving at its quietest.
+        float held  = 0.0f;
+        float shook = 1e9f, blade = 1e9f;
+        float leaf  = 0.0f;
+
+        // Walked over both axes the field varies on. A gust is a wave crossing the
+        // world, so a single column at a single moment is one point of it and says
+        // nothing about the range; and the quarter turns on a clock of its own, so a
+        // sweep that did not also run the clock would miss the lull entirely.
+        // Long enough to carry the quarter round several whole turns, and stepped
+        // finely enough not to skip over a gust crest on the way. A sweep shorter
+        // than the backing period reports whatever the wind happened to be doing
+        // during it and calls that the range.
+        constexpr int kColumns = 64;
+        constexpr int kSteps   = 2400;
+
+        for (int step = 0; step < kSteps; step++) {
+            for (int i = 0; i < kColumns; i++) {
+                const float x = static_cast<float>(i) * 137.0f;
+
+                const float push = sky.Stir(x);
+
+                lowest  = std::min(lowest, push);
+                highest = std::max(highest, push);
+
+                // What the shares are worth once something reads them. Trees and
+                // grass take the share; anything in flight takes the speed.
+                //
+                // The quiver keeps its floor here exactly as it does where it is
+                // drawn, and that is the point of measuring rather than multiplying
+                // out an envelope: scaled by the wind alone it would report zero in
+                // dead air, which is the one reading that must not be wrong.
+                const float quiver = kSwayIdle + (1.0f - kSwayIdle) * std::sqrt(push);
+                const float ripple = sod::kBladeIdle + (1.0f - sod::kBladeIdle) * std::sqrt(push);
+
+                held  = std::max(held, tallest * kSwayHold * push);
+                shook = std::min(shook, tallest * kSwaySwing * quiver * 2.0f);
+
+                blade = std::min(blade, static_cast<float>(sod::kBladeTall) * pixel * sod::kBladeSwing * ripple * 2.0f);
+
+                // A leaf off the tallest crown, which is the longest fall and so
+                // the furthest the air can take one.
+                leaf = std::max(leaf, std::fabs(weather::Carry(sky.WindAt(x), 1.0f, tallest / kLeafFall,
+                                                               weather::kLeafDrag)));
+            }
+
+            // Long enough a run to carry the quarter round through a lull, or the
+            // calm end of every row would be whatever the bearing happened to be.
+            world.StepWeather(4.0f);
+        }
+
+        std::printf("%-9s %7.1f %6.2f ..%6.2f %9.1f %9.1f %9.1f %9.0f\n", sky.Now().name, sky.Now().wind, lowest,
+                    highest, held, shook, blade, leaf);
+    }
+
+    // And what the wood actually sheds under each of them, counted rather than
+    // reasoned about.
+    //
+    // Every season against every weather, because the two failures this is built to
+    // catch are both invisible in any single cell of the table: a wood that sheds
+    // the same number of leaves in a gale as in still air, and one that only sheds
+    // at all in autumn. Neither shows up while looking at one afternoon, and both
+    // have happened here.
+    std::printf("\nleaves adrift over a %.0f px view of wood\n\n", strip.width);
+
+    std::printf("%-10s", "season");
+    for (int mood = 0; mood < weather::kMoodCount; mood++) {
+        world.ForceWeather(mood);
+        world.StepWeather(1.0f / 60.0f);
+        std::printf("%10s", world.Sky().Now().name);
+    }
+    std::printf("\n");
+
+    for (int quarter = 0; quarter < flora::kSeasonCount; quarter++) {
+        world.CycleSeason();
+
+        std::printf("%-10s", kSeasonNames[world.Sky().Turn().index % 4]);
+
+        for (int mood = 0; mood < weather::kMoodCount; mood++) {
+            world.ForceWeather(mood);
+
+            // Counted over a run rather than on one frame. A gust is a wave and the
+            // quarter turns behind it, so a single frame is one point of the range
+            // and reports it as the whole.
+            int most = 0;
+
+            for (int step = 0; step < 900; step++) {
+                world.StepWeather(2.5f);
+                world.Update(strip);
+                grove.Update(world, strip, {strip.x, strip.y}, world.Sky().Time(), 1.0f / 60.0f, gathered);
+
+                const auto turn = static_cast<flora::Season>(world.Sky().Turn().index);
+
+                grove.DrawLeaves(world.Sky(), turn, strip, world.Sky().Time());
+
+                most = std::max(most, grove.Drifting());
+            }
+
+            std::printf("%10d", most);
+        }
+
+        std::printf("\n");
+    }
+
+    // Back to whatever the clock says, so this leaves nothing held.
+    world.ForceWeather(-1);
 }
 
 // The surface, column by column, and how much it moves between one and the next.
@@ -1266,7 +1438,7 @@ void DrawScene(const World &world, const Grove &grove, const Inventory &inventor
 
     grove.Draw(world.Sky(), season, world.Sky().Time());
 
-    grove.DrawFruit(season, world.Sky().Time());
+    grove.DrawFruit(world.Sky(), season, world.Sky().Time());
     grove.DrawLeaves(world.Sky(), season, view, world.Sky().Time());
 
     // What the wood left on the ground, over the plants and under the character.
@@ -1320,7 +1492,7 @@ void DrawScene(const World &world, const Grove &grove, const Inventory &inventor
     // Not while the panel is up: the pointer is over a slot, not over the world,
     // and a brush ring left under an inventory says the next click will dig
     // where it is sitting when it will not.
-    if (aiming) editor.DrawCursor(inventory, camera);
+    if (aiming) editor.DrawCursor(inventory, grove, season, camera);
 
     EndMode2D();
 }
@@ -1358,7 +1530,7 @@ void DrawHud(const World &world, const Grove &grove, const Player &player, const
                          grove.DrawnPlants(), grove.RememberedPlants(), world.Light().Rays()),
               10, 70, ink);
 
-    DrawLabel(TextFormat("on the ground: %d", grove.Fallen().Live()), 10, 142, ink);
+    DrawLabel(TextFormat("on the ground: %d", grove.Fallen().Live()), 10, 160, ink);
 
     const Vector2 centre = player.Centre();
     const auto under     = editor.Under();
@@ -1380,6 +1552,16 @@ void DrawHud(const World &world, const Grove &grove, const Player &player, const
                    world.Sky().ShadeAt(centre.x) * 100.0f, static_cast<int>(world.Sky().UndersideAt(centre.x))),
         10, 106, sky.rain > 0.0f ? wet : ink);
 
+    // And the wind, on its own line because it is the one reading with three parts
+    // that can disagree. The mood's figure is what the table says, the gust here is
+    // what this column is actually getting, and the share is what everything rooted
+    // to the ground reads — so a wood standing still under a gale can be traced to
+    // whichever of the three ate it, instead of being guessed at.
+    DrawLabel(TextFormat("wind: %-4.0f px/s mean   %+5.0f here   |   push %+.2f   gale %.0f   |   %d adrift", sky.wind,
+                         world.Sky().WindAt(centre.x), world.Sky().PushAt(centre.x), world.Sky().Gale(),
+                         grove.Drifting()),
+              10, 124, ink);
+
     // Then the day, and how damp it has left the ground. The clock is the world's
     // own and not the wall's: a whole turn is `Day::dayMinutes` of weather time, so
     // it runs fast under F7 with everything else.
@@ -1394,7 +1576,7 @@ void DrawHud(const World &world, const Grove &grove, const Player &player, const
     DrawLabel(TextFormat("%02d:%02d  %-5s   daylight %.0f%%   |   humidity %.0f%%  [%.*s%.*s]", static_cast<int>(hours),
                          static_cast<int>((hours - std::floor(hours)) * 60.0f), today.name, today.light * 100.0f,
                          damp * 100.0f, filled, soaked, 10 - filled, dry),
-              10, 124, damp > 0.66f ? wet : ink);
+              10, 142, damp > 0.66f ? wet : ink);
 
     // Flight suspends gravity and collision both, which is not something to be
     // left on by accident, so it says so where the eye already is.
@@ -1456,9 +1638,12 @@ int main(int argc, char **argv) {
     // ReportFrame.
     const bool timing = argc >= 4 && TextIsEqual(argv[1], "--frame");
 
+    // Reports a table and draws nothing, so it wants no window on screen either.
+    const bool gauging = argc >= 2 && TextIsEqual(argv[1], "--wind");
+
     // Resizable, with a floor under it: below the minimum the hotbar is wider than
     // the frame and the head-up display runs off the side of it.
-    SetConfigFlags((probing || counting || weighing || reading || digging || assaying || settling || timing)
+    SetConfigFlags((probing || counting || weighing || reading || digging || assaying || settling || timing || gauging)
                        ? FLAG_WINDOW_HIDDEN
                        : FLAG_WINDOW_RESIZABLE);
 
@@ -1851,9 +2036,20 @@ int main(int argc, char **argv) {
         // that rule, rather than a second one written somewhere else.
         .moods =
             {
+                // The winds are in pixels per second at ground level, and the spread
+                // between the calmest row and the windiest is the thing to judge
+                // rather than any one figure: it is the whole range every rooted
+                // thing in the world swings through. The rows must stay in the order
+                // of weather::Mood — this array is read by index.
+                //
+                // Not zero at the calm end, and it cannot be. The sway is drawn in
+                // whole plant texels, so a crown moving less than one of them does
+                // not move at all, and a wood standing perfectly rigid on a clear
+                // afternoon reads as broken rather than as calm.
                 {.name       = "clear",
                  .cover      = 0.14f,
                  .rain       = 0.0f,
+                 .wind       = 7.0f,
                  .likelihood = 1.0f,
                  .sunlight   = {255, 252, 246, 255},
                  .ambient    = {150, 176, 214, 255},
@@ -1862,23 +2058,41 @@ int main(int argc, char **argv) {
                 {.name       = "fair",
                  .cover      = 0.34f,
                  .rain       = 0.0f,
+                 .wind       = 15.0f,
                  .likelihood = 1.6f,
                  .sunlight   = {255, 250, 240, 255},
                  .ambient    = {138, 162, 202, 255},
                  .shade      = 1.0f},
 
+                // A bright, broken sky with the air tearing through it. Less cloud
+                // than fair weather and more than twice the wind, which is the one
+                // combination nothing derived from the cover could ever produce —
+                // and the reason the wind is a column of this table at all.
+                {.name       = "blustery",
+                 .cover      = 0.30f,
+                 .rain       = 0.0f,
+                 .wind       = 40.0f,
+                 .likelihood = 0.5f,
+                 .sunlight   = {255, 250, 242, 255},
+                 .ambient    = {140, 166, 206, 255},
+                 .shade      = 0.95f},
+
                 {.name       = "overcast",
                  .cover      = 0.78f,
                  .rain       = 0.0f,
+                 .wind       = 24.0f,
                  .likelihood = 0.8f,
                  .sunlight   = {228, 232, 240, 255},
                  .ambient    = {116, 128, 152, 255},
                  .shade      = 1.0f},
 
-                // Most of the sky, and the only mood that rains.
+                // Most of the sky, the only mood that rains, and the hardest it
+                // blows. This row alone sets the envelope every share is taken
+                // against — see Sky::Gale.
                 {.name       = "storm",
                  .cover      = 0.94f,
                  .rain       = 1.0f,
+                 .wind       = 54.0f,
                  .likelihood = 0.55f,
                  .sunlight   = {176, 184, 200, 255},
                  .ambient    = {80, 88, 108, 255},
@@ -1903,7 +2117,7 @@ int main(int argc, char **argv) {
         // couple are in view at once and each is comfortably shorter than the band it
         // floats in.
         .shape = {.frequency = 4.6f, .octaves = 3, .gain = 0.5f, .aspect = 2.3f, .seed = 5501},
-        .wind  = 18.0f,
+        .cloudWind = 18.0f,
 
         // One feature of that shape is a little over two hundred pixels, so at this
         // a cloud has re-formed into a different cloud in about half a minute —
@@ -1956,7 +2170,7 @@ int main(int argc, char **argv) {
         // against a night, once there is one, without anything here being touched.
         .rainLine   = {216, 234, 255, 255},
         .rainSpeed  = 620.0f,
-        .rainDrift  = 11.0f,
+        .rainDrift  = 8.0f,
         .rainLength = 24.0f,
         .rainSpread = 0.55f,
 
@@ -1988,6 +2202,17 @@ int main(int argc, char **argv) {
         world.StepLight(region);
 
         ReportSun(world, region);
+
+        CloseWindow();
+        return 0;
+    }
+
+    if (gauging) {
+        // Over the birch wood rather than the origin: the leaf field needs
+        // deciduous trees to come off, and the trees at the origin are pines.
+        Inventory gauged{};
+
+        ReportWind(world, grove, gauged, {1800.0f, -260.0f, 900.0f, 400.0f});
 
         CloseWindow();
         return 0;
@@ -2140,8 +2365,8 @@ int main(int argc, char **argv) {
 
         DrawProbe(world, grove, probed, strip, argv[6], (argc >= 8) ? std::atoi(argv[7]) : 1,
                   (argc >= 9) ? static_cast<float>(std::atof(argv[8])) : 0.0f,
-                  (argc >= 10) ? (std::atoi(argv[9]) != 0) : true,
-                  (argc >= 11) ? std::atoi(argv[10]) : 0);
+                  (argc >= 10) ? (std::atoi(argv[9]) != 0) : true, (argc >= 11) ? std::atoi(argv[10]) : 0,
+                  (argc >= 12) ? std::atoi(argv[11]) : -1, (argc >= 13) ? std::atoi(argv[12]) : -1);
 
         CloseWindow();
         return 0;

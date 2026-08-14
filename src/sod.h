@@ -203,14 +203,21 @@ inline constexpr float kTuftTaper = 0.45f;
 inline constexpr float kBladeCurve = 0.15f;
 
 // The sway, as the trees describe it — see the constants in grove.cpp, which this
-// deliberately mirrors so that a wood and the grass under it lean together.
+// deliberately mirrors so that a wood and the grass under it lean together. The
+// split into a hold and a quiver is argued for there and holds here for the same
+// reason: what lays grass over is the pressure of the air on it, what ripples it in
+// a light breeze is the turbulence in that air, and only one of the two goes to
+// nothing when the wind does.
 //
-// The two numbers that differ are the two that should: a blade of grass bends
-// most of its own length where a trunk bends a twentieth, and being lighter it
-// swings about twice as fast.
-inline constexpr float kBladeReach   = 0.40f;
+// The numbers that differ are the ones that should: a blade of grass bends most of
+// its own length where a trunk bends a twentieth, being lighter it swings about
+// twice as fast, and more of its movement is the ripple — a meadow is never still
+// in the way a wood can be.
+inline constexpr float kBladeHold    = 0.45f;
+inline constexpr float kBladeSwing   = 0.20f;
+inline constexpr float kBladeIdle    = 0.55f;
 inline constexpr float kBladePeriod  = 1.5f;
-inline constexpr float kBladeUrgency = 0.45f;
+inline constexpr float kBladeUrgency = 0.90f;
 
 // The grass under the view, as everything standing on it needs to be handed it.
 //
@@ -221,7 +228,7 @@ inline constexpr float kBladeUrgency = 0.45f;
 struct Blades {
     const float *top    = nullptr; // World Y of the top of the ground.
     const float *cover  = nullptr; // How established the grass is, in [0,1].
-    const float *push   = nullptr; // Wind as a share of the strongest gust, in [-1,1].
+    const float *push   = nullptr; // Wind as a share of the hardest this world blows, in [-1,1].
     const soil::Ramp *ramp = nullptr;
 
     int count       = 0;

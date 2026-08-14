@@ -14,6 +14,39 @@
 #include <unordered_map>
 #include <vector>
 
+// How far the top of a mature plant is held over by the wind, and how far it
+// swings about wherever it is being held — both as a share of its own height, at
+// the hardest this world can blow.
+//
+// Published rather than kept in grove.cpp because two things outside need them.
+// sod.h mirrors this pair deliberately, so that a wood and the grass under it lean
+// together, and a mirror that cannot see what it is mirroring drifts out of true.
+// And a probe has to be able to measure the sway against the texel grid it is drawn
+// on: below one plant pixel a crown does not move at all, and a calm afternoon that
+// falls under that floor is a wood standing frozen — see ReportWind.
+//
+// The reasoning behind there being two terms rather than one, and behind the floor
+// under the second, is with their definitions in grove.cpp.
+inline constexpr float kSwayHold  = 0.055f;
+inline constexpr float kSwaySwing = 0.016f;
+inline constexpr float kSwayIdle  = 0.55f;
+
+// How fast a shed leaf goes down, in world pixels per second, before the per-cell
+// jitter that spreads it.
+//
+// How *far* it falls is not a constant beside this and deliberately: a leaf falls
+// the height of the tree it came off and then wraps back to the crown. One distance
+// for the whole world was set near the tallest crown there is, so on anything
+// shorter most of every leaf's life was spent below the ground it had already
+// landed on — half the field invisible, and the sideways travel, which is quadratic
+// in how far through the fall a leaf is, only ever reaching the flat start of that
+// curve. The wind was being thrown away exactly where it would have been seen.
+//
+// Published rather than kept in grove.cpp for the same reason as the sway pair
+// above: the probe that reports how far a gale carries a leaf has to ask the real
+// figure rather than keep its own copy.
+inline constexpr float kLeafFall = 26.0f;
+
 // The plants standing in the world right now.
 //
 // Everything about a plant that the noise can answer is answered by flora, and
@@ -55,7 +88,19 @@ public:
     void Draw(const weather::Sky &sky, flora::Season season, float now) const;
 
     // The fruit hanging on whatever bears it, at the time of year it bears.
-    void DrawFruit(flora::Season season, float now) const;
+    //
+    // Takes the sky for the same reason Draw does: fruit hangs on a branch, and the
+    // branch is where the wind put it.
+    void DrawFruit(const weather::Sky &sky, flora::Season season, float now) const;
+
+    // How many leaves the last DrawDrift put on screen.
+    //
+    // The field is a pure function of the clock with nothing stored, so there is no
+    // population to inspect and no way to tell a wood shedding nothing from one
+    // whose leaves are all being drawn somewhere unexpected. Counting what was drawn
+    // is the only honest answer to "is it shedding more in this gale", and that
+    // question is the whole point of the field.
+    int Drifting() const { return drifting_; }
 
     // Leaves coming off the crowns, over the plants and inside the light.
     //
@@ -78,12 +123,26 @@ public:
     // per swing.
     void Strike(Rectangle hitbox, float damage, Vector2 from, float now);
 
-    // Plants one by hand, if the ground will take it.
-    bool Plant(flora::Species species, Vector2 world, float now);
+    // Plants one by hand at `foot` — the top of the ground it is to stand on,
+    // worked out by whoever is holding the sapling. Returns false if something is
+    // already growing there.
+    //
+    // The spot is handed in rather than looked up here, and that is the fix for a
+    // sapling landing under a ramp instead of on it. What this used to read was
+    // flora::Ground, which is the skyline: the shape of the land, memoised per
+    // column and deliberately blind to digging so that a wood does not rearrange
+    // itself around a hole. Right for growing a forest, wrong for a hand — a
+    // player who has built a ramp and clicks on it means the ramp, and the skyline
+    // answers with the hillside underneath it.
+    bool Plant(flora::Species species, Vector2 foot, float now);
 
-    // The species the climate at a position favours most — what the world would
-    // have grown there if it had grown anything.
-    flora::Species Suited(float worldX) const;
+    // What a sapling would look like standing there, drawn faded.
+    //
+    // The real sprite of the real species at the real size, rather than a marker:
+    // what the player is asking is where the thing will be, and half of that
+    // answer is how much room it takes. Cached under an id of its own per species,
+    // so hovering costs one bake and then nothing.
+    void DrawGhost(flora::Species species, Vector2 foot, flora::Season season, Color tint) const;
 
     int VisiblePlants() const { return static_cast<int>(plants_.size() + undergrowth_.size()); }
     int DrawnPlants() const { return sheet_.Held(); }
@@ -274,7 +333,7 @@ private:
     // The chips an axe throws out of the wood it lands in, `since` seconds after
     // the blow. Bark rather than leaves, and thrown from where the axe struck
     // rather than off the crown.
-    void Chips(const flora::Plant &plant, Vector2 at, float since, int salt, float push) const;
+    void Chips(const flora::Plant &plant, Vector2 at, float since, int salt, float wind) const;
 
     // One burst of leaves off a crown, and the few things that separate an axe
     // landing in a trunk from a whole tree landing on the ground.
@@ -297,10 +356,11 @@ private:
         // them.
         float vigour = 1.0f;
 
-        // What the wind does to them on the way down, as a share of the strongest
-        // gust. A leaf off a crown is in the same air as one the year shed, and
-        // the two have to be carried by it alike or the burst reads as debris
-        // falling through a still room.
+        // The air they were thrown into, in pixels per second — Sky::WindAt at the
+        // moment the blow landed, not now and not a share of anything. A leaf off a
+        // crown is in the same air as one the year shed, and the two have to be
+        // carried by it alike or the burst reads as debris falling through a still
+        // room.
         float wind = 0.0f;
     };
 
@@ -310,6 +370,27 @@ private:
     // at Configure.
     float meanLight_ = 0.5f;
     float meanWater_ = 0.5f;
+
+    // Counted by DrawDrift, which is const — see Drifting.
+    mutable int drifting_ = 0;
+
+    // One crown that has leaves to lose, reduced to the four numbers a falling leaf
+    // needs: where the trunk stands, how far out from it the crown drops, the ground
+    // it stands on, and how tall it is — the height being what the fall spans.
+    struct Shedder {
+        float at;
+        float reach;
+        float foot;
+        float height;
+
+        const flora::SpeciesDef *def;
+    };
+
+    // The deciduous crowns standing under the view, gathered once per frame by
+    // DrawDrift so that its sweep does not ask the whole wood about every cell.
+    // Scratch rather than state: it is rebuilt from `plants_` each call, and is a
+    // member only so that filling it does not allocate every frame.
+    mutable std::vector<Shedder> shedders_;
 
     // A cache, so drawing from it is a const operation on this object even
     // though it fills itself in as it goes: what a plant looks like is settled

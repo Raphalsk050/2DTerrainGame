@@ -15,13 +15,41 @@
 // one. What an item has is a name, a picture and a count, and this is the table
 // of those.
 
-enum class Item { Wood, Sapling, Apple, Resin, Fibre, Count };
+// One sapling per tree and not one sapling that becomes whichever tree the
+// climate there favours.
+//
+// The single sapling was a shortcut wearing the clothes of a design: it read as
+// "the world knows what belongs here", and what it actually meant was that a
+// player could not choose. Minecraft has nine of these, every one of them dropped
+// by the leaves of its own tree and every one of them plantable on any dirt in
+// any biome — a jungle sapling grows in a snowfield. What the climate decides is
+// what *grows on its own*, which is the scatter's business and stays there; what
+// a player plants is what a player is holding.
+enum class Item { Wood, OakSapling, PineSapling, BirchSapling, AppleSapling, Apple, Resin, Fibre, Count };
 
 inline constexpr std::size_t kItemCount = static_cast<std::size_t>(Item::Count);
 
 inline constexpr std::size_t ItemIndex(Item item) {
     return static_cast<std::size_t>(item);
 }
+
+// What an item does when the right hand puts it into the world.
+//
+// A row on the table rather than a test in the editor, and that is the point:
+// what "the player can put this down" means has to be one fact in one place, or
+// the hand that places it, the hand that decides whether it can be placed, and
+// the ghost that shows where it would go all end up asking different questions.
+// Adding a torch or a workbench later is a row here and nothing else.
+//
+// Nothing to do with materials. A material is terrain, it goes down under a
+// brush by the fistful, and it has an element rather than an item.
+enum class Placement {
+    // Only ever carried. Wood, apples, resin, fibre.
+    None,
+
+    // Takes root standing on the ground under the cursor, and grows.
+    Plant,
+};
 
 struct ItemDef {
     const char *name;
@@ -33,6 +61,8 @@ struct ItemDef {
     Picture picture;
 
     int stack;
+
+    Placement placement = Placement::None;
 };
 
 inline constexpr ItemDef kItems[] = {
@@ -57,25 +87,100 @@ inline constexpr ItemDef kItems[] = {
             },
         .stack = 64,
     },
+    // The four saplings. Each is drawn from its own tree's greens and its own
+    // tree's bark — see kSpecies — so a row of them in the bar is four
+    // recognisably different plants rather than one picture repeated in four
+    // slots. The shapes differ too, and along the axis the trees themselves
+    // differ: the oak is round, the pine is tiered and narrow, the birch is
+    // slender on a pale stem, the apple carries a blossom.
+    //
+    // Tones throughout: a lit leaf, b shaded leaf, c the stem, d the soil still
+    // on the root — except the apple, whose d is its blossom and whose stem
+    // colour does for both.
     {
-        .name   = "sapling",
-        .colour = {96, 168, 74, 255},
+        .name   = "oak sapling",
+        .colour = {96, 182, 74, 255},
 
-        // Two leaves, the stem, and the soil still on its root.
+        // A rounded pair of leaves, the shape an oak's crown keeps all its life.
         .picture =
             {
-                .tone = {{132, 202, 96, 255}, {74, 142, 62, 255}, {120, 92, 54, 255}, {70, 52, 34, 255}},
+                .tone = {{150, 214, 102, 255}, {58, 138, 58, 255}, {107, 68, 35, 255}, {70, 52, 34, 255}},
                 .art =
                     {
-                        "......",
-                        ".a..a.",
-                        ".ab.a.",
-                        "..bc..",
+                        "..a...",
+                        ".aab..",
+                        "aabba.",
+                        ".abc..",
                         "..c...",
                         ".ddd..",
                     },
             },
-        .stack = 64,
+        .stack     = 64,
+        .placement = Placement::Plant,
+    },
+    {
+        .name   = "pine sapling",
+        .colour = {92, 124, 56, 255},
+
+        // Two tiers of needles on a leader, which is the conifer in miniature.
+        .picture =
+            {
+                .tone = {{130, 158, 74, 255}, {62, 92, 42, 255}, {96, 62, 34, 255}, {70, 52, 34, 255}},
+                .art =
+                    {
+                        "..a...",
+                        ".aab..",
+                        "..bc..",
+                        ".aab..",
+                        "..c...",
+                        ".ddd..",
+                    },
+            },
+        .stack     = 64,
+        .placement = Placement::Plant,
+    },
+    {
+        .name   = "birch sapling",
+        .colour = {126, 196, 92, 255},
+
+        // Thin and open, on the one pale stem in the wood.
+        .picture =
+            {
+                .tone = {{172, 224, 124, 255}, {88, 158, 72, 255}, {198, 200, 194, 255}, {70, 52, 34, 255}},
+                .art =
+                    {
+                        ".a..a.",
+                        ".ab.b.",
+                        "..ab..",
+                        "..c...",
+                        "..c...",
+                        ".ddd..",
+                    },
+            },
+        .stack     = 64,
+        .placement = Placement::Plant,
+    },
+    {
+        .name   = "apple sapling",
+        .colour = {96, 156, 70, 255},
+
+        // In blossom already, which is the one thing that tells it from the oak
+        // at this size — the two trees are the same broadleaf shape.
+        .picture =
+            {
+                .tone = {{140, 196, 92, 255}, {58, 116, 52, 255}, {110, 74, 42, 255}, {244, 222, 232, 255}},
+                .art =
+                    {
+                        "..d...",
+                        ".aaba.",
+                        ".abba.",
+                        "..bc..",
+                        "..c...",
+                        ".ccc..",
+                    },
+            },
+        .stack     = 64,
+        .placement = Placement::Plant,
     },
     {
         .name   = "apple",

@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <iterator>
+#include <optional>
 #include <vector>
 
 // The plants the world grows, and where they stand.
@@ -258,6 +259,19 @@ struct SpeciesDef {
     SpeciesPalette palette[kSeasonCount];
     DropRule drops[kDropRules];
 
+    // The seed this tree drops and the seed that grows back into it.
+    //
+    // Held here rather than as a species field on the item, and the direction is
+    // forced: the item table knows nothing about trees — an item is a name, a
+    // picture and a count — while this table is already about trees and already
+    // names the items one drops. So flora depends on item and never the other way
+    // round, and the pairing lives on the side that can express it.
+    //
+    // A species with no sapling of its own leaves this at the first item, which
+    // is not a sapling; SpeciesOf answers nothing for it and nothing can be
+    // planted that grows it. The undergrowth is that case.
+    Item sapling = Item::Wood;
+
     // Stands bare in winter. A conifer does not, which is the one thing that
     // distinguishes the two through the cold half of the year.
     bool deciduous;
@@ -330,8 +344,9 @@ inline constexpr SpeciesDef
                          .leaf      = {{76, 52, 30, 255}, {104, 74, 42, 255}, {132, 98, 58, 255}, {158, 124, 78, 255}}},
                     },
                 .drops     = {{.item = Item::Wood, .least = 4, .most = 7, .chance = 1.0f},
-                              {.item = Item::Sapling, .least = 1, .most = 2, .chance = 0.55f},
+                              {.item = Item::OakSapling, .least = 1, .most = 2, .chance = 0.55f},
                               {.item = Item::Fibre, .least = 1, .most = 3, .chance = 0.4f}},
+                .sapling   = Item::OakSapling,
                 .deciduous = true,
             },
             {
@@ -405,7 +420,8 @@ inline constexpr SpeciesDef
                     },
                 .drops     = {{.item = Item::Wood, .least = 5, .most = 9, .chance = 1.0f},
                               {.item = Item::Resin, .least = 1, .most = 2, .chance = 0.45f},
-                              {.item = Item::Sapling, .least = 1, .most = 2, .chance = 0.5f}},
+                              {.item = Item::PineSapling, .least = 1, .most = 2, .chance = 0.5f}},
+                .sapling   = Item::PineSapling,
                 .deciduous = false,
             },
             {
@@ -468,8 +484,9 @@ inline constexpr SpeciesDef
                          .leaf = {{96, 92, 72, 255}, {124, 120, 96, 255}, {150, 146, 120, 255}, {178, 174, 148, 255}}},
                     },
                 .drops     = {{.item = Item::Wood, .least = 3, .most = 5, .chance = 1.0f},
-                              {.item = Item::Sapling, .least = 1, .most = 2, .chance = 0.6f},
+                              {.item = Item::BirchSapling, .least = 1, .most = 2, .chance = 0.6f},
                               {.item = Item::Fibre, .least = 1, .most = 2, .chance = 0.35f}},
+                .sapling   = Item::BirchSapling,
                 .deciduous = true,
             },
             {
@@ -536,7 +553,8 @@ inline constexpr SpeciesDef
                     },
                 .drops     = {{.item = Item::Wood, .least = 2, .most = 4, .chance = 1.0f},
                               {.item = Item::Apple, .least = 1, .most = 3, .chance = 0.7f},
-                              {.item = Item::Sapling, .least = 1, .most = 1, .chance = 0.5f}},
+                              {.item = Item::AppleSapling, .least = 1, .most = 1, .chance = 0.5f}},
+                .sapling   = Item::AppleSapling,
                 .deciduous = true,
             },
             {
@@ -604,6 +622,25 @@ inline constexpr SpeciesDef
 };
 
 static_assert(std::size(kSpecies) == kSpeciesCount, "every Species needs exactly one row in kSpecies");
+
+// The tree a sapling grows into, or nothing where the item is not a sapling.
+//
+// A scan of five rows, done once on a click and once a frame while a sapling is
+// in hand, which is nothing at all — and it keeps the pairing stated exactly once,
+// in the table, rather than as a table plus a switch somewhere that has to be
+// remembered when a sixth tree arrives.
+inline constexpr std::optional<Species> SpeciesOf(Item sapling) {
+    for (std::size_t e = 0; e < kSpeciesCount; e++) {
+        // The second test is what makes the default safe: a species with no
+        // sapling of its own leaves the field at an item that is not planted, so
+        // it can never answer for one.
+        if (kSpecies[e].sapling == sapling && Def(sapling).placement == Placement::Plant) {
+            return static_cast<Species>(e);
+        }
+    }
+
+    return std::nullopt;
+}
 
 inline constexpr const SpeciesDef &Def(Species species) {
     return kSpecies[SpeciesIndex(species)];

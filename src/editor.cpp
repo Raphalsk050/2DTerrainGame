@@ -17,6 +17,10 @@ constexpr Color kDigColor = {235, 84, 84, 255};
 // a promise about a click that is going to do nothing.
 constexpr Color kFarColor = {150, 156, 168, 255};
 
+// The line a ghost stands on. Pale green, which is the one colour on the bar that
+// already means something growing.
+constexpr Color kPlantColor = {150, 214, 120, 255};
+
 } // namespace
 
 void Editor::Bank(const World::Yield &freed, Inventory &inventory, Drops &drops, Vector2 at, float away, float now) {
@@ -117,6 +121,30 @@ const char *Editor::Update(World &world, Inventory &inventory, Grove &grove, con
     under_     = world.OccupantAt(target);
     reachable_ = (dx * dx + dy * dy) <= kReach * kReach;
 
+    // Where the thing in hand would come to rest, if it is the kind of thing that
+    // rests anywhere. Worked out here, once, and used by both the ghost that shows
+    // the player where it will go and the click that puts it there — one answer,
+    // or the preview is a promise the click does not keep.
+    footing_.reset();
+    rooted_ = false;
+
+    if (reachable_ && inventory.Held().holds == Holds::Item && inventory.Held().count > 0
+        && Def(inventory.Held().AsItem()).placement != Placement::None) {
+        float top = 0.0f;
+
+        if (world.FootingUnder(target, kDropReach, top)) {
+            footing_ = Vector2{target.x, top};
+
+            // And what that ground is made of, read half a lattice step under the
+            // surface — the same place the grass is asked about, and for the same
+            // reason: on the surface itself the answer is whatever the contour
+            // rounds to.
+            const float under = top + static_cast<float>(world.Spacing()) * 0.5f;
+
+            rooted_ = world.OccupantAt({target.x, under}) == Element::Soil;
+        }
+    }
+
     if (!reachable_) return nullptr;
 
     const bool digging = IsMouseButtonDown(MOUSE_BUTTON_LEFT);
@@ -145,12 +173,25 @@ const char *Editor::Update(World &world, Inventory &inventory, Grove &grove, con
 
     if (held.Empty()) return "nothing in hand";
 
-    if (held.holds == Holds::Item && held.AsItem() == Item::Sapling) {
-        // The species is the one the climate there would have grown anyway.
-        // Choosing it for the player rather than offering a menu: what a place
-        // will support is a property of the place, and planting a pine in a swamp
-        // is not a decision worth surfacing before there is a reason to make it.
-        if (!grove.Plant(grove.Suited(target.x), target, now)) {
+    // Everything that goes into the world whole rather than by the fistful goes
+    // in the same way: on the ground the cursor found, which is the ground the
+    // ghost has been standing on since the hand came near it.
+    if (Def(held.AsItem()).placement == Placement::Plant) {
+        if (!footing_.has_value()) return "nothing to plant it on";
+        if (!rooted_) return "a sapling needs soil to root in";
+
+        // Whatever tree this seed is, wherever the player is standing.
+        //
+        // It used to be the species the climate favoured there, which read as the
+        // world knowing best and meant the player could not choose: an oak sapling
+        // carried into a cold valley came up a pine. What the climate decides is
+        // what grows on its own — the scatter's business, and still is. A seed in
+        // a hand is one particular tree, and Minecraft plants a jungle sapling in
+        // a snowfield without comment.
+        const std::optional<flora::Species> seed = flora::SpeciesOf(held.AsItem());
+        if (!seed.has_value()) return "that is not something to put down";
+
+        if (!grove.Plant(*seed, *footing_, now)) {
             return "no room here — something is already growing";
         }
 
@@ -162,11 +203,49 @@ const char *Editor::Update(World &world, Inventory &inventory, Grove &grove, con
     return "that is not something to put down";
 }
 
-void Editor::DrawCursor(const Inventory &inventory, const Camera2D &camera) const {
+void Editor::DrawCursor(const Inventory &inventory, const Grove &grove, flora::Season season,
+                        const Camera2D &camera) const {
     const Vector2 mouse = GetMousePosition();
     if (hotbar::Contains(mouse)) return;
 
     const Vector2 target = GetScreenToWorld2D(mouse, camera);
+
+    const Stack &carried = inventory.Held();
+
+    // A thing that goes into the world whole gets a ghost of itself standing
+    // where it would stand, and no ring: the ring is about an area a brush
+    // covers, and there is no area here — there is one spot, and the honest way
+    // to point at it is to draw the thing on it.
+    if (carried.holds == Holds::Item && carried.count > 0) {
+        const Placement placement = Def(carried.AsItem()).placement;
+
+        if (placement != Placement::None) {
+            if (footing_.has_value()) {
+                // Green where the seed will take and red where the ground will
+                // not have it, so the refusal arrives before the click rather than
+                // as a line of text after it.
+                const Color says = rooted_ ? kPlantColor : kDigColor;
+
+                if (placement == Placement::Plant) {
+                    const std::optional<flora::Species> seed = flora::SpeciesOf(carried.AsItem());
+
+                    if (seed.has_value()) grove.DrawGhost(*seed, *footing_, season, says);
+                }
+
+                // The line it is standing on, so the spot is unambiguous even
+                // where the ghost is a wisp of a thing against a bright hillside.
+                DrawLineV({footing_->x - 8.0f, footing_->y}, {footing_->x + 8.0f, footing_->y}, says);
+            } else {
+                // Nowhere to put it. Said with the same grey the ring uses out of
+                // reach, which is the same thing being said: this click will do
+                // nothing.
+                DrawLineV({target.x - 5.0f, target.y}, {target.x + 5.0f, target.y}, kFarColor);
+                DrawLineV({target.x, target.y - 5.0f}, {target.x, target.y + 5.0f}, kFarColor);
+            }
+
+            return;
+        }
+    }
 
     // The ring carries what the hands can do here. Out of reach it goes grey and
     // says neither of them can; in reach it takes the colour of whatever the

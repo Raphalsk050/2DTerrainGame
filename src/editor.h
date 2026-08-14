@@ -46,7 +46,14 @@ public:
 
     // Outline of the area the next click affects, drawn in world space so it
     // sits over the material it is about to change.
-    void DrawCursor(const Inventory &inventory, const Camera2D &camera) const;
+    //
+    // And, where the hand holds something that goes into the world whole rather
+    // than by the fistful, a ghost of the thing itself standing where it would
+    // stand. The grove draws that: what a sapling looks like is the wood's to
+    // know, and the ghost has to be the same sprite the real one will be or it is
+    // a promise about a different tree.
+    void DrawCursor(const Inventory &inventory, const Grove &grove, flora::Season season,
+                    const Camera2D &camera) const;
 
     float Radius() const { return radius_; }
 
@@ -61,7 +68,30 @@ public:
     // Whether that point is close enough to act on.
     bool Reachable() const { return reachable_; }
 
+    // Where a thing put down now would come to rest, or nothing where there is no
+    // ground under the cursor within reach of it.
+    //
+    // Worked out once a frame and read by both hands that need it — the ghost that
+    // shows the player where it will go, and the click that puts it there. One
+    // answer, because two would be a preview that lies.
+    std::optional<Vector2> Footing() const { return footing_; }
+
+    // Whether the ground there will take a seed.
+    //
+    // Soil, and soil alone — the one restriction Minecraft puts on a sapling, and
+    // the only one worth having: a tree needs earth to root in, and everything
+    // else about where a tree may go is the player's to decide. Nothing about the
+    // climate, the biome or which tree it is.
+    bool Rooted() const { return rooted_; }
+
 private:
+    // How far below the cursor the ground is looked for, in world pixels.
+    //
+    // Half a screen. What this bounds is a click in open sky: a player pointing at
+    // a cloud is not asking to plant a tree on the hillside a long way beneath it,
+    // and past this the honest answer is that there is nothing to put it on.
+    static constexpr float kDropReach = 320.0f;
+
     // How far the player can work from, measured centre to cursor.
     //
     // Six blocks. Minecraft gives four and a half and Terraria something near
@@ -105,6 +135,12 @@ private:
 
     std::optional<Element> under_;
     Vector2 aim_{};
+
+    // The ground under the cursor, where the hand holds something that would be
+    // stood on it. Empty otherwise, so nothing is worked out for a hand that has
+    // no use for it.
+    std::optional<Vector2> footing_;
+    bool rooted_ = false;
 
     bool reachable_ = false;
 };

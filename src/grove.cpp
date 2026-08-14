@@ -32,19 +32,37 @@ float Snap(float value) {
 // already past the point of diminishing return and the cost is a quad each.
 constexpr int kSwayBands = 8;
 
-// How far the top of a plant leans, as a share of its height, at the strongest
-// gust the weather can produce.
+// The sway's two amplitudes are declared in grove.h, because sod.h mirrors them and
+// a probe measures against them. The argument for them belongs here.
 //
-// Small. A tree that leans a tenth of its height is a tree in a hurricane, and
-// the sway is meant to read as a wood breathing rather than as an emergency.
-constexpr float kSwayReach = 0.055f;
+// `kSwayHold` is small: a tree that leans a tenth of its height is a tree in a
+// hurricane, and the sway is meant to read as a wood breathing rather than as an
+// emergency.
+//
+// There are two terms and not one because they answer to the wind differently. What
+// holds a tree over is the mean pressure on it and goes to nothing as the air goes
+// still; what shakes it is the turbulence in that air, and a tree is a resonant
+// thing that rings from very little of it. A single term scaled by the wind alone
+// left a crown moving a fraction of a texel on a clear afternoon — and the bend is
+// drawn in whole plant pixels, so a fraction of one is nothing at all and the whole
+// wood stood frozen.
+//
+// The quiver is therefore floored: `kSwayIdle` of it runs in dead air, and the rest
+// comes up with the root of the wind rather than with the wind, so a light breeze
+// already shakes a tree noticeably while a gale only shakes it somewhat more. Under
+// a root the growth is steepest exactly where the numbers are smallest, which is
+// where it was needed.
 
 // Seconds one full sway takes at rest, and how much faster a hard wind drives it.
 // A branch has its own period and the wind sets how hard it is pushed, not how
 // fast it swings — but a stiff wind does shorten it, so the two are related and
 // neither is a constant.
+//
+// The urgency is double what it was, and only now means what it says: it used to
+// multiply a share that never left the middle of its range, so every tree in every
+// weather swung at about the same rate whatever the figure said.
 constexpr float kSwayPeriod  = 3.1f;
-constexpr float kSwayUrgency = 0.45f;
+constexpr float kSwayUrgency = 0.90f;
 
 // Share of the sky a crown holds back from the ground under it.
 //
@@ -120,6 +138,24 @@ constexpr float kPlantApart = 16.0f;
 // and this base clears the largest one the world can produce by seven million
 // times.
 constexpr std::int64_t kPlantedBase = 1LL << 40;
+
+// And where the ids of the ghosts begin, one per species.
+//
+// A ghost is a real sprite of a real species and so needs a slot in the sheet
+// like anything else, but it is not a plant and has no cell. Its own id per
+// species means the sheet bakes each one once and hands it back for nothing every
+// frame the cursor hovers — where one shared id would re-bake on every change of
+// species, since the sheet keys on the cell and not on what grows in it.
+//
+// Above the planted base by a margin no hand can reach: a player would have to
+// plant a trillion saplings to collide with it.
+constexpr std::int64_t kGhostBase = 1LL << 52;
+
+// How solid a ghost is drawn.
+//
+// Enough to read as the tree it is promising and not enough to be mistaken for
+// one standing there.
+constexpr float kGhostFade = 0.45f;
 
 // Weather minutes a tree takes to close over a blow it survived.
 //
@@ -316,13 +352,15 @@ float Rate(const flora::SpeciesDef &def, const terrain::Climate &climate, float 
 // crown; and half again were inside the stretch of the fall that is on screen.
 // **Four tenths of one leaf.** A field of particles nobody can ever see is
 // indistinguishable from one that is switched off.
-constexpr float kLeafCell = 18.0f;
-constexpr float kLeafFall = 26.0f;
-// The fall wraps over this, and only the stretch between a crown's top and its
-// foot is on screen — so a span far longer than a tree spends most of every
-// leaf's life culled. Near the height of a mature crown keeps three quarters of
-// them visible instead of a half.
-constexpr float kLeafSpan  = 170.0f;
+// How far apart the columns are that a leaf can fall down, in world pixels. The
+// one lever over how thick the fall is before the season and the weather thin it —
+// see kLeafFall in grove.h for the fall itself, which is the tree's own height.
+//
+// Fine, and it has to be: this is a whole leaf per column at most, so the column
+// spacing is the ceiling on how hard a wood can be seen to shed. At four times this
+// a storm stripping a birch wood put a dozen leaves over the width of the screen,
+// which reads as a few specks of dirt rather than as weather.
+constexpr float kLeafCell  = 2.2f;
 constexpr float kLeafSwing = 13.0f;
 constexpr float kLeafSide  = 0.9f;
 
@@ -337,7 +375,38 @@ constexpr float kLeafDensity = 0.9f;
 // strip a crown, and at the old arrangement — season alone, wind nowhere in it —
 // a gale and a calm afternoon shed exactly the same number of leaves, which is
 // the one thing anybody watching a storm would notice was wrong.
-constexpr float kCalmShed = 0.35f;
+//
+// A fifth, so the crest of a gale sheds five times what dead air does — and it is
+// worth being exact about which two things that ratio is between, now that both of
+// them are real. Against the *mean* of a storm rather than its crest it is nearer
+// three, and against a clear afternoon rather than dead air nearer two and a half.
+// Anything closer to a half here and all of those collapse into the same picture
+// with more leaves in it.
+constexpr float kCalmShed = 0.10f;
+
+// The tallest crown any species grows, in world pixels.
+//
+// Walked from the table once rather than written down, and it is the longest fall a
+// leaf can have — which is what the sweep upwind of the view has to be sized
+// against. Static because the table is compile-time constant and this is asked
+// every frame.
+float TallestCrown() {
+    static const float tallest = [] {
+        float found = 1.0f;
+
+        for (std::size_t s = 0; s < flora::kSpeciesCount; s++) {
+            const flora::SpeciesDef &def = flora::Def(static_cast<flora::Species>(s));
+
+            if (!def.deciduous) continue;
+
+            found = std::max(found, def.height[flora::StageIndex(flora::Stage::Mature)]);
+        }
+
+        return found;
+    }();
+
+    return tallest;
+}
 
 // How far a plant is through its fall, eased the way a rod hinged at its foot
 // goes over: barely at first, then all at once.
@@ -360,8 +429,9 @@ float Lean(const weather::Sky &sky, const flora::Plant &plant, float now) {
 
     const float height = def.height[flora::StageIndex(flora::Stage::Mature)] * plant.scale;
 
-    // As a share of what the strongest gust could do, so the whole wood is at
-    // rest on a still day and near its limit in a storm.
+    // A share of the hardest this world can blow, so the whole wood is at rest on a
+    // still day and near its limit in a storm. A share and not a speed, because how
+    // far a tree bends is a fraction of its own height — see Sky::PushAt.
     const float push = sky.PushAt(plant.base.x);
 
     // Each tree keeps its own phase, so a stand does not beat as one object.
@@ -372,10 +442,15 @@ float Lean(const weather::Sky &sky, const flora::Plant &plant, float now) {
 
     const float swing = std::sin((now * rate + phase) * 2.0f * 3.14159265f);
 
-    // Two thirds of the lean is the wind holding the tree over and one third is
-    // it swinging about that. A tree that only oscillated would cross upright in
-    // a gale, which is the one thing a bent tree never does.
-    return height * kSwayReach * push * (0.66f + 0.34f * swing);
+    // Held over by the wind, and ringing about wherever it is being held. In a gale
+    // the hold is several times the quiver, so the tree never crosses upright —
+    // which is the one thing a bent tree never does. In still air the hold is
+    // nothing and only the quiver is left, so it crosses upright freely, which is
+    // the one thing a tree in still air always does.
+    const float hold   = kSwayHold * push;
+    const float quiver = kSwaySwing * (kSwayIdle + (1.0f - kSwayIdle) * std::sqrt(std::fabs(push))) * swing;
+
+    return height * (hold + quiver);
 }
 
 } // namespace
@@ -1025,7 +1100,7 @@ void Grove::Strike(Rectangle hitbox, float damage, Vector2 from, float now) {
             state.dropped  = true;
             state.fallLeft = from.x > plant.base.x;
 
-            drops_.Scatter(ItemsOf(Item::Sapling, 1), {plant.base.x, plant.base.y - height * 0.5f},
+            drops_.Scatter(ItemsOf(def.sapling, 1), {plant.base.x, plant.base.y - height * 0.5f},
                            state.fallLeft ? -1.0f : 1.0f, now);
 
             return;
@@ -1057,34 +1132,8 @@ void Grove::Strike(Rectangle hitbox, float damage, Vector2 from, float now) {
     }
 }
 
-flora::Species Grove::Suited(float worldX) const {
-    const terrain::Climate climate = terrain::ClimateAt(worldX, terrain_);
 
-    flora::Species best = flora::Species::Oak;
-    float highest       = -1.0f;
-
-    for (std::size_t e = 0; e < flora::kSpeciesCount; e++) {
-        const flora::SpeciesDef &def = flora::kSpecies[e];
-        if (def.layer != flora::Layer::Canopy) continue;
-
-        const auto bell = [](float value, float centre, float width) {
-            const float t = (value - centre) / std::max(width, 1e-3f);
-            return std::exp(-t * t);
-        };
-
-        const float fit = bell(climate.temperature, def.climate.temperature, def.climate.temperatureWidth) *
-                          bell(climate.humidity, def.climate.humidity, def.climate.humidityWidth);
-
-        if (fit <= highest) continue;
-
-        highest = fit;
-        best    = static_cast<flora::Species>(e);
-    }
-
-    return best;
-}
-
-bool Grove::Plant(flora::Species species, Vector2 world, float now) {
+bool Grove::Plant(flora::Species species, Vector2 foot, float now) {
     // A planted tree is not part of the scatter, and so is not bound by the
     // scatter's one-per-cell rule.
     //
@@ -1103,7 +1152,7 @@ bool Grove::Plant(flora::Species species, Vector2 world, float now) {
     // So the spacing here is its own, it is small, and it is only about trunks
     // standing on top of one another.
     for (const flora::Plant &standing : plants_) {
-        if (std::fabs(standing.base.x - world.x) >= kPlantApart) continue;
+        if (std::fabs(standing.base.x - foot.x) >= kPlantApart) continue;
 
         // Read before believing it. `plants_` is what the world *would* grow
         // rather than what is standing, so a felled tree is still in it — and the
@@ -1122,18 +1171,43 @@ bool Grove::Plant(flora::Species species, Vector2 world, float now) {
     fresh.planted   = true;
     fresh.species   = static_cast<std::uint8_t>(flora::SpeciesIndex(species));
 
-    // Exactly where the player asked, standing on the ground under that point.
-    //
-    // It used to be clamped into whichever cell had taken the sapling, which was
-    // itself a fix for putting it at that cell's centre — a sapling could land a
-    // couple of hundred pixels from the cursor, off the edge of what the player
-    // was looking at, and read as the seed having been eaten. With no cell to be
-    // held inside, both go away.
-    fresh.at = {world.x, flora::GroundAt(ground_, world.x) + ground_.spacing * 0.5f};
+    // Exactly where the player asked, sunk the half a lattice step every other
+    // plant in the world is sunk by — see the scatter, which seats a trunk the
+    // same way. Without it a sapling stands on the ground rather than in it.
+    fresh.at = {foot.x, foot.y + ground_.spacing * 0.5f};
 
     remembered_.emplace(kPlantedBase + nextPlanted_++, fresh);
 
     return true;
+}
+
+void Grove::DrawGhost(flora::Species species, Vector2 foot, flora::Season season, Color tint) const {
+    if (!sheet_.Ready()) return;
+
+    flora::Plant ghost;
+
+    ghost.id      = kGhostBase + static_cast<std::int64_t>(flora::SpeciesIndex(species));
+    ghost.species = species;
+    ghost.scale   = 1.0f;
+
+    // Seated the way every other plant in the world is — see the scatter, and
+    // Plant, which sinks a sapling by the same half step. The ghost has to stand
+    // exactly where the sapling will, or it is a promise about somewhere else.
+    ghost.base = {foot.x, foot.y + ground_.spacing * 0.5f};
+
+    const canopy::Sprite *sprite = sheet_.Acquire(ghost, flora::Stage::Sapling, season);
+
+    // The frame's drawing budget is spent and this is the first hover. It will be
+    // there next frame; a marker drawn in its place would only be a second answer
+    // to the question the ghost is already answering.
+    if (sprite == nullptr) return;
+
+    const float pixel = config::kFloraPixel;
+
+    DrawTexturePro(sheet_.Texture(), sprite->source,
+                   {Snap(ghost.base.x - sprite->anchor.x * pixel), Snap(ghost.base.y - sprite->anchor.y * pixel),
+                    sprite->source.width * pixel, sprite->source.height * pixel},
+                   {0.0f, 0.0f}, 0.0f, Fade(tint, kGhostFade));
 }
 
 Rectangle Grove::StumpRect(const flora::Plant &plant, flora::Stage stage) const {
@@ -1294,7 +1368,7 @@ void Grove::Shade(World &world, float now) const {
     }
 }
 
-void Grove::DrawFruit(flora::Season season, float now) const {
+void Grove::DrawFruit(const weather::Sky &sky, flora::Season season, float now) const {
     // Fruit sets in spring and is worth picking through the summer. Outside that
     // window a tree that bears is just a tree.
     const float ripe = (season == flora::Season::Summer) ? 1.0f : (season == flora::Season::Spring) ? 0.35f : 0.0f;
@@ -1334,11 +1408,24 @@ void Grove::DrawFruit(flora::Season season, float now) const {
         // about between frames.
         const int count = 3 + static_cast<int>(Chance(plant.id, 61, settings_.seed) * 4.0f * ripe);
 
+        // Fixed to the tree means fixed to the branch, and a branch moves. The same
+        // lean the trunk is drawn with, including whatever a blow left ringing in
+        // it, or an apple hangs dead still in the air while the whole crown it is
+        // attached to bends away underneath it.
+        const float lean = Lean(sky, plant, now) + standing.shake;
+
         for (int i = 0; i < count; i++) {
             const float ax = (Chance(plant.id, 67 + i * 3, settings_.seed) - 0.5f) * width * 0.72f;
             const float ay = foot + Chance(plant.id, 71 + i * 3, settings_.seed) * (height - foot) * 0.8f;
 
-            DrawRectangleV({Snap(plant.base.x + ax), Snap(plant.base.y - ay)}, {pixel, pixel}, Def(Item::Apple).colour);
+            // Squared in how high it hangs, the same profile the sprite's own bands
+            // are sheared by — see Grove::Draw. Anything else and the fruit drifts
+            // out of the crown it is supposed to be hanging in.
+            const float up    = ay / std::max(height, 1e-3f);
+            const float bough = lean * up * up;
+
+            DrawRectangleV({Snap(plant.base.x + ax + bough), Snap(plant.base.y - ay)}, {pixel, pixel},
+                           Def(Item::Apple).colour);
         }
     }
 }
@@ -1401,8 +1488,11 @@ void Grove::Spray(const flora::Plant &plant, flora::Season season, const Burst &
             std::sin(age * kBurstRate + Chance(plant.id, salt + 6, settings_.seed) * 6.28318f) * kBurstSwing;
 
         // And the air it is falling through, by the one rule everything loose in
-        // this world is carried by.
-        const float carried = weather::Carry(burst.wind, age / kBurstLife, weather::kLeafDrag);
+        // this world is carried by. The air as it stood when the blow landed, which
+        // is what `burst.wind` holds — a burst is over in under a second, so what
+        // matters is that the whole of it is carried by one wind rather than by a
+        // figure sliding under it frame by frame.
+        const float carried = weather::Carry(burst.wind, age / kBurstLife, kBurstLife, weather::kLeafDrag);
 
         const float x = from.x + side * out * age + swing + carried;
         const float y = from.y - up * age + 0.5f * kBurstFall * age * age;
@@ -1426,7 +1516,7 @@ void Grove::Spray(const flora::Plant &plant, flora::Season season, const Burst &
     }
 }
 
-void Grove::Chips(const flora::Plant &plant, Vector2 at, float since, int salt, float push) const {
+void Grove::Chips(const flora::Plant &plant, Vector2 at, float since, int salt, float wind) const {
     if (since <= 0.0f || since >= kChipLife) return;
 
     const flora::SpeciesPalette &palette = flora::Def(plant.species).palette[flora::SeasonIndex(flora::Season::Summer)];
@@ -1450,7 +1540,8 @@ void Grove::Chips(const flora::Plant &plant, Vector2 at, float since, int salt, 
 
         // Blown, like everything else, and barely: a chip of wood is heavy and
         // the gale that carries a leaf across a clearing nudges one of these.
-        const float x = at.x + from + side * out * since + weather::Carry(push, since / kChipLife, weather::kChipDrag);
+        const float x =
+            at.x + from + side * out * since + weather::Carry(wind, since / kChipLife, kChipLife, weather::kChipDrag);
         const float y = at.y - up * since + 0.5f * kChipFall * since * since;
 
         if (y > at.y + pixel) continue;
@@ -1476,9 +1567,6 @@ void Grove::DrawBurst(const weather::Sky &sky, flora::Season season, float now) 
 
         const TreeState &state = found->second;
 
-        // The air everything off this tree is falling through.
-        const float push = sky.PushAt(plant.base.x);
-
         if (state.felledAt < 0.0f) {
             // Every blow still in the air, and not merely the last of them.
             //
@@ -1492,7 +1580,14 @@ void Grove::DrawBurst(const weather::Sky &sky, flora::Season season, float now) 
 
                 // Each slot salted apart, or two overlapping bursts would be the
                 // same ten leaves drawn twice.
-                Spray(plant, season, {.since = now - blow, .salt = 500 + slot * 131, .wind = push});
+                //
+                // The wind as it stood when this blow landed, and each slot gets its
+                // own reading. Two bursts a second apart were thrown into different
+                // air, and a gust arriving between them should carry the second one
+                // further — sampling once for the tree would put both in whatever is
+                // blowing now and quietly drag the older one sideways with it.
+                Spray(plant, season,
+                      {.since = now - blow, .salt = 500 + slot * 131, .wind = sky.WindAt(plant.base.x, blow)});
             }
 
             // And the chips out of the trunk, halfway up the clear stretch of it,
@@ -1503,7 +1598,7 @@ void Grove::DrawBurst(const weather::Sky &sky, flora::Season season, float now) 
                 const float height = def.height[flora::StageIndex(flora::Stage::Mature)] * plant.scale;
 
                 Chips(plant, {plant.base.x, plant.base.y - height * def.shape.clearance * 0.5f}, now - state.struckAt,
-                      700, push);
+                      700, sky.WindAt(plant.base.x, state.struckAt));
             }
 
             continue;
@@ -1515,7 +1610,8 @@ void Grove::DrawBurst(const weather::Sky &sky, flora::Season season, float now) 
             if (state.struckAt >= 0.0f && !state.cleared) {
                 const Rectangle stump = StumpRect(plant, StageOf(state.growth));
 
-                Chips(plant, {stump.x + stump.width * 0.5f, stump.y}, now - state.struckAt, 800, push);
+                Chips(plant, {stump.x + stump.width * 0.5f, stump.y}, now - state.struckAt, 800,
+                      sky.WindAt(plant.base.x, state.struckAt));
             }
 
             continue;
@@ -1538,98 +1634,203 @@ void Grove::DrawBurst(const weather::Sky &sky, flora::Season season, float now) 
                .salt   = 900,
                .angle  = kFallAngle * (state.fallLeft ? -1.0f : 1.0f),
                .vigour = 2.0f,
-               .wind   = push});
+               .wind   = sky.WindAt(plant.base.x, state.felledAt + kFallTime)});
     }
 }
 
 void Grove::DrawDrift(const weather::Sky &sky, flora::Season season, Rectangle view, float now) const {
-    // Autumn sheds and the rest of the year barely does, which is the whole of
-    // what a season means to a leaf. Winter has nothing left to drop.
-    // Autumn sheds and the rest of the year barely does — but "barely" still has
-    // to be visible, or the whole field may as well not run.
-    const float shedding = (season == flora::Season::Autumn)   ? 1.0f
-                           : (season == flora::Season::Spring) ? 0.7f
+    // What the season is worth to a leaf, and it is two figures rather than one
+    // because a season answers two different questions.
+    //
+    // `shedding` is what comes down of its own accord. That is the one autumn owns:
+    // a wood in October drops leaves in dead air because the leaves are letting go
+    // anyway, and in high summer almost nothing falls on a still day.
+    //
+    // `stripping` is what the wind can tear off, and it is nearly flat across the
+    // year, because what it depends on is whether there is a crown full of leaves to
+    // tear at — which there is in spring and summer just as much as in autumn. A
+    // little under autumn's, since a leaf that is already letting go needs less
+    // pulling than one still firmly on.
+    //
+    // Scaling both by one seasonal figure was wrong and read as wrong: a summer gale
+    // stripped half of what an autumn gale did, so the field looked like something
+    // that only happened in autumn. The wind now works whenever there are leaves,
+    // which is every season but the bare one.
+    const float shedding = (season == flora::Season::Autumn)   ? 1.00f
+                           : (season == flora::Season::Spring) ? 0.35f
                            : (season == flora::Season::Winter) ? 0.0f
-                                                               : 0.5f;
+                                                               : 0.25f;
 
-    if (shedding <= 0.0f || plants_.empty()) return;
+    const float stripping = (season == flora::Season::Autumn)   ? 1.00f
+                            : (season == flora::Season::Spring) ? 0.85f
+                            : (season == flora::Season::Winter) ? 0.0f
+                                                                : 0.80f;
+
+    // Zeroed before the early return below and not after it, or a bare winter wood
+    // reports whatever the last leafy frame counted. Which it did.
+    drifting_ = 0;
+
+    // Winter, and nothing else. A deciduous crown stands bare, so there is nothing
+    // for even a gale to take off it.
+    if (stripping <= 0.0f || plants_.empty()) return;
+
+    // The most this season can ever loosen, whatever the weather does. What the
+    // cheap rejection below is measured against.
+    const float utmost = kCalmShed * shedding + (1.0f - kCalmShed) * stripping;
 
     const float pixel = config::kFloraPixel;
 
-    const int first = static_cast<int>(std::floor(view.x / kLeafCell)) - 1;
-    const int last  = static_cast<int>(std::ceil((view.x + view.width) / kLeafCell)) + 1;
+    // How far upwind of the view a leaf can be let go of and still blow into it.
+    //
+    // Without this the field is only ever emptied by the wind: a leaf near the edge
+    // is carried out of sight, and the one that should have arrived from the other
+    // side was never generated, because the sweep stopped at the view. In a gale
+    // that swept the upwind edge of the screen clean — hundreds of pixels of wood
+    // with a bare sky beside it — which is one of the ways this looked like the
+    // wind doing nothing.
+    //
+    // Sized from the gale rather than from the wind now blowing, for the reason
+    // every buffer in this project is: it is a span to be swept, and a span that
+    // tracks the current weather runs out the moment the weather changes.
+    // Downwind only. A leaf is carried the way the air is going, so the strip that
+    // can feed the view lies on one side of it and sweeping the other costs cells
+    // and finds nothing. The mean rather than the gust, because this is a span to be
+    // swept and it wants one answer for the whole of it.
+    const float slowest = kLeafFall * 0.7f;
+    const float blown   = sky.Gale() * (TallestCrown() / slowest) * 0.5f * weather::kLeafDrag;
+
+    const float upwind = (sky.Mean() >= 0.0f) ? blown : 0.0f;
+    const float lee    = (sky.Mean() >= 0.0f) ? 0.0f : blown;
+
+    const int first = static_cast<int>(std::floor((view.x - upwind) / kLeafCell)) - 1;
+    const int last  = static_cast<int>(std::ceil((view.x + view.width + lee) / kLeafCell)) + 1;
+
+    // The wood, gathered once.
+    //
+    // Every cell has to find the tree standing over it, and the sweep is now several
+    // times the width of the view — so asking the whole plant list, with a record
+    // lookup on each, once per cell was most of the cost of the field. What a cell
+    // actually needs is four floats, and they are the same four for every cell under
+    // the same tree.
+    //
+    // Standing, and only standing. A felled tree stays in `plants_` — the procedural
+    // pass still says a tree grows in that cell and only the record says it came
+    // down — so without this the leaves went on falling out of thin air where the
+    // tree had been. The third place this has caught me now, after the shade and the
+    // fruit. **Anything that walks `plants_` and does something with a tree has to
+    // ask `Read` first**; the list is what the world would grow, not what is there.
+    shedders_.clear();
+
+    for (const flora::Plant &plant : plants_) {
+        const flora::SpeciesDef &def = flora::Def(plant.species);
+        if (!def.deciduous) continue;
+
+        const Standing standing = Read(plant, now);
+        if (standing.felling >= 0.0f || standing.stump) continue;
+
+        // The crown it actually has. A sapling was shedding a mature tree's worth
+        // from a mature tree's height.
+        const std::size_t stage = flora::StageIndex(standing.stage);
+
+        shedders_.push_back({plant.base.x, def.canopyWidth[stage] * plant.scale * 0.5f, plant.base.y,
+                             def.height[stage] * plant.scale, &def});
+    }
+
+    if (shedders_.empty()) return;
 
     for (int cell = first; cell <= last; cell++) {
         const float column = (static_cast<float>(cell) + Chance(cell, 17, settings_.seed)) * kLeafCell;
 
-        // The wind at this cell, not at the middle of the view: a gust is a wave
-        // crossing the world, so one end of a wood can be blowing while the other
-        // is still. The same reading the grass and the crowns take.
-        const float push = sky.PushAt(column);
-
-        // How hard the wood is shedding here, which is the season and the weather
-        // together. On a still day a tree lets go of what it was going to let go
-        // of anyway; a gale strips it, and the difference between the two is most
-        // of what makes weather worth watching.
-        const float loosened = shedding * (kCalmShed + (1.0f - kCalmShed) * std::fabs(push));
-
-        if (Chance(cell, 13, settings_.seed) > kLeafDensity * loosened) continue;
+        // Cells this season will never shed from at all, rejected before the wood is
+        // searched. The full test below needs the wind at the moment of release, and
+        // that needs the fall, and the fall is the tree's own height — so the tree
+        // has to be found first. What this can settle without it is the cells no
+        // weather could ever loosen, since `loosened` is at most this season's utmost.
+        if (Chance(cell, 13, settings_.seed) > kLeafDensity * utmost) continue;
 
         // Only where something is standing to have shed it. A leaf falling in an
         // open field is the one thing that would give the trick away.
-        const flora::Plant *under = nullptr;
+        const Shedder *under = nullptr;
 
-        flora::Stage crown = flora::Stage::Mature;
+        for (const Shedder &tree : shedders_) {
+            if (std::fabs(tree.at - column) > tree.reach) continue;
 
-        for (const flora::Plant &plant : plants_) {
-            const flora::SpeciesDef &def = flora::Def(plant.species);
-            if (!def.deciduous) continue;
-
-            // Standing, and only standing. A felled tree stays in `plants_` —
-            // the procedural pass still says a tree grows in that cell and only
-            // the record says it came down — so without this the leaves went on
-            // falling out of thin air where the tree had been.
-            //
-            // The third place this has caught me now, after the shade and the
-            // fruit. **Anything that walks `plants_` and does something with a
-            // tree has to ask `Read` first**; the list is what the world would
-            // grow, not what is there.
-            const Standing standing = Read(plant, now);
-            if (standing.felling >= 0.0f || standing.stump) continue;
-
-            // And the crown it actually has. A sapling was shedding a mature
-            // tree's worth from a mature tree's height.
-            const float width = def.canopyWidth[flora::StageIndex(standing.stage)] * plant.scale;
-
-            if (std::fabs(plant.base.x - column) > width * 0.5f) continue;
-
-            under = &plant;
-            crown = standing.stage;
+            under = &tree;
             break;
         }
 
         if (under == nullptr) continue;
 
-        const flora::SpeciesDef &def = flora::Def(under->species);
+        const flora::SpeciesDef &def = *under->def;
 
-        const float height = def.height[flora::StageIndex(crown)] * under->scale;
+        const float height = under->height;
 
-        // Leaves the crown and wraps back to it, so the fall runs for ever
-        // without anything having to be respawned.
-        const float top = under->base.y - height;
+        // Leaves the crown and wraps back to it, so the fall runs for ever without
+        // anything having to be respawned.
+        //
+        // Over the tree's own height, and this is the correction that made the whole
+        // field answer the weather. It used to wrap over one distance for the whole
+        // world, set near the tallest crown there is — so on anything shorter, most
+        // of every leaf's cycle was spent below the ground it had already landed on,
+        // culled and drawn as nothing. Half the population was invisible, and worse:
+        // `Carry` is quadratic in how far through its flight a leaf is, so the part
+        // that *was* on screen only ever reached the flat beginning of that curve
+        // and collected a quarter of the sideways travel it should have. The wind
+        // was being thrown away exactly where it would have been seen.
+        //
+        // Wrapped over the height instead, every leaf is visible for the whole of
+        // its life, and the whole of the quadratic happens where it can be watched.
+        const float span = std::max(height, 1.0f);
 
-        const float pace  = kLeafFall * (0.7f + 0.6f * Chance(cell, 23, settings_.seed));
-        const float drift = std::fmod(Chance(cell, 29, settings_.seed) * kLeafSpan + now * pace, kLeafSpan);
+        const float top = under->foot - height;
+
+        // How fast this leaf falls, how far down it has got, and — from those two
+        // alone — the moment it was let go of. `drift` wraps, so `released` steps
+        // back by one whole fall each time the leaf recycles: it is the release
+        // time exactly, in closed form, with nothing stored.
+        const float pace     = kLeafFall * (0.7f + 0.6f * Chance(cell, 23, settings_.seed));
+        const float drift    = std::fmod(Chance(cell, 29, settings_.seed) * span + now * pace, span);
+        const float released = now - drift / std::max(pace, 1e-3f);
+
+        // The wind at this cell, not at the middle of the view: a gust is a wave
+        // crossing the world, so one end of a wood can be blowing while the other
+        // is still. The same reading the grass and the crowns take.
+        //
+        // And at the moment the leaf left the crown, not at this one. Sampled now,
+        // the figure multiplies the whole of a path the leaf has already flown, so
+        // every leaf in the air slides sideways as the gust rises and slides *back*
+        // as it falls away. Nothing falls upwind. Asked about its own release the
+        // leaf keeps whatever air it was let go into, which is also what makes a
+        // gust legible: the crest hands a cohort of leaves the same hard push, and
+        // they come down together some seconds behind it.
+        const float wind = sky.WindAt(column, released);
+
+        // How hard the wood is shedding here, which is the season and the weather
+        // together. On a still day a tree lets go of what it was going to let go
+        // of anyway; a gale strips it, and the difference between the two is most
+        // of what makes weather worth watching.
+        //
+        // On the release moment too, and that is what makes the count mean anything.
+        // Gated on the wind now, a leaf loosened by a gust would wink out of the air
+        // the instant the crest moved on; gated on its release it stays up for the
+        // whole of its fall, so what is on screen is a record of the gusts that have
+        // gone by rather than a headcount of the one blowing.
+        const float loosened =
+            kCalmShed * shedding + (1.0f - kCalmShed) * stripping * sky.Stir(column, released);
+
+        if (Chance(cell, 13, settings_.seed) > kLeafDensity * loosened) continue;
 
         const float y = top + drift;
-        if (y > under->base.y) continue;
+        if (y > under->foot) continue;
 
         // A leaf does not fall straight: it swings from side to side as it goes,
         // and the swing is most of what says leaf rather than raindrop.
         const float swing = std::sin((drift / kLeafSwing) + Chance(cell, 31, settings_.seed) * 6.28318f);
 
-        // And carried, by the same rule as everything else loose in the air.
-        const float carried = weather::Carry(push, drift / kLeafSpan, weather::kLeafDrag);
+        // And carried, by the same rule as everything else loose in the air. The
+        // flight lasts as long as this fall takes at this leaf's own pace, which is
+        // what turns the air's speed into a distance.
+        const float carried = weather::Carry(wind, drift / span, span / pace, weather::kLeafDrag);
 
         const float x = column + swing * kLeafSwing * kLeafSide + carried;
 
@@ -1644,6 +1845,8 @@ void Grove::DrawDrift(const weather::Sky &sky, flora::Season season, Rectangle v
         // what says it is falling rather than being carried straight down.
         const float lead = Snap(x);
         const float over = Snap(y);
+
+        drifting_++;
 
         DrawRectangleV({lead, over}, {pixel, pixel}, palette.leaf[3]);
         DrawRectangleV({lead + (swing >= 0.0f ? pixel : -pixel), over + pixel}, {pixel, pixel}, palette.leaf[1]);

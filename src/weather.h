@@ -40,39 +40,36 @@
 // state to keep and two views of the same world at the same moment agree.
 namespace weather {
 
-// How far the air carries a loose thing sideways over its own lifetime, in world
-// pixels, at the strongest gust the weather can produce.
-//
-// The one figure every particle in the world is blown by. Leaves off a crown,
-// leaves the year sheds, chips out of a trunk — each has its own weight, below,
-// and every one of them multiplies this. Turning the wind up or down in the world
-// is a change to this line and to nothing else, which is the whole reason it is
-// here rather than three constants in three files that happened to agree.
-//
-// Well over the width of a mature crown, and it has to be: a leaf that lands where
-// it was let go of has not been blown anywhere.
-inline constexpr float kCarry = 150.0f;
-
-// How readily one kind of loose thing takes the wind up, as a share of what a leaf
-// does. A leaf is the unit, because a leaf is the thing the figure above was set
-// against; anything denser than one is carried less.
+// What share of the air's own speed a loose thing is travelling at by the end of
+// its flight. A leaf is the unit: it ends its fall moving with the air, which is
+// what a leaf does. A chip of wood is heavy and only ever picks up a fifth of it.
 inline constexpr float kLeafDrag = 1.00f;
 inline constexpr float kChipDrag = 0.22f;
 
 // The sideways offset the air has given a particle, in world pixels.
 //
-// `push` is the wind where the particle is, as a share of the strongest gust —
-// Sky::PushAt, and nothing should be computing it any other way. `flown` is how
-// far through its own flight the particle is, in [0,1]. `drag` is one of the
-// weights above.
+// `wind` is the air the thing was let go into, in pixels per second and in its own
+// units — Sky::WindAt, not a share of anything. `flown` is how far through its own
+// flight it is, in [0,1], `life` is how long that flight lasts in seconds, and
+// `drag` is one of the weights above.
+//
+// A speed and a duration rather than a share and a magic distance, and that is the
+// point of the signature. What this used to take was a normalised push times a
+// constant standing for "how far the strongest gust carries a leaf", and the
+// trouble with that figure is that it has to be re-guessed by eye every time
+// anything about the wind changes — it encodes the world's wind envelope in a file
+// that has no business knowing it. Given the air's actual speed there is nothing
+// left to tune: a leaf in air moving at fifty pixels a second for two seconds goes
+// where arithmetic says it goes.
 //
 // Squared in `flown`, and that is the part worth keeping in one place: what is
 // being drawn is a thing picking the wind up, not one already travelling at its
-// speed. A leaf leaves the branch at whatever speed it was let go at and is moving
-// with the air by the time it lands, and a term linear in time reads instead as
-// the whole world sliding sideways.
-inline float Carry(float push, float flown, float drag) {
-    return push * kCarry * drag * flown * flown;
+// speed. The lateral speed ramps from nothing to `wind * drag` over the flight and
+// this is the integral of that ramp — hence the half. A leaf leaves the branch at
+// whatever speed it was let go at and is moving with the air by the time it lands,
+// and a term linear in time reads instead as the whole world sliding sideways.
+inline float Carry(float wind, float flown, float life, float drag) {
+    return wind * drag * life * 0.5f * flown * flown;
 }
 
 // Margin value the outside edge of a cloud sits at.
@@ -90,7 +87,12 @@ inline constexpr float kCloudEdge = 0.0f;
 // the palette and the shade all move together because they are the same fact about
 // the same afternoon. Crossing between two moods interpolates every field of the
 // row at once, so a storm gathers rather than switching on.
-enum class Mood { Clear, Fair, Overcast, Storm, Count };
+// Blustery sits between fair and overcast because that is where its sky belongs,
+// and its wind is the highest in the table bar the storm's. It is the mood that
+// only exists because the wind is written down rather than derived: a bright,
+// broken sky with the air tearing through it is a kind of afternoon anybody would
+// recognise, and no weighting of cover against rain can produce one.
+enum class Mood { Clear, Fair, Blustery, Overcast, Storm, Count };
 
 inline constexpr int kMoodCount = static_cast<int>(Mood::Count);
 
@@ -104,6 +106,17 @@ struct MoodDef {
     // How hard it rains under it, in [0,1]. Uniform across the world, which is the
     // entire point: it is the weather that is raining, not the cloud.
     float rain;
+
+    // How hard the air moves at ground level under it, in pixels per second.
+    //
+    // A column of the table rather than something derived from the cover and the
+    // rain, and the reason is a mood the derivation cannot express: a dry gale, all
+    // wind and no cloud. Anything computed from how overcast it is has an overcast
+    // afternoon blowing as hard as a storm and a clear one perfectly still, which
+    // are both wrong and neither is fixable by reweighing the two terms. Written
+    // down, it is a fact about an afternoon like every other field of the row, and
+    // a reader can argue with the number where it stands.
+    float wind;
 
     // How likely this mood is to be the next one drawn. Relative, not a share.
     float likelihood;
@@ -127,6 +140,11 @@ struct Weather {
     float cover = 0.0f;
     float rain  = 0.0f;
     float shade = 0.0f;
+
+    // Pixels per second, unsigned. Which way it blows is Sky::Bearing, which turns
+    // on its own clock: the mood decides how hard the air moves, not where it is
+    // going, because a storm is no more likely to blow from one side than the other.
+    float wind = 0.0f;
 
     Color sunlight = {255, 255, 255, 255};
     Color ambient  = {255, 255, 255, 255};
@@ -507,7 +525,22 @@ struct Settings {
 
     // Pixels per second the cloud field drifts. Weather that does not move reads
     // as wallpaper.
-    float wind = 16.0f;
+    //
+    // A constant, and named apart from the wind on the ground because it must stay
+    // one. What the deck's position is made of is `time_ * cloudWind` — a distance
+    // got by multiplying a speed by the whole of elapsed time — so the moment this
+    // number varies, every cloud in the sky jumps sideways to wherever the new speed
+    // says it should always have been. The honest alternative is to integrate the
+    // wind, and that is accumulated state: it makes where the sky is depend on how
+    // the player got here, which is the one promise this module is built on.
+    //
+    // Nothing is lost by holding it. A cloud is fixed to nothing, so there is no
+    // reference on screen to judge its speed against, and a deck at one speed reads
+    // correctly under any weather. What reads as wind is what is rooted to the
+    // ground bending, and the rain, which is judged against the vertical — and both
+    // of those now have a wind of their own. Aloft the air genuinely does run its
+    // own way, so the two disagreeing is not a fudge.
+    float cloudWind = 16.0f;
 
     // Pixels per second the base shape travels through the third axis of its own
     // noise, which is what makes a cloud build and come apart rather than only
@@ -558,6 +591,47 @@ struct Settings {
     };
 
     Gust gust{};
+
+    // Which way the air is going, as a shape turning over hours.
+    //
+    // The mood says how hard it blows and this says where it is headed, and they
+    // have to be apart: a storm is no more likely to come from one side than from
+    // the other, so a signed wind in the table would be authoring a compass rather
+    // than a kind of weather.
+    //
+    // Without it the world blows one way for ever. Everything downstream reads that
+    // as a bias baked into the scenery rather than as weather — every tree leaning
+    // the same way at every hour of every season, every leaf in the world landing
+    // to the right of the tree it fell from.
+    struct Backing {
+        // Minutes one turn of the field takes. Long against `spellMinutes`, so the
+        // wind keeps its quarter across several changes of weather: a sky that
+        // changed its mind about direction as often as it changed its cloud would
+        // read as churn, not as weather.
+        float minutes = 34.0f;
+
+        // How sharply the turn passes through the calm, as the width of the crossing
+        // against the shape's own swing.
+        //
+        // Raw noise would leave the air at half strength most of the time and the
+        // table's figures would never be seen. Pushed towards the ends, the wind
+        // sits near its full force in one quarter or the other and crosses between
+        // them quickly — which is also what a backing wind does, dropping away to
+        // nothing as it comes round and picking up again on the far side.
+        //
+        // Small, and it has to be smaller than it looks. The field being bent is a
+        // sum of octaves and spends most of its time near its own middle, not near
+        // its ends, so a knee set by the width of the crossing one wants to *see*
+        // still leaves the ordinary case at half strength — a storm blowing at
+        // twenty-five pixels a second when its row says fifty-four. Measured rather
+        // than eyeballed: with this the wind reads its table's figure most of the
+        // time, which is the only reason the table is worth authoring.
+        float knee = 0.12f;
+
+        terrain::NoiseShape shape{.frequency = 1.0f, .octaves = 2, .seed = 5509};
+    };
+
+    Backing backing{};
 
     // How far the front and the climate may push the weather's own cover, either
     // way. Both small: they texture the sky, they do not overrule the weather. A
@@ -646,13 +720,17 @@ struct Settings {
     Color rainLine  = {216, 234, 255, 255};
     float rainSpeed = 620.0f;
 
-    // How much harder the wind blows on a drop than on a cloud.
+    // How much of the surface wind a falling drop carries into its slant.
     //
-    // A cloud drifts at `wind`; a falling drop is in faster air and is much lighter,
-    // so it is carried far more. Without this the slant is a degree and a half and
-    // invisible. The slant follows the wind's own sign and size, so when there is a
-    // gale the rain leans into it without anything being told to.
-    float rainDrift = 11.0f;
+    // Well over one, and it has to be: a drop spends its whole fall in the faster
+    // air above the ground rather than in the wind a blade of grass feels, and it is
+    // light enough to be travelling with it. Without this the slant is a degree and
+    // a half and invisible.
+    //
+    // Retuned downwards when the ground wind stopped being the cloud's. It used to
+    // multiply a constant 18 px/s; it now multiplies the mood's own figure, which
+    // reaches 54 in a storm, and at the old value a storm laid the rain almost flat.
+    float rainDrift = 8.0f;
 
     // Length of the middle-sized drop, and how far either side of it the gauges
     // spread. Varied per drop, because rain of one gauge is a comb.
@@ -803,39 +881,77 @@ public:
     // How hard it is raining in a column, in [0,1].
     float RainAt(float worldX) const;
 
+    // Which way the air is going and how much of its force is behind that, in
+    // [-1,1]. One reading for the whole world: a gust is local, a quarter is not.
+    //
+    // It passes through zero as it comes round, so the world does go genuinely
+    // still for a while every turn. That is not a gap to be papered over — it is
+    // the only moment a tree stands upright, and having one is what stops the lean
+    // reading as part of the scenery.
+    float Bearing() const;
+
+    // The wind everywhere at once, in pixels per second, signed. The mood's own
+    // figure pointed the way the quarter is blowing.
+    float Mean() const;
+
     // Wind at a world position, in pixels per second, signed.
     //
-    // The mean the clouds drift at, plus a gust travelling across the world — see
-    // Settings::Gust for why a gust has to travel. Scaled by how unsettled the
-    // weather is, so a storm blows and a clear afternoon does not.
+    // The mean, plus a gust travelling across the world — see Settings::Gust for why
+    // a gust has to travel.
     //
-    // Read by anything rooted to the ground. The clouds and the rain deliberately
-    // do not read it: they take the mean straight from the settings, because a
-    // cloud is not fixed to anywhere and a slant that varied per column would
-    // need the drop's whole path solved rather than its angle. Wiring the gust
-    // into rain later means sizing RainReach from the *largest* gust rather than
-    // from the mean, or the ground buffer runs out from under the slant.
+    // The overload taking a moment is for anything already in the air. A particle
+    // must be asked about the wind it was *let go into*, not the wind now: sampling
+    // now means the whole of a leaf's path is multiplied by a figure that changes
+    // under it every frame, and when a gust crest passes, everything already falling
+    // slides bodily upwind. Nothing falls upwind. Every launch time in this world is
+    // either stored or has a closed form, so this costs nothing.
     float WindAt(float worldX) const;
+    float WindAt(float worldX, float at) const;
 
-    // The strongest a gust can pull, in pixels per second. What a caller sizes a
-    // sway or a margin against, so nothing has to guess at the envelope.
-    float WindReach() const;
-
-    // The same gust as a share of the strongest one there can be, in [-1,1].
+    // The hardest this world can ever blow, in pixels per second, and the figure
+    // every share below is taken against.
     //
-    // What everything blown about by the wind should actually read, and the reason
-    // it exists as one function: the two lines that turn a speed into a share were
-    // written out at every call site — the grass, the crowns, each kind of leaf —
-    // and a rule spelled out in five places is a rule that will one day mean five
-    // different things. Nothing outside this class should divide by WindReach.
+    // Measured from the mood table in Configure rather than written down, for the
+    // reason every other cutoff in this module is measured: a figure copied by hand
+    // agrees with the table on the day it is written and silently stops agreeing the
+    // first time a row is retuned — and the failure is invisible, because everything
+    // downstream still gets a plausible number.
+    //
+    // Fixed, and that is the whole correction this class needed. Dividing by the
+    // envelope of the *current* weather cancels the wind out of its own share: a
+    // clear afternoon and a gale both came back about a half, so nothing rooted to
+    // the ground could tell them apart and every gale in the world's history was
+    // drawn as a breeze.
+    float Gale() const;
+
+    // How much air is moving here, in [0,1] — the reading for how *much*, where
+    // PushAt is the reading for which way and how far.
+    //
+    // The unsigned share, and now literally that. It was once measured from the
+    // calm rather than from nothing, to work around the cancellation described
+    // above; with the envelope fixed there is nothing to work around, and a floor
+    // subtracted from an honest number would only put the world's stillest moment
+    // somewhere above zero. Kept as its own name because a call site asking "how
+    // much is stirring" should not have to say `fabs` to mean it.
+    float Stir(float worldX) const;
+    float Stir(float worldX, float at) const;
+
+    // The wind as a share of the hardest there can be, in [-1,1].
+    //
+    // What anything *rooted* should read: a share is what a sway is written
+    // against, because how far over a tree bends is a fraction of its own height
+    // and not a distance in pixels. Anything in flight reads WindAt instead and
+    // gets a speed — a leaf goes where the air takes it, and the air's speed is a
+    // speed. Sway reads a share, flight reads a speed; that is the rule, and the
+    // reason it has to be stated is that turning the whole table up makes the air
+    // faster without making a tree bend further.
+    //
+    // It exists as one function because the two lines that turn a speed into a
+    // share were once written out at every call site — the grass, the crowns, each
+    // kind of leaf — and a rule spelled out in five places is a rule that will one
+    // day mean five different things. Nothing outside this class divides by Gale.
     float PushAt(float worldX) const;
-
-    // How unsettled the weather is, in [0,1].
-    //
-    // Cover and rain together. Either alone gets it wrong in a way that shows:
-    // cover on its own has an overcast afternoon blowing as hard as a storm, rain
-    // on its own leaves a dry gale perfectly still.
-    float Bluster() const;
+    float PushAt(float worldX, float at) const;
 
     // Where the year has got to.
     //
@@ -1016,6 +1132,11 @@ private:
     // Measured in Configure, because the erosion has to know which band counts as
     // near the edge before it can be applied at all.
     float erosionAt_ = 0.5f;
+
+    // The hardest this world can blow: the windiest row of the mood table with a
+    // full gust on top. Measured in Configure alongside the erosion, for the same
+    // reason — see Gale.
+    float gale_ = 1.0f;
 
     float time_ = 0.0f;
 

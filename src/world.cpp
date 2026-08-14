@@ -1660,10 +1660,10 @@ void World::ReadSod(Rectangle view) {
         sodRamp_[static_cast<std::size_t>(i)] =
             sod::RampAt(terrain::ClimateAt(x, settings_), season, turn.blend, sky_.HumidityAt(x));
 
-        // As a share of what the strongest gust could do, so a field is at rest
-        // on a still day and near its limit in a storm. Per column rather than
-        // per view, because a gust is a wave crossing the world and the whole
-        // point of it is that it arrives somewhere before it arrives everywhere.
+        // As a share of the hardest this world can blow, so a field is at rest on a
+        // still day and near its limit in a storm. Per column rather than per view,
+        // because a gust is a wave crossing the world and the whole point of it is
+        // that it arrives somewhere before it arrives everywhere.
         sodPush_[static_cast<std::size_t>(i)] = sky_.PushAt(x);
 
         float top   = 0.0f;
@@ -1816,6 +1816,59 @@ void World::ReadSown() {
 
         sodCover_[c] = std::min(sodCover_[c], taken);
     }
+}
+
+bool World::FootingUnder(Vector2 world, float reach, float &outTop) const {
+    const float step = static_cast<float>(spacing_);
+
+    // Started on the lattice, for the reason SurfaceOf gives at length: a walk
+    // stepping the lattice from an off-lattice start snaps two consecutive steps
+    // onto the same vertex and then skips one, and lands anywhere within half a
+    // step of where the ground actually is.
+    const float from = std::floor(world.y / step) * step;
+
+    // The crossing, turned into the row the ground is actually *drawn* at — the
+    // same correction ReadGround makes for the trees. A square is filled when its
+    // centre is inside, so the drawn surface sits up to most of a texel below the
+    // contour, and anything seated on the contour instead floats by that much.
+    const auto seated = [](float crossing) { return marching_squares::DrawnTop(crossing, config::kPixelSize); };
+
+    // Inside something already. The answer is the top of whatever the cursor is
+    // in, found by walking up: a cursor in the middle of a ramp means the ramp,
+    // and a walk downwards from there would pass out through its underside and
+    // land on whatever the ramp was built over.
+    if (GroundValueAt({world.x, from}) > 0.0f) {
+        for (float y = from; y >= from - reach; y -= step) {
+            const float above = GroundValueAt({world.x, y - step});
+            if (above > 0.0f) continue;
+
+            const float here = GroundValueAt({world.x, y});
+            const float t    = -above / std::max(here - above, 1e-6f);
+
+            outTop = seated(y - step + t * step);
+            return true;
+        }
+
+        return false;
+    }
+
+    // Otherwise the first solid met falling from the cursor.
+    float previous = GroundValueAt({world.x, from});
+
+    for (float y = from + step; y <= from + reach; y += step) {
+        const float here = GroundValueAt({world.x, y});
+
+        if (previous <= 0.0f && here > 0.0f) {
+            const float t = -previous / std::max(here - previous, 1e-6f);
+
+            outTop = seated(y - step + t * step);
+            return true;
+        }
+
+        previous = here;
+    }
+
+    return false;
 }
 
 bool World::SurfaceOf(float worldX, float &outTop) const {

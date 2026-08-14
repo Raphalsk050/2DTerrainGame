@@ -213,6 +213,18 @@ void Inventory::Stock() {
     for (std::size_t e = 0; e < kElementCount; e++) {
         Add(BlocksOf(static_cast<Element>(e), kElements[e].stack));
     }
+
+    // And a handful of every item, which is mostly about the saplings: there are
+    // one per tree now, and trying them out otherwise means finding and felling
+    // four different woods first.
+    //
+    // A handful and not a full stack, unlike the materials above. A material is
+    // spent by the fistful under a brush and a stack of it is one wall; an item
+    // goes into the world one at a time, and a dozen is more than enough to answer
+    // any question about one.
+    constexpr int kFew = 12;
+
+    for (std::size_t i = 0; i < kItemCount; i++) Add(ItemsOf(static_cast<Item>(i), kFew));
 }
 
 Rectangle Inventory::Bounds() {

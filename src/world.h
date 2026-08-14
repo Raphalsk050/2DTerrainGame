@@ -234,6 +234,9 @@ public:
     // own sequence. See weather::Sky::ForceMood.
     void CycleWeather() { sky_.CycleMood(); }
 
+    // Holds one, by index, or hands the sky back its own sequence below zero.
+    void ForceWeather(int mood) { sky_.ForceMood(mood); }
+
     // How hard it is raining over a world position, in [0,1].
     //
     // Exposed because rain is a game rule as much as a picture: crops that need it,
@@ -278,6 +281,22 @@ public:
     // one walk of the chunk map however many columns are asked about, and asking
     // one at a time would pay for that walk each time.
     void SurfaceProfile(int firstColumn, int count, std::vector<float> &out) const;
+
+    // Where something put down at `world` would come to rest, as the top of the
+    // ground under it, or false where there is none within `reach`.
+    //
+    // A point and not a column, and that is the whole of it. Skyline and
+    // SurfaceProfile both answer about a column, from the shape of the land, and
+    // both are deliberately blind to digging so that a wood does not rearrange
+    // itself around a hole. That blindness is right for growing a forest and wrong
+    // for a hand: a player who has built a ramp of earth and clicks on it means
+    // the ramp, and a query about the column answers with the hillside the ramp
+    // was built over — several body-heights below where they pointed.
+    //
+    // Both directions, because a cursor can be inside the ground as easily as
+    // above it. Pointing at the middle of a ramp walks up to the top of it;
+    // pointing at open air falls until it lands on something.
+    bool FootingUnder(Vector2 world, float reach, float &outTop) const;
 
     // Total liquid held by the vertices inside a region. Reported so that
     // volume can be checked from outside the simulation.

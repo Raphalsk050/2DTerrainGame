@@ -23,6 +23,16 @@ constexpr float kLn2 = 0.69314718f;
 // nothing to skip.
 constexpr float kSkipRate = 1.0f / 12.0f;
 
+// The curve the wind's quarter is pushed through, and the reason it is a function
+// rather than two lines inside Sky::Bearing: the envelope every share is taken
+// against has to be measured through exactly the same curve the world is drawn
+// with, and a curve written out twice is a curve that will one day be two.
+float Veer(float turn, float knee) {
+    const float soft = std::max(knee, 1e-3f);
+
+    return turn / std::sqrt(turn * turn + soft * soft);
+}
+
 float SmoothStep(float edge0, float edge1, float x) {
     const float t = std::clamp((x - edge0) / std::max(edge1 - edge0, 1e-6f), 0.0f, 1.0f);
     return t * t * (3.0f - 2.0f * t);
@@ -171,6 +181,7 @@ Weather Sky::WeatherAt(float seconds) const {
                 .cover    = held.cover,
                 .rain     = held.rain,
                 .shade    = held.shade,
+                .wind     = held.wind,
                 .sunlight = held.sunlight,
                 .ambient  = held.ambient};
     }
@@ -195,6 +206,7 @@ Weather Sky::WeatherAt(float seconds) const {
     weather.cover    = from.cover + (to.cover - from.cover) * blend;
     weather.rain     = from.rain + (to.rain - from.rain) * blend;
     weather.shade    = from.shade + (to.shade - from.shade) * blend;
+    weather.wind     = from.wind + (to.wind - from.wind) * blend;
     weather.sunlight = Mix(from.sunlight, to.sunlight, blend);
     weather.ambient  = Mix(from.ambient, to.ambient, blend);
 
@@ -392,7 +404,7 @@ float Sky::Field(Vector2 world) const {
     // What the whole sky does: travel with the wind. Everything below is written
     // against it, so the three layers hold together as one cloud however fast each
     // one is moving through itself.
-    const float drift = time_ * settings_.wind;
+    const float drift = time_ * settings_.cloudWind;
 
     // Perlin-Worley, the base of every volumetric cloud since Nubis.
     //
@@ -452,6 +464,67 @@ void Sky::Configure(const Settings &settings, const terrain::Settings &terrain) 
     // The gradient is measured from the ground, so raising the land raises the
     // horizon with it and nothing has to be re-picked.
     settings_.air.horizon = terrain.surface.level;
+
+    // The hardest the air can ever move here: the windiest row in the table, with
+    // the most a gust ever adds to it and the furthest the quarter ever swings.
+    //
+    // Both of those are *measured* rather than taken from their nominal bounds, and
+    // that is the whole of why this is a loop instead of a line. A noise field named
+    // as running over [-1,1] does not visit the ends — it is a sum of octaves and the
+    // peaks rarely line up — so an envelope built from the nominal figures is larger
+    // than anything that ever blows, and every share taken against it comes back
+    // short. Written the obvious way this put a storm's hardest gust at two thirds
+    // of full, and a gale that never reads as a gale is exactly the fault this whole
+    // envelope exists to fix. It is the same trap the cloud cutoffs are measured to
+    // avoid, a few lines below.
+    float hardest = 0.0f;
+
+    for (const MoodDef &mood : settings_.moods) hardest = std::max(hardest, std::fabs(mood.wind));
+
+    // Strode by an irrational multiple of a feature, for the reason the cloud
+    // sampler gives: a stride of whole features reads the same corner of the noise
+    // lattice every time, where the field is exactly zero.
+    constexpr int kWindSamples  = 4096;
+    constexpr float kWindStride = 1.618f;
+
+    // Each shape measured along its own axis and the two figures multiplied, rather
+    // than the two sampled as a pair. They do not share an axis: the gust varies
+    // with position as well as time, the quarter only with time, so any pairing of
+    // one sample of each describes a coincidence rather than a distribution. What
+    // makes the product reachable rather than theoretical is the knee — the quarter
+    // is pushed to sit near its full swing almost all the time, so a hard gust
+    // arriving while the wind is squarely in one quarter is the ordinary case and
+    // not a rare alignment.
+    std::vector<float> gusts;
+    std::vector<float> turns;
+
+    gusts.reserve(kWindSamples);
+    turns.reserve(kWindSamples);
+
+    for (int i = 0; i < kWindSamples; i++) {
+        const float along = static_cast<float>(i) * kWindStride;
+
+        const float wave = terrain::Signed({along * terrain::kFeatureSpan, 0.0f}, settings_.gust.shape);
+        const float turn = terrain::Signed({along * terrain::kFeatureSpan, 0.0f}, settings_.backing.shape);
+
+        gusts.push_back(std::fabs(1.0f + wave * settings_.gust.strength));
+        turns.push_back(std::fabs(Veer(turn, settings_.backing.knee)));
+    }
+
+    std::sort(gusts.begin(), gusts.end());
+    std::sort(turns.begin(), turns.end());
+
+    // A quantile and not the maximum, which is the same choice the cloud cutoffs
+    // above are made by and for the same reason. The largest value in four thousand
+    // samples of a noise field is a peak the world visits once in a long while;
+    // measured against it, every gust a storm actually blows reads as most of a gale
+    // rather than as one, and the top of the range is never seen. This is the figure
+    // the hard gusts do reach, with the rare freak above it left to clamp.
+    constexpr float kGaleQuantile = 0.99f;
+
+    const auto at = static_cast<std::size_t>(kGaleQuantile * static_cast<float>(kWindSamples - 1));
+
+    gale_ = std::max(hardest * gusts[at] * turns[at], 1e-3f);
 
     // Sampled a little over one feature apart, and by a different irrational
     // multiple on each axis. Perlin noise is exactly zero at every corner of its own
@@ -694,33 +767,57 @@ float Sky::RainAt(float worldX) const {
     return now_.rain;
 }
 
-// How unsettled the weather is, in [0,1]. Cover on its own would have an overcast
-// afternoon blowing as hard as a storm; rain on its own would leave a dry gale
-// still. The two together are what "blustery" means.
-float Sky::Bluster() const { return std::clamp(now_.cover * 0.45f + now_.rain * 0.55f, 0.0f, 1.0f); }
+float Sky::Bearing() const {
+    const Settings::Backing &backing = settings_.backing;
 
-float Sky::WindAt(float worldX) const {
+    // Read along the clock alone, and it is the one field in this module with no
+    // position in it. A gust is a wave crossing a wood and has to be local; a
+    // quarter is what the whole sky is doing, and a world where the wind blew east
+    // at one end and west at the other would have air arriving from nowhere.
+    const float along = time_ / std::max(backing.minutes * 60.0f, 1.0f);
+
+    const float turn = terrain::Signed({along * terrain::kFeatureSpan, 0.0f}, backing.shape);
+
+    // Pushed towards the ends. Raw, the field sits near the middle most of the time
+    // and the table's figures would never be reached — a storm would spend its whole
+    // spell blowing at half the strength its row claims. This is a soft sign: near
+    // one over most of the turn, crossing quickly, and smooth through the crossing
+    // so nothing snaps as it comes round.
+    return Veer(turn, backing.knee);
+}
+
+float Sky::Mean() const { return now_.wind * Bearing(); }
+
+float Sky::WindAt(float worldX) const { return WindAt(worldX, time_); }
+
+float Sky::WindAt(float worldX, float at) const {
     const Settings::Gust &gust = settings_.gust;
 
     // Sampled at a position that slides with time, so what the field describes is
     // a shape crossing the world rather than a value changing where it stands.
-    const float along = worldX / std::max(gust.wavelength, 1.0f) - time_ * gust.speed / std::max(gust.wavelength, 1.0f);
+    const float along = worldX / std::max(gust.wavelength, 1.0f) - at * gust.speed / std::max(gust.wavelength, 1.0f);
 
     // The shape's own seed, the way every other field in this module is read.
     const float wave = terrain::Signed({along * terrain::kFeatureSpan, 0.0f}, gust.shape);
 
-    // A calm day still has its breeze; a storm has the mean and a gust half again
-    // as strong on top of it.
-    const float weight = 0.35f + 0.65f * Bluster();
-
-    return settings_.wind * (1.0f + wave * gust.strength * weight);
+    // The mood as it stands, not as it stood at `at`. The moment only moves the
+    // gust, which turns over seconds; the weather turns over minutes, and reading
+    // the whole table backwards for every leaf on screen would buy nothing anybody
+    // could see.
+    return Mean() * (1.0f + wave * gust.strength);
 }
 
-float Sky::WindReach() const { return std::fabs(settings_.wind) * (1.0f + settings_.gust.strength); }
+float Sky::Gale() const { return gale_; }
 
-float Sky::PushAt(float worldX) const {
-    return std::clamp(WindAt(worldX) / std::max(WindReach(), 1e-3f), -1.0f, 1.0f);
+float Sky::PushAt(float worldX) const { return PushAt(worldX, time_); }
+
+float Sky::PushAt(float worldX, float at) const {
+    return std::clamp(WindAt(worldX, at) / std::max(gale_, 1e-3f), -1.0f, 1.0f);
 }
+
+float Sky::Stir(float worldX) const { return Stir(worldX, time_); }
+
+float Sky::Stir(float worldX, float at) const { return std::fabs(PushAt(worldX, at)); }
 
 Sky::Season Sky::Turn() const {
     // Held, for looking at one season rather than waiting for it.
@@ -1161,15 +1258,35 @@ void Sky::DrawShaded(const Grid &field, Vector2 towards, int bands) const {
 Vector2 Sky::RainFall() const {
     // The slant is the wind against the fall, so the rain leans into a gale and
     // stands up in still air without either being written down. A drop is far
-    // lighter than a cloud and is in faster air, so it feels the wind much harder —
-    // that is `rainDrift`, and without it the slant is a degree and a half.
-    return Unit({settings_.wind * settings_.rainDrift, settings_.rainSpeed}, {0.0f, 1.0f});
+    // lighter than the ground it is falling past and is in faster air the higher it
+    // is, so it carries more of the wind than a blade of grass does — that is
+    // `rainDrift`, and without it the slant is a degree and a half.
+    //
+    // The mean and not the wind in a column, which is the one place this module
+    // still deliberately ignores the gust. A per-column slant would make a drop's
+    // path a curve, and every drop is drawn as the straight segment between where
+    // it is and where it was; and RainReach, which is how much ground is fetched
+    // under the view before the rain is drawn, would have to be sized for the worst
+    // slant anywhere rather than the one actually falling.
+    return Unit({Mean() * settings_.rainDrift, settings_.rainSpeed}, {0.0f, 1.0f});
 }
 
 float Sky::RainReach() const {
-    const Vector2 fall = RainFall();
+    // Sized from the gale rather than from the wind now blowing, and that is the
+    // difference between a buffer and a bug. The ground under the view is fetched
+    // once and the rain is then drawn against it; if the reach tracked the current
+    // slant, a wind rising while the rain fell would walk the drops off the end of
+    // the ground that was fetched for them. It costs a wider fetch in light weather
+    // and never runs out in heavy.
+    //
+    // Against the hardest the *mean* can be rather than the hardest gust, because
+    // the gust is deliberately not in the slant — see RainFall. Sizing this for a
+    // gust would fetch nearly twice the ground for a lean that never arrives.
+    const float reach = gale_ / (1.0f + settings_.gust.strength);
 
-    return std::abs(fall.x / std::max(fall.y, 1e-3f)) * std::max(settings_.rainSpan, 1.0f);
+    const Vector2 hardest = Unit({reach * settings_.rainDrift, settings_.rainSpeed}, {0.0f, 1.0f});
+
+    return std::abs(hardest.x / std::max(hardest.y, 1e-3f)) * std::max(settings_.rainSpan, 1.0f);
 }
 
 void Sky::DrawRain(Rectangle view, const Ground &ground) const {
