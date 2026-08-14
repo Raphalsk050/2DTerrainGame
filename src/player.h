@@ -182,9 +182,24 @@ public:
     Vector2 Centre() const;
 
     Vector2 Position() const { return position_; }
+
+    // Puts the character somewhere outright, clearing whatever it was doing on the
+    // way. Momentum is dropped with it: arriving somewhere new still carrying the
+    // speed of the fall that was interrupted is how a teleport ends underground.
+    void PlaceAt(Vector2 at) {
+        position_ = at;
+        velocity_ = {};
+    }
     Vector2 AimDirection() const { return aimDirection_; }
     State CurrentState() const { return state_; }
     bool IsGrounded() const { return grounded_; }
+
+    // How fast the character is travelling, in world pixels per second.
+    //
+    // Exposed because what the ground does underfoot depends on it — dust is kicked
+    // up by a pace, not by a position — and the alternative is for every watcher to
+    // difference the body's own corner and get a different answer to this one.
+    Vector2 Velocity() const { return velocity_; }
     bool IsAttacking() const { return attackTimer_ > 0.0f; }
 
     // True on the one frame a swing began.

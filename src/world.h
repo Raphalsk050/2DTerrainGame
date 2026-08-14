@@ -230,6 +230,10 @@ public:
     // fourth. For looking at the year before there is one.
     void CycleSeason() { sky_.ForceSeason((sky_.ForcedSeason() + 1) % 4); }
 
+    // Straight to one, for a caller that knows which it wants rather than one
+    // stepping through them.
+    void SetSeason(int index) { sky_.ForceSeason(index); }
+
     // Steps the weather through clear, fair, overcast, storm and back to the sky's
     // own sequence. See weather::Sky::ForceMood.
     void CycleWeather() { sky_.CycleMood(); }

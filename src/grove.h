@@ -11,6 +11,7 @@
 #include "item.h"
 
 #include <cstdint>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
@@ -122,6 +123,15 @@ public:
     // the whole strike window, so a caller reading that instead lands nine blows
     // per swing.
     void Strike(Rectangle hitbox, float damage, Vector2 from, float now);
+
+    // Whether there is anything here a swing would connect with — a standing
+    // trunk, a sapling, or a stump left to clear.
+    //
+    // Asked by the hand before it decides which tool the click is, so that one
+    // button can chop a tree and dig the ground without the player choosing. It
+    // shares its geometry with Strike rather than describing it again: a cursor
+    // that lit up on trees the axe could not reach would be worse than no cursor.
+    bool TimberAt(Rectangle probe, float now) const;
 
     // Plants one by hand at `foot` — the top of the ground it is to stand on,
     // worked out by whoever is holding the sapling. Returns false if something is
@@ -334,6 +344,11 @@ private:
     // the blow. Bark rather than leaves, and thrown from where the axe struck
     // rather than off the crown.
     void Chips(const flora::Plant &plant, Vector2 at, float since, int salt, float wind) const;
+
+    // The rectangle a blow has to land in for this plant to feel it, or nothing
+    // where the plant is not something to swing at. The single source of that
+    // geometry — see TimberAt.
+    std::optional<Rectangle> StrikeRect(const flora::Plant &plant, float now) const;
 
     // One burst of leaves off a crown, and the few things that separate an axe
     // landing in a trunk from a whole tree landing on the ground.

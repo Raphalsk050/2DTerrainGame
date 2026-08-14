@@ -7,6 +7,8 @@
 #include "light_layer.h"
 #include "liquid_layer.h"
 #include "player.h"
+#include "console.h"
+#include "scuff.h"
 #include "sod.h"
 #include "soil.h"
 #include "raylib.h"
@@ -15,6 +17,8 @@
 #include "world.h"
 
 #include <algorithm>
+#include <string>
+#include <cctype>
 #include <cmath>
 #include <array>
 #include <cstdio>
@@ -82,11 +86,257 @@ Rectangle ViewBounds(const Camera2D &camera) {
     return {camera.target.x - camera.offset.x / zoom, camera.target.y - camera.offset.y / zoom, width, height};
 }
 
+// Half-side of the box an aimed swing lands in, in world pixels.
+//
+// A little over the slack the cursor uses to *choose* the axe, so that a click the
+// cursor accepted is a click that connects. The two are separate figures because
+// they answer separate questions — what the hand is willing to aim at, and what the
+// blow covers — and tying them together would make widening the aim quietly widen
+// the axe.
+constexpr float kAimedBlow = 12.0f;
+
+
+// ------------------------------------------------------------- the commands
+//
+// What a typed line means. The console itself knows only how to take the line and
+// show an answer — see console.h for why the two are apart — so this is where a
+// name turns into a change to the world.
+//
+// Every branch answers, and answers in the tone that says whether it worked. A
+// command that quietly does nothing is indistinguishable from one that is misspelt,
+// and the whole reason for having a log is to be able to tell those apart.
+
+// Splits on runs of spaces. A tokeniser rather than a parser, which is all the
+// grammar here needs: a verb and up to a couple of words after it.
+std::vector<std::string> Words(const std::string &line) {
+    std::vector<std::string> out;
+
+    std::size_t at = 0;
+
+    while (at < line.size()) {
+        while (at < line.size() && line[at] == ' ') at++;
+
+        const std::size_t from = at;
+
+        while (at < line.size() && line[at] != ' ') at++;
+
+        if (at > from) out.push_back(line.substr(from, at - from));
+    }
+
+    return out;
+}
+
+std::string Lower(std::string text) {
+    for (char &c : text) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+
+    return text;
+}
+
+// Matches a word against a table of names, on the whole word or on a unique
+// prefix — `/weather st` is unambiguous and there is no reason to make it be typed
+// out. Returns -1 for no match and -2 where the prefix fits more than one.
+int Named(const std::string &word, const char *const *names, int count) {
+    int found = -1;
+
+    for (int i = 0; i < count; i++) {
+        const std::string name = Lower(names[i]);
+
+        if (name == word) return i;
+
+        if (name.rfind(word, 0) == 0) found = (found < 0) ? i : -2;
+    }
+
+    return found;
+}
+
+void RunCommand(const std::string &line, World &world, Grove &grove, Inventory &inventory, Player &player,
+                console::Console &chat) {
+    // Anything not starting with a slash is talk rather than an instruction. There
+    // is nobody to talk to yet, but the distinction is the one every chat box makes
+    // and building it in now costs a branch.
+    if (line.empty() || line[0] != '/') {
+        chat.Say(line);
+        return;
+    }
+
+    const std::vector<std::string> words = Words(line.substr(1));
+
+    if (words.empty()) {
+        chat.Say("type a command after the slash — /help lists them", console::Tone::Failed);
+        return;
+    }
+
+    const std::string verb = Lower(words[0]);
+
+    const auto arg = [&](std::size_t n) { return (words.size() > n) ? Lower(words[n]) : std::string{}; };
+
+    if (verb == "help") {
+        chat.Say("/weather <clear|fair|blustery|overcast|storm|auto>", console::Tone::Note);
+        chat.Say("/season <spring|summer|autumn|winter>", console::Tone::Note);
+        chat.Say("/time — run the clock on to the next quarter", console::Tone::Note);
+        chat.Say("/give <item> [count]", console::Tone::Note);
+        chat.Say("/tp <x> <y> — put the character somewhere", console::Tone::Note);
+        chat.Say("/wind — what the air is doing here", console::Tone::Note);
+        chat.Say("/clear — empty this log", console::Tone::Note);
+        return;
+    }
+
+    if (verb == "clear") {
+        chat.Wipe();
+        return;
+    }
+
+    if (verb == "weather") {
+        if (arg(1).empty()) {
+            chat.Say(std::string{"it is "} + world.Sky().Now().name, console::Tone::Note);
+            return;
+        }
+
+        if (arg(1) == "auto") {
+            world.ForceWeather(-1);
+            chat.Say("weather back on its own timer", console::Tone::Done);
+            return;
+        }
+
+        // Read off the sky's own table rather than a list written here, so a mood
+        // added to the table is a mood this can set without being touched.
+        std::vector<std::string> moods;
+
+        for (int i = 0; i < weather::kMoodCount; i++) moods.push_back(Lower(world.Sky().MoodNamed(i)));
+
+        std::vector<const char *> raw;
+        for (const std::string &mood : moods) raw.push_back(mood.c_str());
+
+        const int found = Named(arg(1), raw.data(), static_cast<int>(raw.size()));
+
+        if (found == -2) {
+            chat.Say(arg(1) + " could be more than one weather", console::Tone::Failed);
+            return;
+        }
+
+        if (found < 0) {
+            chat.Say("no weather called " + arg(1), console::Tone::Failed);
+            return;
+        }
+
+        world.ForceWeather(found);
+        chat.Say("weather held at " + moods[static_cast<std::size_t>(found)], console::Tone::Done);
+        return;
+    }
+
+    if (verb == "season") {
+        const int found = Named(arg(1), kSeasonNames, 4);
+
+        if (found < 0) {
+            chat.Say("seasons are spring, summer, autumn and winter", console::Tone::Failed);
+            return;
+        }
+
+        world.SetSeason(found);
+        chat.Say(std::string{"season held at "} + kSeasonNames[found], console::Tone::Done);
+        return;
+    }
+
+    if (verb == "time") {
+        world.SkipToQuarter();
+        chat.Say("running the clock on to the next quarter", console::Tone::Done);
+        return;
+    }
+
+    if (verb == "wind") {
+        const Vector2 at = player.Centre();
+
+        chat.Say(TextFormat("wind %+.0f px/s here, %.0f mean, push %+.2f of a gale of %.0f",
+                            world.Sky().WindAt(at.x), world.Sky().Now().wind, world.Sky().PushAt(at.x),
+                            world.Sky().Gale()),
+                 console::Tone::Note);
+        return;
+    }
+
+    if (verb == "tp") {
+        if (words.size() < 3) {
+            chat.Say("/tp wants an x and a y", console::Tone::Failed);
+            return;
+        }
+
+        const Vector2 to = {static_cast<float>(std::atof(words[1].c_str())),
+                            static_cast<float>(std::atof(words[2].c_str()))};
+
+        player.PlaceAt(to);
+        chat.Say(TextFormat("moved to %.0f, %.0f", to.x, to.y), console::Tone::Done);
+        return;
+    }
+
+    if (verb == "give") {
+        if (arg(1).empty()) {
+            chat.Say("/give wants something to give", console::Tone::Failed);
+            return;
+        }
+
+        std::vector<std::string> names;
+
+        for (std::size_t i = 0; i < kItemCount; i++) {
+            names.push_back(Lower(Def(static_cast<Item>(i)).name));
+        }
+
+        // Spaces in a name are why this is matched against the joined tail rather
+        // than one word: "oak sapling" is two words and one item.
+        std::string wanted = arg(1);
+        int count          = 1;
+
+        if (words.size() > 2) {
+            const std::string tail = arg(words.size() - 1);
+
+            const bool number = !tail.empty() && std::all_of(tail.begin(), tail.end(), [](unsigned char c) {
+                                    return std::isdigit(c) != 0;
+                                });
+
+            const std::size_t last = number ? words.size() - 1 : words.size();
+
+            if (number) count = std::max(std::atoi(tail.c_str()), 1);
+
+            for (std::size_t i = 2; i < last; i++) wanted += " " + arg(i);
+        }
+
+        std::vector<const char *> raw;
+        for (const std::string &name : names) raw.push_back(name.c_str());
+
+        const int found = Named(wanted, raw.data(), static_cast<int>(raw.size()));
+
+        if (found == -2) {
+            chat.Say(wanted + " could be more than one thing", console::Tone::Failed);
+            return;
+        }
+
+        if (found < 0) {
+            chat.Say("nothing here is called " + wanted, console::Tone::Failed);
+            return;
+        }
+
+        const Item item = static_cast<Item>(found);
+
+        const int over = inventory.Add({.holds = Holds::Item, .what = static_cast<std::uint8_t>(found), .count = count});
+
+        if (over >= count) {
+            chat.Say("no room for any of that", console::Tone::Failed);
+            return;
+        }
+
+        chat.Say(TextFormat("gave %d %s", count - over, Def(item).name), console::Tone::Done);
+        return;
+    }
+
+    (void)grove;
+
+    chat.Say("no command called /" + verb + " — /help lists them", console::Tone::Failed);
+}
+
+
 Rectangle Expand(Rectangle rect, float margin) {
     return {rect.x - margin, rect.y - margin, rect.width + 2.0f * margin, rect.height + 2.0f * margin};
 }
 
-PlayerInput ReadPlayerInput(const Camera2D &camera) {
+PlayerInput ReadPlayerInput(const Camera2D &camera, bool chopping) {
     PlayerInput input;
 
     if (IsKeyDown(KEY_A) || IsKeyDown(KEY_LEFT)) input.moveX -= 1.0f;
@@ -95,7 +345,11 @@ PlayerInput ReadPlayerInput(const Camera2D &camera) {
     input.jumpPressed   = IsKeyPressed(KEY_SPACE) || IsKeyPressed(KEY_W);
     input.jumpHeld      = IsKeyDown(KEY_SPACE) || IsKeyDown(KEY_W);
     input.crouchHeld    = IsKeyDown(KEY_S) || IsKeyDown(KEY_DOWN);
-    input.attackPressed = IsKeyPressed(KEY_J);
+    // The key remains, and the mouse is the other way in. `chopping` is the left
+    // button held over a trunk — held rather than pressed, so laying into a tree is
+    // one held button and not a drumroll; what stops it becoming one blow a frame is
+    // the swing's own cooldown, which is where that rule already lived.
+    input.attackPressed = IsKeyPressed(KEY_J) || chopping;
 
     // The vertical axis is the same two keys as jump and crouch. Only flight
     // reads it, and while flying neither of those actions applies, so there is
@@ -1404,6 +1658,7 @@ void ReportFrame(World &world, Grove &grove, Inventory &gathered, Vector2 at, in
 // blur needs the world rendered into a target of its own. Neither half opens the
 // frame, so the caller decides whether that target is the screen.
 void DrawScene(const World &world, const Grove &grove, const Inventory &inventory, const Player &player,
+               const scuff::Trail &trail,
                const Editor &editor, const LiquidLayer &liquids, const LightLayer &lights, const Camera2D &camera,
                const debug_view::Toggles &debug, bool aiming) {
     const Rectangle view = ViewBounds(camera);
@@ -1443,6 +1698,11 @@ void DrawScene(const World &world, const Grove &grove, const Inventory &inventor
 
     // What the wood left on the ground, over the plants and under the character.
     grove.Fallen().Draw(world.Sky().Time());
+
+    // Under the character and over the ground, which is where dust off a foot
+    // belongs: it is in front of the hillside it came out of and behind the boot
+    // that kicked it.
+    trail.Draw(world.Sky().Time());
 
     player.Draw();
 
@@ -2387,6 +2647,11 @@ int main(int argc, char **argv) {
     // Dropped in above the ground at the origin rather than at a fixed height,
     // since the surface there is now wherever the relief put it.
     Player player({0.0f, terrain::Height(0.0f, settings) - 96.0f});
+
+    // The dust under the character's feet. Beside the player rather than inside it,
+    // because what a foot throws up is the ground's answer and not the body's — see
+    // scuff.h.
+    scuff::Trail trail;
     Editor editor;
 
     LiquidLayer liquids;
@@ -2427,8 +2692,36 @@ int main(int argc, char **argv) {
     // hole in whatever was behind it.
     bool holdOff = false;
 
+    // The chat line and its log.
+    //
+    // Held out here with the other things that are states of the screen. Everything
+    // that reads a key is gated on it being shut, which is the whole discipline the
+    // feature needs: a box that takes typing while the character still answers to
+    // WASD is a box that walks you off a cliff mid-sentence.
+    console::Console chat;
+
+    chat.Say("press T to type a command — /help lists them", console::Tone::Note);
+
     while (!WindowShouldClose()) {
         const float dt = GetFrameTime();
+
+        // The wall clock rather than the weather's, so a line stays readable for as
+        // long as it takes to read whatever F7 is doing to the sky.
+        chat.Step(dt);
+
+        // Opened on T, and never while the pack is up or while it is already open —
+        // in the second case the T belongs in the box, and Console::Open would eat
+        // it anyway.
+        if (!chat.IsOpen() && !packOpen && IsKeyPressed(KEY_T)) chat.Open();
+
+        // Everything below asks whether the player is typing before it reads a key.
+        const bool typing = chat.IsOpen();
+
+        if (typing) {
+            const std::string sent = chat.Read();
+
+            if (!sent.empty()) RunCommand(sent, world, grove, inventory, player, chat);
+        }
 
         // The frame can change size between any two frames, so the two things that
         // are sized to it are set from it every frame rather than when it changes.
@@ -2452,7 +2745,7 @@ int main(int argc, char **argv) {
         // Read before the gate below, since it is the one key that has to work on
         // both sides of it. Escape closes the panel as well, which it can only do
         // because the exit key was cleared at startup — see SetExitKey.
-        if (IsKeyPressed(KEY_TAB) || (packOpen && IsKeyPressed(KEY_ESCAPE))) {
+        if (!typing && (IsKeyPressed(KEY_TAB) || (packOpen && IsKeyPressed(KEY_ESCAPE)))) {
             packOpen = !packOpen;
 
             // Anything still on the cursor goes into the world rather than into
@@ -2506,7 +2799,7 @@ int main(int argc, char **argv) {
             // The two that read the mouse wait out the click that closed the
             // panel; the plants above do not, since nothing about them is a
             // click.
-            if (!holdOff) {
+            if (!holdOff && !typing) {
                 hotbar::Update(inventory, ZoomModifier());
 
                 // Handed the player's body from before it moves this frame, which
@@ -2525,37 +2818,37 @@ int main(int argc, char **argv) {
             }
         }
 
-        debug_view::ReadToggles(debug);
-        if (IsKeyPressed(KEY_R)) world.Reset();
+        if (!typing) debug_view::ReadToggles(debug);
+        if (!typing && IsKeyPressed(KEY_R)) world.Reset();
 
         // An action rather than a state, so it is read here beside the other one and
         // not held in the debug toggles. Asking again while one is running queues
         // another quarter.
-        if (IsKeyPressed(KEY_F8)) world.SkipToQuarter();
+        if (!typing && IsKeyPressed(KEY_F8)) world.SkipToQuarter();
 
         // Holds a season, for looking at one rather than waiting a year. There is
         // no year yet, so without this the world is always in spring — which is
         // exactly why the key exists: the whole seasonal path can be exercised and
         // judged before there is a calendar to drive it.
-        if (IsKeyPressed(KEY_F9)) world.CycleSeason();
+        if (!typing && IsKeyPressed(KEY_F9)) world.CycleSeason();
 
         // And holds a weather, for the same reason one stop further on: which
         // weather blows is a pure function of the spell and the seed, so a storm
         // is something to be waited for rather than something to be looked at.
         // Everything a gale does — the rain, the shade, the gusts, the leaves
         // coming off a wood — has to be judged with one blowing.
-        if (IsKeyPressed(KEY_F12)) world.CycleWeather();
+        if (!typing && IsKeyPressed(KEY_F12)) world.CycleWeather();
 
         // An action beside the other two, and for the reason F8 gives: the debug
         // toggles hold the state of the screen, and this is not a state.
-        if (IsKeyPressed(KEY_F11)) inventory.Stock();
+        if (!typing && IsKeyPressed(KEY_F11)) inventory.Stock();
 
         // Turned up and down while walking, since how much light the player
         // carries is a balance question and the only way to settle it is to be
         // underground at each setting. Zero is a valid answer: it leaves the
         // dark to torches alone.
-        if (IsKeyPressed(KEY_COMMA)) lantern = std::max(lantern - config::kLanternStep, 0.0f);
-        if (IsKeyPressed(KEY_PERIOD)) lantern = std::min(lantern + config::kLanternStep, config::kLanternMax);
+        if (!typing && IsKeyPressed(KEY_COMMA)) lantern = std::max(lantern - config::kLanternStep, 0.0f);
+        if (!typing && IsKeyPressed(KEY_PERIOD)) lantern = std::min(lantern + config::kLanternStep, config::kLanternMax);
 
         // The accumulator is not fed while the panel is up, rather than being fed
         // and the stepping skipped. Skipping alone would leave it holding
@@ -2569,18 +2862,46 @@ int main(int argc, char **argv) {
                 accumulated -= kWaterStep;
             }
 
-            player.Update(ReadPlayerInput(camera), world, dt);
+            // Taken before the step, because a landing is only visible from the
+            // near side of it: once the body is resting on the ground its downward
+            // speed has already been cleared, and a puff sized from that is a puff
+            // every landing throws at nothing.
+            const float fell = std::max(player.Velocity().y, 0.0f);
+
+            // A neutral input while typing rather than no update at all: the
+            // character has to keep falling and keep being pushed out of walls, it
+            // simply must not answer to the keys that are spelling a command.
+            const PlayerInput moves =
+                typing ? PlayerInput{}
+                       : ReadPlayerInput(camera, !packOpen && !holdOff && editor.Left() == Editor::Hand::Chop
+                                                     && IsMouseButtonDown(MOUSE_BUTTON_LEFT));
+
+            player.Update(moves, world, dt);
+
+            trail.Update(world, player.Bounds(), std::fabs(player.Velocity().x), fell, player.IsGrounded(),
+                         world.Sky().Time());
             FollowPlayer(camera, player, dt);
         }
 
         // Only on the frame the swing began. The strike box is live for the whole
         // window, so reading that instead lands nine blows per swing.
-        if (!packOpen && player.AttackStarted()) {
-            grove.Strike(player.AttackHitbox(), 1.0f, player.Centre(), world.Sky().Time());
+        if (!packOpen && !typing && player.AttackStarted()) {
+            // Where the blow lands. A swing off the mouse lands where the cursor is,
+            // because that is what the player aimed at and the cursor has already
+            // been told it is over something choppable; a swing off the key lands in
+            // front of the character, which is all a key can mean. Both are bounded
+            // by the same reach — the mouse one by the editor, which refuses to
+            // choose the axe out of range at all.
+            const bool aimed = editor.Left() == Editor::Hand::Chop;
+
+            const Rectangle swing = aimed ? Rectangle{editor.Aim().x - kAimedBlow, editor.Aim().y - kAimedBlow,
+                                                      kAimedBlow * 2.0f, kAimedBlow * 2.0f}
+                                          : player.AttackHitbox();
+
+            grove.Strike(swing, 1.0f, player.Centre(), world.Sky().Time());
 
             // And whatever grass the same swing went through. A tuft gives up
             // fibre where a tree gives up wood, into the same pile on the ground.
-            const Rectangle swing = player.AttackHitbox();
 
             const int mown = world.MowGrass(swing, world.Sky().Time());
 
@@ -2637,14 +2958,14 @@ int main(int argc, char **argv) {
         // only the blurred result is drawn once the frame is open.
         if (packOpen) {
             backdrop.Capture();
-            DrawScene(world, grove, inventory, player, editor, liquids, lights, camera, debug, !packOpen);
+            DrawScene(world, grove, inventory, player, trail, editor, liquids, lights, camera, debug, !packOpen);
             backdrop.Finish();
         }
 
         BeginDrawing();
 
         if (packOpen) backdrop.Compose(config::kPanelDim);
-        else DrawScene(world, grove, inventory, player, editor, liquids, lights, camera, debug, !packOpen);
+        else DrawScene(world, grove, inventory, player, trail, editor, liquids, lights, camera, debug, !packOpen);
 
         DrawHud(world, grove, player, editor, camera, debug, lantern, notice, noticeFor);
 
@@ -2652,6 +2973,10 @@ int main(int argc, char **argv) {
         // those same nine slots as its own bottom row.
         if (packOpen) inventory.Draw();
         else hotbar::Draw(inventory);
+
+        // Over everything, panel and bar included: an answer that arrived behind the
+        // inventory is an answer nobody read.
+        chat.Draw(dt);
 
         EndDrawing();
     }

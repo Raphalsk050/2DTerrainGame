@@ -1007,6 +1007,13 @@ public:
     // is crossing into.
     const char *MoodName() const { return now_.name; }
 
+    // The name of a row of the table, whatever the sky is doing now. What a caller
+    // naming a weather needs — asking for each in turn by forcing it would set the
+    // weather as a side effect of reading its name.
+    const char *MoodNamed(int index) const {
+        return settings_.moods[((index % kMoodCount) + kMoodCount) % kMoodCount].name;
+    }
+
     // What a place gets on average: daylight over one whole turn of the day, and
     // rain over the moods in the table weighted by how often each comes up.
     //

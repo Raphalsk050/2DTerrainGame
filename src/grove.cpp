@@ -1059,22 +1059,75 @@ void Grove::Forget(float now) {
     }
 }
 
+std::optional<Rectangle> Grove::StrikeRect(const flora::Plant &plant, float now) const {
+    const flora::SpeciesDef &def = flora::Def(plant.species);
+
+    const Standing standing = Read(plant, now);
+
+    // Nothing there at all.
+    if (standing.cleared) return std::nullopt;
+
+    // The stump left where a tree came down, which is the second half of the job
+    // and the reason the wood is not simply gone when the tree is. Taken before the
+    // guard below, because to that guard a stump is a felled tree and a felled tree
+    // is not something to swing at.
+    if (standing.stump) return StumpRect(plant, standing.stage);
+
+    // Going over. Nothing to swing at while it does.
+    if (standing.felling >= 0.0f) return std::nullopt;
+
+    // The size it actually is, rather than the size it will be.
+    //
+    // This read the mature row whatever stage the plant was at, so a sapling
+    // ankle-high on the ground carried an oak's hitbox: a swing anywhere in the
+    // fifty pixels of empty air above it connected, and connected with a trunk that
+    // was not there.
+    const std::size_t grown = flora::StageIndex(standing.stage);
+
+    const float height = def.height[grown] * plant.scale;
+    const float width  = def.canopyWidth[grown] * plant.scale;
+
+    // A sapling is the whole of itself, being too small to have a trunk apart from
+    // its leaves.
+    if (standing.stage == flora::Stage::Sapling) {
+        const float reach = std::max(width * 0.5f, kStrikeSlack);
+
+        return Rectangle{plant.base.x - reach, plant.base.y - height, reach * 2.0f, height};
+    }
+
+    // The trunk alone. Swinging at the crown of a tree twenty pixels over your head
+    // should not fell it.
+    const float half = std::max(width * def.shape.trunkWidth * 0.5f, 1.0f) + kStrikeSlack;
+
+    return Rectangle{plant.base.x - half, plant.base.y - height * def.shape.clearance, half * 2.0f,
+                     height * def.shape.clearance};
+}
+
+bool Grove::TimberAt(Rectangle probe, float now) const {
+    for (const flora::Plant &plant : plants_) {
+        const std::optional<Rectangle> box = StrikeRect(plant, now);
+
+        if (box.has_value() && CheckCollisionRecs(probe, *box)) return true;
+    }
+
+    return false;
+}
+
 void Grove::Strike(Rectangle hitbox, float damage, Vector2 from, float now) {
     for (const flora::Plant &plant : plants_) {
+        const std::optional<Rectangle> box = StrikeRect(plant, now);
+
+        // The one place the geometry of a swing lives. What may be hit and what a
+        // hit does are two questions, and the cursor has to ask the first without
+        // answering the second — a second copy of these rectangles would be a
+        // cursor that lights up on trees this cannot fell.
+        if (!box.has_value() || !CheckCollisionRecs(hitbox, *box)) continue;
+
         const flora::SpeciesDef &def = flora::Def(plant.species);
 
         const Standing standing = Read(plant, now);
 
-        // Nothing there at all.
-        if (standing.cleared) continue;
-
-        // The stump left where a tree came down, which is the second half of the
-        // job and the reason the wood is not simply gone when the tree is. Taken
-        // before the guard below, because to that guard a stump is a felled tree
-        // and a felled tree is not something to swing at.
         if (standing.stump) {
-            if (!CheckCollisionRecs(hitbox, StumpRect(plant, standing.stage))) continue;
-
             TreeState &state = Remember(plant, now);
 
             Blow(state, now);
@@ -1099,16 +1152,11 @@ void Grove::Strike(Rectangle hitbox, float damage, Vector2 from, float now) {
         // and a second blow on one would only start its fall again.
         if (standing.felling >= 0.0f) continue;
 
-        // The size it actually is, rather than the size it will be.
-        //
-        // This read the mature row whatever stage the plant was at, so a sapling
-        // ankle-high on the ground carried an oak's hitbox: a swing anywhere in
-        // the fifty pixels of empty air above it connected, and connected with a
-        // trunk that was not there.
+        // Only for where the sapling's seed is thrown from; the geometry of the
+        // blow itself was settled by StrikeRect above.
         const std::size_t grown = flora::StageIndex(standing.stage);
 
         const float height = def.height[grown] * plant.scale;
-        const float width  = def.canopyWidth[grown] * plant.scale;
 
         // A sapling is not a tree and does not come down like one.
         //
@@ -1118,12 +1166,6 @@ void Grove::Strike(Rectangle hitbox, float damage, Vector2 from, float now) {
         // on an animation of a twig going over and then paid out a mature tree's
         // worth of timber for it.
         if (standing.stage == flora::Stage::Sapling) {
-            const float reach = std::max(width * 0.5f, kStrikeSlack);
-
-            const Rectangle body = {plant.base.x - reach, plant.base.y - height, reach * 2.0f, height};
-
-            if (!CheckCollisionRecs(hitbox, body)) continue;
-
             TreeState &state = Remember(plant, now);
 
             // Straight to gone: nothing was left standing, so there is no stump to
@@ -1138,15 +1180,6 @@ void Grove::Strike(Rectangle hitbox, float damage, Vector2 from, float now) {
 
             return;
         }
-
-        // The trunk alone. Swinging at the crown of a tree twenty pixels over
-        // your head should not fell it.
-        const float half = std::max(width * def.shape.trunkWidth * 0.5f, 1.0f) + kStrikeSlack;
-
-        const Rectangle trunk = {plant.base.x - half, plant.base.y - height * def.shape.clearance, half * 2.0f,
-                                 height * def.shape.clearance};
-
-        if (!CheckCollisionRecs(hitbox, trunk)) continue;
 
         TreeState &state = Remember(plant, now);
 

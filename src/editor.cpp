@@ -2,6 +2,8 @@
 
 #include "hotbar.h"
 
+#include <iterator>
+
 #include <algorithm>
 #include <cmath>
 
@@ -11,6 +13,10 @@ namespace {
 // every material in the table, so the ring never reads as a preview of what is
 // about to be placed.
 constexpr Color kDigColor = {235, 84, 84, 255};
+
+// And over wood, where the left hand becomes an axe. Warm rather than red, so the
+// two read as different tools at a glance and not as two states of one.
+constexpr Color kChopColor = {242, 196, 106, 255};
 
 // And over ground that is out of reach. Grey and faint, because what it is
 // saying is that neither hand can act here — a coloured ring out there would be
@@ -81,6 +87,150 @@ const char *Editor::Lay(World &world, Inventory &inventory, Drops &drops, Vector
     return nullptr;
 }
 
+
+namespace {
+
+// ------------------------------------------------------------------ the icons
+//
+// The cursor says which of the two tools the click will be, and it says it by
+// drawing the tool. This is the house standard for any icon drawn into the world,
+// and it is written down here because the next one should match it:
+//
+//   * Outline only. Nothing is filled — a solid mark at the cursor hides the very
+//     thing it is aimed at, and the world behind has to stay readable through it.
+//   * One stroke weight for every icon, and it is held in *screen* pixels rather
+//     than world ones, so the mark is the same weight at every zoom. That is the
+//     one rule a world-space icon gets wrong by default.
+//   * Round caps and joins, done by dropping a disc at each joint. Mitred corners
+//     at this weight come out as spikes.
+//   * Authored as a handful of control points and smoothed, not as line segments.
+//     A dozen points through a curve is a shape somebody can retune; forty
+//     segments is a shape nobody will touch again.
+//   * Drawn in the colour the cursor already uses for that hand, never a colour of
+//     the icon's own — the mark and the ring have to agree about what they mean.
+//
+// The shapes themselves are authored upright in a square running -1 to 1, with Y
+// down as everywhere else on screen, and turned when they are drawn.
+
+// Stroke weight, in screen pixels. Taken from the axe, which is the finer of the
+// two drawings, and then given to both so they read as one set.
+constexpr float kIconStroke = 1.7f;
+
+// How large an icon stands at the cursor, in screen pixels, corner to corner.
+constexpr float kIconSize = 26.0f;
+
+// A quarter turn anticlockwise, near enough, so the axe hangs on the diagonal the
+// way a tool does in a hand rather than standing to attention.
+constexpr float kAxeTurn = -30.0f * 3.14159265f / 180.0f;
+
+// One point along a Catmull-Rom through four controls. It passes through its
+// controls, which is what makes a shape authored as points come out as the shape
+// that was authored.
+Vector2 Curved(Vector2 a, Vector2 b, Vector2 c, Vector2 d, float t) {
+    const float t2 = t * t;
+    const float t3 = t2 * t;
+
+    return {0.5f * (2.0f * b.x + (c.x - a.x) * t + (2.0f * a.x - 5.0f * b.x + 4.0f * c.x - d.x) * t2
+                    + (-a.x + 3.0f * b.x - 3.0f * c.x + d.x) * t3),
+            0.5f * (2.0f * b.y + (c.y - a.y) * t + (2.0f * a.y - 5.0f * b.y + 4.0f * c.y - d.y) * t2
+                    + (-a.y + 3.0f * b.y - 3.0f * c.y + d.y) * t3)};
+}
+
+// Draws one closed outline, smoothed, turned, and scaled to world units.
+//
+// `thick` arrives in world units — the caller divides the screen weight by the
+// zoom, once, rather than this having to know about the camera.
+void Outline(const Vector2 *points, int count, Vector2 at, float scale, float turn, float thick, Color color) {
+    if (count < 3) return;
+
+    const float sine   = std::sin(turn);
+    const float cosine = std::cos(turn);
+
+    const auto place = [&](Vector2 p) {
+        return Vector2{at.x + (p.x * cosine - p.y * sine) * scale, at.y + (p.x * sine + p.y * cosine) * scale};
+    };
+
+    // Samples per span. Four is enough at this size: a span is a few pixels on
+    // screen and the eye cannot find the joins.
+    constexpr int kSteps = 4;
+
+    Vector2 was = place(points[0]);
+
+    for (int i = 0; i < count; i++) {
+        const Vector2 a = points[(i - 1 + count) % count];
+        const Vector2 b = points[i];
+        const Vector2 c = points[(i + 1) % count];
+        const Vector2 d = points[(i + 2) % count];
+
+        for (int step = 1; step <= kSteps; step++) {
+            const Vector2 now = place(Curved(a, b, c, d, static_cast<float>(step) / static_cast<float>(kSteps)));
+
+            DrawLineEx(was, now, thick, color);
+
+            // The join, which is also the cap. Without it every bend in the outline
+            // shows daylight through its outside corner.
+            DrawCircleV(now, thick * 0.5f, color);
+
+            was = now;
+        }
+    }
+}
+
+// The axe: a flared head with a squared poll, and a haft falling from under it that
+// tapers and flicks out at the butt. Two outlines, because a haft that ran into the
+// head as one silhouette loses the step between them at this size.
+constexpr Vector2 kAxeHead[] = {
+    {-0.60f, -0.86f}, {-0.16f, -0.92f}, {0.30f, -0.90f}, {0.52f, -0.84f},
+    {0.56f, -0.62f},  {0.54f, -0.44f},  {0.44f, -0.38f}, {0.10f, -0.36f},
+    {-0.24f, -0.42f}, {-0.52f, -0.54f}, {-0.70f, -0.70f},
+};
+
+constexpr Vector2 kAxeHaft[] = {
+    {0.12f, -0.34f}, {0.34f, -0.34f}, {0.36f, 0.14f}, {0.32f, 0.62f},
+    {0.36f, 0.86f},  {0.20f, 0.94f},  {0.10f, 0.72f}, {0.14f, 0.24f},
+};
+
+// The shovel: a spade blade, a shaft on the diagonal, and a D-grip at the top with
+// its hole left open. Four outlines — the grip's hole is the reason this cannot be
+// one, and having it is most of what says shovel rather than paddle.
+constexpr Vector2 kSpadeBlade[] = {
+    {-0.86f, 0.14f}, {-0.96f, 0.44f}, {-0.86f, 0.76f}, {-0.60f, 0.92f},
+    {-0.34f, 0.78f}, {-0.24f, 0.48f}, {-0.34f, 0.20f}, {-0.60f, 0.08f},
+};
+
+constexpr Vector2 kSpadeShaft[] = {
+    {-0.50f, 0.18f}, {0.30f, -0.62f}, {0.44f, -0.48f}, {-0.36f, 0.32f},
+};
+
+constexpr Vector2 kSpadeGrip[] = {
+    {0.26f, -0.66f}, {0.44f, -0.92f}, {0.68f, -0.94f},
+    {0.80f, -0.74f}, {0.70f, -0.52f}, {0.44f, -0.50f},
+};
+
+constexpr Vector2 kSpadeHole[] = {
+    {0.44f, -0.70f},
+    {0.54f, -0.82f},
+    {0.66f, -0.76f},
+    {0.58f, -0.62f},
+};
+
+// The two tools, each as the outlines it is made of, so a caller draws one by name
+// rather than by remembering which pieces belong to which.
+void DrawAxe(Vector2 at, float scale, float thick, Color color) {
+    Outline(kAxeHead, static_cast<int>(std::size(kAxeHead)), at, scale, kAxeTurn, thick, color);
+    Outline(kAxeHaft, static_cast<int>(std::size(kAxeHaft)), at, scale, kAxeTurn, thick, color);
+}
+
+void DrawSpade(Vector2 at, float scale, float thick, Color color) {
+    Outline(kSpadeBlade, static_cast<int>(std::size(kSpadeBlade)), at, scale, 0.0f, thick, color);
+    Outline(kSpadeShaft, static_cast<int>(std::size(kSpadeShaft)), at, scale, 0.0f, thick, color);
+    Outline(kSpadeGrip, static_cast<int>(std::size(kSpadeGrip)), at, scale, 0.0f, thick, color);
+    Outline(kSpadeHole, static_cast<int>(std::size(kSpadeHole)), at, scale, 0.0f, thick, color);
+}
+
+} // namespace
+
+
 const char *Editor::Update(World &world, Inventory &inventory, Grove &grove, const Camera2D &camera, Rectangle body,
                            float now) {
     // Where the character is, for the reach and for which side a spilled block
@@ -101,6 +251,11 @@ const char *Editor::Update(World &world, Inventory &inventory, Grove &grove, con
     if (smaller) radius_ = std::max(radius_ - kRadiusStep, kMinRadius);
     if (larger) radius_ = std::min(radius_ + kRadiusStep, kMaxRadius);
 
+    // The latch comes off the moment the button does, wherever this frame returns
+    // from. A mode that outlived its press would make the *next* click inherit the
+    // last one's tool.
+    if (IsMouseButtonUp(MOUSE_BUTTON_LEFT)) left_ = Hand::Idle;
+
     const Vector2 mouse = GetMousePosition();
 
     // The bar sits over the world it edits, so a click that lands on it belongs
@@ -109,6 +264,7 @@ const char *Editor::Update(World &world, Inventory &inventory, Grove &grove, con
     if (hotbar::Contains(mouse)) {
         under_.reset();
         reachable_ = false;
+        timber_    = false;
         return nullptr;
     }
 
@@ -145,9 +301,27 @@ const char *Editor::Update(World &world, Inventory &inventory, Grove &grove, con
         }
     }
 
+    // Which tool this press is, decided the once and held — see Editor::Hand.
+    //
+    // Out of reach counts as ground rather than as nothing, so a click into the
+    // distance is a dig that does not reach rather than a hand with no tool: the
+    // player who then drags the cursor back into range is digging, which is what
+    // they were plainly asking for.
+    // Whether the wood is what the cursor is over, asked every frame rather than
+    // only on the press — the cursor has to say which tool the click will be
+    // *before* it is clicked, or an automatic mode is a mode the player cannot see.
+    const Rectangle probe = {target.x - kAimSlack, target.y - kAimSlack, kAimSlack * 2.0f, kAimSlack * 2.0f};
+
+    timber_ = reachable_ && grove.TimberAt(probe, now);
+
+    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) left_ = timber_ ? Hand::Chop : Hand::Dig;
+
     if (!reachable_) return nullptr;
 
-    const bool digging = IsMouseButtonDown(MOUSE_BUTTON_LEFT);
+    // The left hand digs only where this press was a dig. Where it was a chop the
+    // swing belongs to the caller, and this must keep its hands off the ground —
+    // otherwise a player felling a tree quietly excavates the hillside behind it.
+    const bool digging = left_ == Hand::Dig;
     const bool placing = IsMouseButtonDown(MOUSE_BUTTON_RIGHT);
 
     if (!digging && !placing) return nullptr;
@@ -256,6 +430,24 @@ void Editor::DrawCursor(const Inventory &inventory, const Grove &grove, flora::S
     // badge somewhere else saying which is which, since the eye is already here.
     const Stack &held = inventory.Held();
 
+    // Over wood, the left hand is an axe and the ring would be a lie: the brush
+    // radius says an area will come away, and what will actually happen is one blow
+    // to one trunk. Drawn as a pair of notches instead — a mark that is plainly not
+    // the digging ring, so the player can see the tool change under the cursor
+    // before committing to it.
+    // Both figures are in screen pixels and both are divided by the zoom, so the
+    // mark keeps its size and its weight however far the view is pushed in. A world
+    // -sized icon doubles with the zoom and a world-sized stroke doubles with it
+    // again, which is how a cursor ends up a blot.
+    const float zoom  = std::max(camera.zoom, 0.01f);
+    const float thick = kIconStroke / zoom;
+    const float scale = kIconSize * 0.5f / zoom;
+
+    if (timber_ && held.holds != Holds::Material) {
+        DrawAxe(target, scale, thick, kChopColor);
+        return;
+    }
+
     Color color = kFarColor;
 
     if (Reachable()) {
@@ -265,8 +457,8 @@ void Editor::DrawCursor(const Inventory &inventory, const Grove &grove, flora::S
     DrawCircleLinesV(target, radius_, color);
     DrawCircleLinesV(target, radius_ - 1.0f, Fade(color, 0.5f));
 
-    // A cross rather than a filled disc, so the brush never hides the contour
-    // it is aimed at.
-    DrawLineV({target.x - 4.0f, target.y}, {target.x + 4.0f, target.y}, color);
-    DrawLineV({target.x, target.y - 4.0f}, {target.x, target.y + 4.0f}, color);
+    // The ring says how much comes away and the spade says what the hand is; the
+    // two are different questions and the ring cannot answer the second, which is
+    // why the mark in the middle is a tool and no longer a cross.
+    DrawSpade(target, scale, thick, color);
 }

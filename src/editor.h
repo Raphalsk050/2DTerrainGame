@@ -29,6 +29,19 @@
 // dug up before it can be built.
 class Editor {
 public:
+    // What the left button is doing this press.
+    //
+    // One button for both jobs, and the mode is worked out from what the cursor is
+    // over rather than chosen by the player: pointing at a trunk chops it, pointing
+    // at ground digs it. That is the arrangement every game with one hand and two
+    // jobs uses, and it is worth saying why it needs a *latch* rather than a test
+    // per frame — a stroke wanders. Digging out from under a tree, the cursor
+    // crosses the trunk halfway through and the hand would turn into an axe in the
+    // middle of the hole; a player laying into a trunk drifts off it as the trunk
+    // narrows and would start cutting the hillside behind. So the question is asked
+    // once, on the press, and the answer is held until the button comes up.
+    enum class Hand { Idle, Dig, Chop };
+
     // Reads the mouse and applies whichever hand was used. What it digs up goes
     // into the inventory, and what will not fit goes on the ground.
     //
@@ -68,6 +81,13 @@ public:
     // Whether that point is close enough to act on.
     bool Reachable() const { return reachable_; }
 
+    // Which tool the left button became when it went down, and still is.
+    //
+    // The caller swings the character's arm on this and lands the blow itself,
+    // because what an axe hits is the wood's business and this module knows only
+    // the ground. It reports the decision; it does not act on it.
+    Hand Left() const { return left_; }
+
     // Where a thing put down now would come to rest, or nothing where there is no
     // ground under the cursor within reach of it.
     //
@@ -104,6 +124,16 @@ private:
     // measure one.
     static constexpr float kReach = 6.0f * kBlockSide;
 
+    // Half-side of the square the cursor asks the wood about, in world pixels.
+    //
+    // A point would be honest and unusable: a trunk is a few pixels wide on screen
+    // and a player aiming at one with a point-sized cursor would miss it more often
+    // than not. This is about a block, which is the slack a hand deserves — and it
+    // is only used to *choose* the tool, so being generous costs a click aimed at
+    // the ground beside a trunk becoming a chop, and never a mis-swing: what the
+    // blow actually hits is settled by Grove::Strike against the same rectangles.
+    static constexpr float kAimSlack = 10.0f;
+
     // Brush sizes in pixels. Bounded at the small end by the lattice, since a
     // brush narrower than the spacing between vertices covers none of them and
     // silently does nothing.
@@ -132,6 +162,12 @@ private:
     // paid nothing at all, however long they dig; keeping it here is what makes
     // the exchange lossless in both directions.
     std::array<float, kElementCount> owed_{};
+
+    Hand left_ = Hand::Idle;
+
+    // Whether the cursor is over something the axe would bite. Held from the last
+    // update so the cursor and the click agree about which tool this is.
+    bool timber_ = false;
 
     std::optional<Element> under_;
     Vector2 aim_{};

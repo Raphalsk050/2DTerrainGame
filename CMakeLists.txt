@@ -65,6 +65,8 @@ add_executable(${PROJECT_NAME}
     src/picture.cpp
     src/liquid_layer.cpp
     src/player.cpp
+    src/scuff.cpp
+    src/console.cpp
     src/water.cpp
     src/weather.cpp
     src/soil.cpp
