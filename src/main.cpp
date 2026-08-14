@@ -149,8 +149,95 @@ int Named(const std::string &word, const char *const *names, int count) {
     return found;
 }
 
+// One row per command: how it is typed, and what it is for.
+//
+// A table rather than a run of prints, because the help is asked for in two
+// different ways — the whole list, and one command on its own — and two lists that
+// have to agree is exactly the arrangement that ends with a command nobody can
+// discover because somebody added it to one of them.
+struct Command {
+    const char *verb;
+    const char *shape;
+    const char *what;
+};
+
+constexpr Command kCommands[] = {
+    {"help", "/help [command]", "what there is, or what one command takes"},
+    {"weather", "/weather [name|auto]", "hold the sky at one weather"},
+    {"season", "/season <name>", "hold the year at one season"},
+    {"time", "/time", "run the clock on to the next quarter"},
+    {"give", "/give <item> [count]", "put something in the pack"},
+    {"tp", "/tp <x> <y>", "move the character"},
+    {"wind", "/wind", "what the air is doing here"},
+    {"clear", "/clear", "empty this log"},
+};
+
+// The words a command will take, gathered from the same tables the parser matches
+// against.
+//
+// That is the whole point of building the list rather than writing it: a mood added
+// to the sky's table, or an item added to the item table, turns up in the help and
+// in the refusal message without either being touched. A help text kept by hand
+// goes stale on the first change and is then worse than none, because it is
+// believed.
+std::vector<std::string> Choices(const std::string &verb, const World &world) {
+    std::vector<std::string> out;
+
+    if (verb == "weather") {
+        for (int i = 0; i < weather::kMoodCount; i++) out.push_back(Lower(world.Sky().MoodNamed(i)));
+
+        // Not a row of the table, but a thing the command takes: hand the sky back
+        // to its own timer.
+        out.emplace_back("auto");
+    } else if (verb == "season") {
+        for (const char *name : kSeasonNames) out.emplace_back(name);
+    } else if (verb == "give") {
+        // Both tables, items first and then the materials, and the join is the
+        // command's whole index: anything below kItemCount is a row of the item
+        // table and anything above it is a row of the element table. A hand can hold
+        // either — see Stack::holds — so a give that reached only one of them could
+        // not fill a slot the player can plainly carry soil in.
+        for (std::size_t i = 0; i < kItemCount; i++) out.push_back(Lower(Def(static_cast<Item>(i)).name));
+
+        for (std::size_t i = 0; i < kElementCount; i++) out.push_back(Lower(StyleOf(static_cast<Element>(i)).name));
+    }
+
+    return out;
+}
+
+std::string Joined(const std::vector<std::string> &words) {
+    std::string out;
+
+    for (std::size_t i = 0; i < words.size(); i++) {
+        if (i > 0) out += (i + 1 == words.size()) ? " or " : ", ";
+
+        out += words[i];
+    }
+
+    return out;
+}
+
+// What one command takes, said the same way whether it was asked for or arrived at
+// by getting the command wrong. A player who mistypes an argument has just proved
+// they wanted this list.
+void SayUsage(const std::string &verb, const World &world, console::Console &chat) {
+    for (const Command &command : kCommands) {
+        if (verb != command.verb) continue;
+
+        chat.Say(std::string{command.shape} + " — " + command.what, console::Tone::Note);
+
+        const std::vector<std::string> takes = Choices(verb, world);
+
+        if (!takes.empty()) chat.Say("  takes: " + Joined(takes), console::Tone::Note);
+
+        return;
+    }
+
+    chat.Say("no command called /" + verb + " — /help lists them", console::Tone::Failed);
+}
+
 void RunCommand(const std::string &line, World &world, Grove &grove, Inventory &inventory, Player &player,
-                console::Console &chat) {
+                Camera2D &camera, console::Console &chat) {
     // Anything not starting with a slash is talk rather than an instruction. There
     // is nobody to talk to yet, but the distinction is the one every chat box makes
     // and building it in now costs a branch.
@@ -170,14 +257,21 @@ void RunCommand(const std::string &line, World &world, Grove &grove, Inventory &
 
     const auto arg = [&](std::size_t n) { return (words.size() > n) ? Lower(words[n]) : std::string{}; };
 
+    // Whatever this command takes, for the refusals below. Asked once here so that
+    // no branch can answer with a list that disagrees with the one /help gives.
+    const std::vector<std::string> takes = Choices(verb, world);
+
     if (verb == "help") {
-        chat.Say("/weather <clear|fair|blustery|overcast|storm|auto>", console::Tone::Note);
-        chat.Say("/season <spring|summer|autumn|winter>", console::Tone::Note);
-        chat.Say("/time — run the clock on to the next quarter", console::Tone::Note);
-        chat.Say("/give <item> [count]", console::Tone::Note);
-        chat.Say("/tp <x> <y> — put the character somewhere", console::Tone::Note);
-        chat.Say("/wind — what the air is doing here", console::Tone::Note);
-        chat.Say("/clear — empty this log", console::Tone::Note);
+        if (!arg(1).empty()) {
+            SayUsage(arg(1), world, chat);
+            return;
+        }
+
+        for (const Command &command : kCommands) {
+            chat.Say(std::string{command.shape} + " — " + command.what, console::Tone::Note);
+        }
+
+        chat.Say("/help <command> for what one of them takes", console::Tone::Note);
         return;
     }
 
@@ -198,29 +292,26 @@ void RunCommand(const std::string &line, World &world, Grove &grove, Inventory &
             return;
         }
 
-        // Read off the sky's own table rather than a list written here, so a mood
-        // added to the table is a mood this can set without being touched.
-        std::vector<std::string> moods;
-
-        for (int i = 0; i < weather::kMoodCount; i++) moods.push_back(Lower(world.Sky().MoodNamed(i)));
-
+        // The moods alone, which is `takes` without the `auto` dealt with above.
         std::vector<const char *> raw;
-        for (const std::string &mood : moods) raw.push_back(mood.c_str());
+
+        for (int i = 0; i < weather::kMoodCount; i++) raw.push_back(takes[static_cast<std::size_t>(i)].c_str());
 
         const int found = Named(arg(1), raw.data(), static_cast<int>(raw.size()));
 
         if (found == -2) {
-            chat.Say(arg(1) + " could be more than one weather", console::Tone::Failed);
+            chat.Say(arg(1) + " could be more than one weather — " + Joined(takes), console::Tone::Failed);
             return;
         }
 
         if (found < 0) {
             chat.Say("no weather called " + arg(1), console::Tone::Failed);
+            SayUsage(verb, world, chat);
             return;
         }
 
         world.ForceWeather(found);
-        chat.Say("weather held at " + moods[static_cast<std::size_t>(found)], console::Tone::Done);
+        chat.Say("weather held at " + takes[static_cast<std::size_t>(found)], console::Tone::Done);
         return;
     }
 
@@ -228,7 +319,8 @@ void RunCommand(const std::string &line, World &world, Grove &grove, Inventory &
         const int found = Named(arg(1), kSeasonNames, 4);
 
         if (found < 0) {
-            chat.Say("seasons are spring, summer, autumn and winter", console::Tone::Failed);
+            chat.Say(arg(1).empty() ? "which season?" : "no season called " + arg(1), console::Tone::Failed);
+            SayUsage(verb, world, chat);
             return;
         }
 
@@ -246,16 +338,15 @@ void RunCommand(const std::string &line, World &world, Grove &grove, Inventory &
     if (verb == "wind") {
         const Vector2 at = player.Centre();
 
-        chat.Say(TextFormat("wind %+.0f px/s here, %.0f mean, push %+.2f of a gale of %.0f",
-                            world.Sky().WindAt(at.x), world.Sky().Now().wind, world.Sky().PushAt(at.x),
-                            world.Sky().Gale()),
+        chat.Say(TextFormat("wind %+.0f px/s here, %.0f mean, push %+.2f of a gale of %.0f", world.Sky().WindAt(at.x),
+                            world.Sky().Now().wind, world.Sky().PushAt(at.x), world.Sky().Gale()),
                  console::Tone::Note);
         return;
     }
 
     if (verb == "tp") {
         if (words.size() < 3) {
-            chat.Say("/tp wants an x and a y", console::Tone::Failed);
+            SayUsage(verb, world, chat);
             return;
         }
 
@@ -263,24 +354,29 @@ void RunCommand(const std::string &line, World &world, Grove &grove, Inventory &
                             static_cast<float>(std::atof(words[2].c_str()))};
 
         player.PlaceAt(to);
+
+        // The camera is put there too, rather than being left to catch up.
+        //
+        // FollowPlayer is an exponential approach, which is right for walking and
+        // wrong for arriving: left to itself it flies the whole distance, so a
+        // teleport across the world reads as a very fast journey rather than as not
+        // having made one. The body was always instant; this is the half that was
+        // not.
+        camera.target = player.Centre();
+
         chat.Say(TextFormat("moved to %.0f, %.0f", to.x, to.y), console::Tone::Done);
         return;
     }
 
     if (verb == "give") {
         if (arg(1).empty()) {
-            chat.Say("/give wants something to give", console::Tone::Failed);
+            SayUsage(verb, world, chat);
             return;
         }
 
-        std::vector<std::string> names;
-
-        for (std::size_t i = 0; i < kItemCount; i++) {
-            names.push_back(Lower(Def(static_cast<Item>(i)).name));
-        }
-
-        // Spaces in a name are why this is matched against the joined tail rather
-        // than one word: "oak sapling" is two words and one item.
+        // The count is the last word where it is a number, and everything between
+        // the verb and it is the name — which is what lets an item whose name is two
+        // words be asked for by name.
         std::string wanted = arg(1);
         int count          = 1;
 
@@ -299,36 +395,45 @@ void RunCommand(const std::string &line, World &world, Grove &grove, Inventory &
         }
 
         std::vector<const char *> raw;
-        for (const std::string &name : names) raw.push_back(name.c_str());
+
+        for (const std::string &name : takes) raw.push_back(name.c_str());
 
         const int found = Named(wanted, raw.data(), static_cast<int>(raw.size()));
 
         if (found == -2) {
-            chat.Say(wanted + " could be more than one thing", console::Tone::Failed);
+            chat.Say(wanted + " could be more than one thing — " + Joined(takes), console::Tone::Failed);
             return;
         }
 
         if (found < 0) {
             chat.Say("nothing here is called " + wanted, console::Tone::Failed);
+            SayUsage(verb, world, chat);
             return;
         }
 
-        const Item item = static_cast<Item>(found);
+        // Which of the two tables the match landed in — see Choices.
+        const bool material = found >= static_cast<int>(kItemCount);
 
-        const int over = inventory.Add({.holds = Holds::Item, .what = static_cast<std::uint8_t>(found), .count = count});
+        const int row = material ? found - static_cast<int>(kItemCount) : found;
+
+        const int over = inventory.Add({.holds = material ? Holds::Material : Holds::Item,
+                                        .what  = static_cast<std::uint8_t>(row),
+                                        .count = count});
 
         if (over >= count) {
             chat.Say("no room for any of that", console::Tone::Failed);
             return;
         }
 
-        chat.Say(TextFormat("gave %d %s", count - over, Def(item).name), console::Tone::Done);
+        const char *name = material ? StyleOf(static_cast<Element>(row)).name : Def(static_cast<Item>(row)).name;
+
+        chat.Say(TextFormat("gave %d %s", count - over, name), console::Tone::Done);
         return;
     }
 
     (void)grove;
 
-    chat.Say("no command called /" + verb + " — /help lists them", console::Tone::Failed);
+    SayUsage(verb, world, chat);
 }
 
 
@@ -2720,7 +2825,7 @@ int main(int argc, char **argv) {
         if (typing) {
             const std::string sent = chat.Read();
 
-            if (!sent.empty()) RunCommand(sent, world, grove, inventory, player, chat);
+            if (!sent.empty()) RunCommand(sent, world, grove, inventory, player, camera, chat);
         }
 
         // The frame can change size between any two frames, so the two things that

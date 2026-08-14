@@ -37,9 +37,41 @@ constexpr float kHardFall = 460.0f;
 
 // How fast a speck leaves the foot, in world pixels per second, and how hard
 // gravity pulls it back. Light: this is dust, not gravel.
+//
+// The upward figure is set against the grass rather than by eye, and that is the
+// only way to set it: a blade stands kBladeTall texels high — some sixteen world
+// pixels — and dust that peaks below that is dust nobody ever sees, because it
+// spends its whole life inside the sod. A throw of `u` against a settle of `g`
+// peaks at `u² / 2g`, so clearing the grass with room to spare is what fixes this
+// number. It was a third of what it is and the puffs were vanishing into the field.
 constexpr float kThrowBack = 54.0f;
-constexpr float kThrowUp   = 34.0f;
+constexpr float kThrowUp   = 92.0f;
 constexpr float kSettle    = 150.0f;
+
+// The burst a landing throws, out to both sides instead of behind.
+//
+// Several times the stride's throw, and it has to be. A landing is one event that
+// happens once and is over, where a run lays a puff every stride and is read as the
+// sum of them — so the landing has only its own moment to be seen in, and at a
+// walking puff's size it simply is not. What reads is a pair of lobes that leave
+// the feet and travel: this carries a speck the better part of a body's width.
+constexpr float kBurstOut = 165.0f;
+
+// How much of the upward throw a landing keeps. Under one, because what says
+// *landing* is dust running out along the ground where what says *running* is dust
+// lifting behind — but not far under, or the lobes never clear the grass.
+constexpr float kBurstUp = 1.05f;
+
+// Specks in a landing burst at full force. Well over a stride's — two lobes have to
+// read as two, and half a handful each reads as a scatter.
+constexpr int kBurstSpecks = 24;
+
+// How much longer a landing hangs than a footfall.
+//
+// A stride's puff has to be gone before the next foot lands or a run leaves a
+// contrail; a landing has nothing following it, so it can take its time and be
+// watched. This is most of what makes the two read as different events.
+constexpr float kBurstLinger = 1.7f;
 
 // How far a puff spreads along the ground over its life, as a share of the throw.
 // Dust billows outward as it slows, which is the one thing that separates it from a
@@ -136,7 +168,10 @@ void Trail::Update(const World &world, Rectangle body, float speed, float fall, 
     // bottom of a fall.
     float force = 0.0f;
 
-    if (landed) force = std::clamp(fall / kHardFall, 0.30f, 1.0f);
+    // Floored well up, unlike a stride's. Every landing is an event worth drawing —
+    // a hop from a low ledge that puffs like a footstep reads as nothing having
+    // happened, and the player did plainly do something.
+    if (landed) force = std::clamp(fall / kHardFall, 0.62f, 1.0f);
 
     if (strode_ >= kStride && speed > kIdleSpeed) {
         strode_ = 0.0f;
@@ -157,7 +192,8 @@ void Trail::Update(const World &world, Rectangle body, float speed, float fall, 
                                                .on    = *under,
                                                .when  = now,
                                                .force = force * Loose(*under),
-                                               .away  = away};
+                                               .away  = away,
+                                               .ring  = landed};
 
     next_ = (next_ + 1) % kSteps;
 }
@@ -170,10 +206,12 @@ void Trail::Draw(float now) const {
 
         if (step.when < 0.0f) continue;
 
-        const float age = now - step.when;
-        if (age < 0.0f || age >= kLife) continue;
+        const float life = step.ring ? kLife * kBurstLinger : kLife;
 
-        const float flown = age / kLife;
+        const float age = now - step.when;
+        if (age < 0.0f || age >= life) continue;
+
+        const float flown = age / life;
 
         // Faded out over the whole life rather than the last of it. Dust thins as it
         // spreads, so there is no moment at which a puff should still be at full
@@ -181,21 +219,49 @@ void Trail::Draw(float now) const {
         // end so that it does not blink out.
         const float fade = (1.0f - flown) * (1.0f - flown);
 
-        const int specks = kLeastSpecks
-                           + static_cast<int>(step.force * static_cast<float>(kMostSpecks - kLeastSpecks) + 0.5f);
+        const int most = step.ring ? kBurstSpecks : kMostSpecks;
+
+        const int specks =
+            kLeastSpecks + static_cast<int>(step.force * static_cast<float>(most - kLeastSpecks) + 0.5f);
 
         for (int i = 0; i < specks; i++) {
             const int salt = s * 977 + i * 31;
 
-            // Thrown backwards along the travel and up, with the spread widening as
-            // it goes. Both ends of the sideways term matter: near zero the puff is
-            // a column of dust, and past one it is a fan of separate specks.
-            const float back = kThrowBack * (0.25f + 0.75f * Roll(salt, 3)) * step.force;
-            const float up   = kThrowUp * (0.30f + 0.70f * Roll(salt, 7)) * step.force;
+            float sideways = 0.0f;
+            float up       = 0.0f;
+
+            if (step.ring) {
+                // Two lobes, one ahead and one behind, dealt out by index rather
+                // than by a roll — a coin flip per speck leaves one side of a small
+                // burst empty about as often as not, and a landing that throws dust
+                // one way reads as a stumble.
+                const float side = (i % 2 == 0) ? 1.0f : -1.0f;
+
+                // Spread across the lobe rather than all at one speed, so it opens
+                // into a fan instead of leaving as a wall.
+                sideways = side * kBurstOut * (0.40f + 0.60f * Roll(salt, 3)) * step.force;
+
+                // Lower than a stride's, and deliberately: what says *landing* is
+                // dust running out along the ground to either side, where what says
+                // *running* is dust lifting behind. Still enough to clear the grass,
+                // which is the floor under every figure here.
+                up = kThrowUp * kBurstUp * (0.55f + 0.45f * Roll(salt, 7)) * step.force;
+            } else {
+                // Thrown backwards along the travel and up. Both ends of the
+                // sideways term matter: near zero the puff is a column of dust, and
+                // past one it is a fan of separate specks.
+                sideways = -step.away * kThrowBack * (0.25f + 0.75f * Roll(salt, 3)) * step.force;
+
+                // Floored at better than half, not near zero. A speck thrown at a
+                // third of the figure peaks two pixels up — inside the sod, drawn
+                // and never seen — so the low end of this range decides how much of
+                // every puff exists at all.
+                up = kThrowUp * (0.55f + 0.45f * Roll(salt, 7)) * step.force;
+            }
 
             const float spread = (Roll(salt, 11) - 0.5f) * 2.0f * kBillow * kThrowBack * flown;
 
-            const float x = step.at.x - step.away * back * age + spread;
+            const float x = step.at.x + sideways * age + spread;
 
             // Up, and then settling. Never below the ground it came off, so dust
             // lies on the surface at the end of its life instead of sinking through

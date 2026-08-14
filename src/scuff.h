@@ -50,6 +50,15 @@ struct Step {
     // Which way the foot was travelling. Dust is thrown *behind* a runner, and that
     // is most of what makes it read as speed rather than as a puff of smoke.
     float away = 1.0f;
+
+    // Whether this was a landing rather than a stride.
+    //
+    // A landing throws its dust out to *both* sides — ahead and behind — instead of
+    // trailing it backwards, because what happened is a body arriving straight down
+    // and driving the air out along the ground. A running step and a landing look
+    // nothing alike, and the difference is almost entirely this: one has a direction
+    // and the other has two.
+    bool ring = false;
 };
 
 // The dust under one pair of feet.
