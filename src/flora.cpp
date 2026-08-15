@@ -361,11 +361,26 @@ bool Grow(Layer layer, std::int64_t cell, const Settings &settings, const terrai
     out.species = static_cast<Species>(chosen);
     out.scale   = scale;
 
-    // Set half a lattice step into the ground. The surface is the first solid
-    // vertex, but what is drawn is the contour between that vertex and the empty
-    // one above it, so a trunk based exactly on the vertex stands a few pixels
-    // clear of the ground it is supposed to be growing out of.
-    out.base = {x, surface + ground.spacing * 0.5f};
+    // Exactly on the drawn surface, and *not* a half step under it.
+    //
+    // It used to be sunk by half a lattice step, and the reasoning was sound at
+    // the time: the surface was the first solid vertex, what is drawn is the
+    // square between that vertex and the empty one above it, so a trunk based on
+    // the vertex stood a few pixels clear of the ground it grew out of. Sinking it
+    // was the fix available then.
+    //
+    // It is not the fix now. `Ground::top` is filled with marching_squares::
+    // DrawnTop — the world Y of the top edge of the topmost square the ground is
+    // actually drawn as — so the gap that half step was closing is already closed,
+    // by measurement rather than by allowance. What was left was the allowance,
+    // applied on top: three pixels of a five pixel texel, which is a trunk visibly
+    // buried in the soil and is the shape the fault arrived in.
+    //
+    // Two corrections for one error is the usual way this goes, and the tell is
+    // that the second one is a constant. A trunk sits on the ground because the
+    // number underneath it says where the ground is, not because a fudge happens
+    // to be the right size.
+    out.base = {x, surface};
 
     return true;
 }

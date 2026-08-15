@@ -326,6 +326,22 @@ public:
     // pointing at open air falls until it lands on something.
     bool FootingUnder(Vector2 world, float reach, float &outTop) const;
 
+    // World Y of the first solid met falling down a column, or false where the
+    // column holds nothing at all within reach.
+    //
+    // Not SurfaceProfile, and the difference matters here. That one only ever
+    // raises the surface — a column dug out below the skyline still answers with
+    // the skyline, deliberately, because it is also asked about columns whose
+    // chunks are not resident and the noise is the only thing that can answer
+    // those. Grass has to follow the hole the player dug, so it pays for the walk.
+    //
+    // Public because the collision overlay reads it. That overlay's whole subject
+    // is the gap between where the ground is drawn and where a body stops, and it
+    // has to ask through the same walk the world uses, or it would be comparing
+    // its own arithmetic against the world's rather than the world's two answers
+    // against each other.
+    bool SurfaceOf(float worldX, float &outTop) const;
+
     // Total liquid held by the vertices inside a region. Reported so that
     // volume can be checked from outside the simulation.
     float TotalWater(Rectangle region) const;
@@ -679,16 +695,6 @@ private:
     // begins to fail in the rock underneath — a depth the generator decides, and
     // so one the light has to be told rather than one it could choose.
     float CoverDepth(float worldX, float surfaceY) const;
-
-    // World Y of the first solid met falling down a column, or false where the
-    // column holds nothing at all within reach.
-    //
-    // Not SurfaceProfile, and the difference matters here. That one only ever
-    // raises the surface — a column dug out below the skyline still answers with
-    // the skyline, deliberately, because it is also asked about columns whose
-    // chunks are not resident and the noise is the only thing that can answer
-    // those. Grass has to follow the hole the player dug, so it pays for the walk.
-    bool SurfaceOf(float worldX, float &outTop) const;
 
     // The whole ground at a world position, as the distance past its own
     // threshold: positive inside anything a body cannot walk through, negative in

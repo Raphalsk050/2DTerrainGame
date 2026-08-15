@@ -71,6 +71,17 @@ public:
     // being old would be saying something about a timer that no longer exists.
     void Draw() const;
 
+    // Every live pickup as the rest of the game sees it: the square it is drawn
+    // as, the distance at which it starts coming to the player, and the distance
+    // at which it is taken.
+    //
+    // The two circles are the point. A pickup is one position with two radii
+    // around it and no box at all, so what it collides with is nothing and what it
+    // *reacts* to is a pair of numbers that are invisible in play — the only
+    // symptom of either being wrong is an item that will not come to hand, and no
+    // amount of looking at the item shows why.
+    void DrawCollision(Vector2 player) const;
+
     void Clear();
 
     int Live() const;

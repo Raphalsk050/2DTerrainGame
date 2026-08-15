@@ -393,6 +393,33 @@ void Drops::Draw() const {
     }
 }
 
+void Drops::DrawCollision(Vector2 player) const {
+    const float pixel = config::kFloraPixel;
+    const float side  = kPictureSide * pixel;
+
+    for (const Pickup &pickup : pool_) {
+        if (!pickup.live) continue;
+
+        // The square as drawn, taken through the same snap Draw uses. A box drawn
+        // from the raw position would sit a texel off the picture it is about and
+        // the overlay would be reporting its own rounding.
+        const Vector2 corner = {Snap(pickup.at.x - side * 0.5f), Snap(pickup.at.y - side * 0.5f)};
+
+        DrawRectangleLinesEx({corner.x, corner.y, side, side}, 1.0f,
+                             Fade(pickup.settled ? LIME : YELLOW, 0.8f));
+
+        // Where it actually is, which is not the middle of that square once the
+        // snap has moved it.
+        DrawCircleV(pickup.at, 1.5f, MAGENTA);
+    }
+
+    // The two radii, drawn once around the player rather than once per pickup:
+    // they are properties of the reach and not of the item, and two hundred and
+    // fifty six pairs of circles is a screen nobody can read.
+    DrawCircleLinesV(player, kReach, Fade(YELLOW, 0.5f));
+    DrawCircleLinesV(player, kCollect, Fade(LIME, 0.8f));
+}
+
 void Drops::Clear() {
     for (Pickup &pickup : pool_) pickup.live = false;
 

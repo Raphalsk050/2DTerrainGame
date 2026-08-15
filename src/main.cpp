@@ -1,4 +1,5 @@
 #include "backdrop.h"
+#include "canopy.h"
 #include "config.h"
 #include "debug_view.h"
 #include "editor.h"
@@ -839,12 +840,38 @@ void DrawProbe(World &world, Grove &grove, Inventory &gathered, Rectangle strip,
 // columns and reports the share of them each cover claims and how thick it gets,
 // which is the same treatment terrain::Calibrate gives cave coverage and for the
 // same reason.
+//
+// It also reports the *spread* of that thickness, and that half is the answer to
+// a different fault. A cover is a slab as thick as its column, so a table whose
+// variation is small draws a band of even depth running the width of the world —
+// which reads as a stripe painted under the grass rather than as ground, and
+// which no amount of looking at the mean will show. The two figures that catch it
+// are the standard deviation and the step between neighbouring columns, the same
+// pair `--surface` reports about the ground itself and for the same reason: a
+// layer with a mean of thirty-six and a step of a third of a pixel is a spirit
+// level, whatever its range happens to be.
 void ReportCovers(const terrain::Settings &settings, float fromX, float toX, float step) {
     struct Tally {
         double thickness = 0.0;
-        float deepest    = 0.0f;
-        float where      = 0.0f;
-        int columns      = 0;
+
+        // Sum of squares, for the deviation. Kept rather than a second pass,
+        // since the walk is the expensive half and one number does not need one.
+        double squared = 0.0;
+
+        float thinnest = kUnboundedDepth;
+        float deepest  = 0.0f;
+        float where    = 0.0f;
+        int columns    = 0;
+
+        // How much the thickness moves between one sampled column and the next.
+        // Only counted where the cover is present on both, so the figure is about
+        // the floor wandering and not about the material's own border.
+        double stepped = 0.0;
+        float worstStep = 0.0f;
+        int steps       = 0;
+
+        float previous = 0.0f;
+        bool had       = false;
     };
 
     std::array<Tally, kElementCount> tally{};
@@ -855,6 +882,10 @@ void ReportCovers(const terrain::Settings &settings, float fromX, float toX, flo
     float wettest = 0.0f;
 
     int columns = 0;
+
+    // Columns with nothing over the rock at all. A world with a few is a world
+    // with outcrops in it; a world with many has lost its soil somewhere.
+    int bare = 0;
 
     float highest = kUnboundedDepth;
     float lowest  = -kUnboundedDepth;
@@ -872,27 +903,50 @@ void ReportCovers(const terrain::Settings &settings, float fromX, float toX, flo
         highest = std::min(highest, surface);
         lowest  = std::max(lowest, surface);
 
+        bool covered = false;
+
         for (std::size_t e = 0; e < kElementCount; e++) {
             const ElementSpawn &spawn = kElements[e].spawn;
             if (spawn.generator != Generator::Cover) continue;
 
             const float thickness = CoverThickness(spawn, x, surface, climate.temperature, climate.humidity);
 
+            Tally &into = tally[e];
+
             // A cover thinner than one terrain pixel is not on the ground, it is
             // a rounding error, and counting it would report a desert nobody can
             // see.
-            if (thickness < config::kPixelSize) continue;
+            if (thickness < config::kPixelSize) {
+                into.had = false;
+                continue;
+            }
 
-            Tally &into = tally[e];
+            covered = true;
 
             into.thickness += thickness;
+            into.squared += static_cast<double>(thickness) * thickness;
             into.columns++;
+
+            into.thinnest = std::min(into.thinnest, thickness);
 
             if (thickness > into.deepest) {
                 into.deepest = thickness;
                 into.where   = x;
             }
+
+            if (into.had) {
+                const float moved = std::fabs(thickness - into.previous);
+
+                into.stepped += moved;
+                into.worstStep = std::max(into.worstStep, moved);
+                into.steps++;
+            }
+
+            into.previous = thickness;
+            into.had      = true;
         }
+
+        if (!covered) bare++;
     }
 
     std::printf("%d columns over %.0f px, every %.0f\n", columns, toX - fromX, step);
@@ -901,8 +955,10 @@ void ReportCovers(const terrain::Settings &settings, float fromX, float toX, flo
     // The ground's own range, because a cover with a crest is measured against it
     // and a snow line written above the highest peak in the world is a material
     // that never appears — with nothing anywhere to say why.
-    std::printf("surface y %.0f..%.0f   (level %.0f, so %.0f px of relief above it)\n\n", highest, lowest,
+    std::printf("surface y %.0f..%.0f   (level %.0f, so %.0f px of relief above it)\n", highest, lowest,
                 settings.surface.level, settings.surface.level - highest);
+
+    std::printf("bare rock %.1f%% of columns\n\n", 100.0 * bare / std::max(columns, 1));
 
     for (std::size_t e = 0; e < kElementCount; e++) {
         if (kElements[e].spawn.generator != Generator::Cover) continue;
@@ -914,8 +970,20 @@ void ReportCovers(const terrain::Settings &settings, float fromX, float toX, flo
             continue;
         }
 
-        std::printf("%-6s  %5.1f%% of columns   mean %4.1f px   deepest %4.1f px at x %.0f\n", kElements[e].name,
-                    100.0 * t.columns / std::max(columns, 1), t.thickness / t.columns, t.deepest, t.where);
+        const double mean     = t.thickness / t.columns;
+        const double variance = std::max(t.squared / t.columns - mean * mean, 0.0);
+
+        std::printf("%-6s  %5.1f%% of columns   mean %4.1f px   sd %4.1f px   thinnest %4.1f   deepest %4.1f at x %.0f\n",
+                    kElements[e].name, 100.0 * t.columns / std::max(columns, 1), mean, std::sqrt(variance), t.thinnest,
+                    t.deepest, t.where);
+
+        // The raggedness, and it is the figure the mean cannot give. Reported per
+        // sampled column, so it is only comparable between runs walked at the same
+        // step — walk it at the lattice spacing to ask what the world is built at.
+        if (t.steps > 0) {
+            std::printf("        floor moves %.2f px mean, %.1f px worst, between columns %.0f px apart\n",
+                        t.stepped / t.steps, t.worstStep, step);
+        }
     }
 }
 
@@ -1022,6 +1090,149 @@ void ReportWoods(const flora::Settings &flora, const terrain::Settings &terrain,
 //    number that caught the first setting here: grain was authored at 0.72 steps,
 //    which is under a step and looked reasonable in the table, but two neighbours
 //    at opposite ends of it are 1.44 apart and a fifth of them crossed two tones.
+// Whether every plant the table can grow fits in the slot it will be drawn into.
+//
+// This exists because of a fault that is invisible from every other angle. A
+// plant is rasterised into a fixed slot of the sprite sheet, and the canvas is
+// clamped to that slot — but the *anchor*, which is where the trunk foot sits
+// inside the sprite and therefore the whole of how the plant is positioned in the
+// world, is worked out from the plant's own extent. While a plant fits, the two
+// agree. Once it outgrows the slot the drawing is cropped and the anchor goes on
+// pointing at where the foot would have been, so the plant is drawn hanging off
+// its own base by exactly the overflow.
+//
+// Nothing about that errors, nothing draws a wrong colour, and no small plant
+// shows it: a sapling fits, so a sapling is seated correctly, and the error
+// arrives gradually as the tree grows into its mature size. What it looks like is
+// a tree standing in the wrong place, which is why it was reported as a placement
+// bug and looked for in the placement code.
+//
+// Walked over the scale range the scatter actually rolls — see flora.cpp, which
+// takes (0.86 + 0.28 r) times (0.78 + 0.22 s), so 1.14 is the largest plant the
+// world can contain — and over many ids, since the skeleton is jittered per plant
+// and the widest one is not the median one.
+void ReportSprites() {
+    constexpr int kIds = 400;
+
+    // The two ends of the scatter's own roll. Nothing outside this is reachable,
+    // and measuring outside it would size the sheet for plants that never grow.
+    constexpr float kLeastScale = 0.86f * 0.78f;
+    constexpr float kMostScale  = 1.14f;
+
+    const int slotW = canopy::SlotWidth();
+    const int slotH = canopy::SlotHeight();
+
+    std::printf("slot %d x %d texels, at %.0f px each: %.0f x %.0f world px\n\n", slotW, slotH, config::kFloraPixel,
+                slotW * config::kFloraPixel, slotH * config::kFloraPixel);
+
+    bool overflowed = false;
+
+    for (std::size_t s = 0; s < flora::kSpeciesCount; s++) {
+        const auto species = static_cast<flora::Species>(s);
+
+        int worstW = 0;
+        int worstH = 0;
+        int worstStage = 0;
+
+        for (int stage = 0; stage < flora::kStageCount; stage++) {
+            for (int id = 0; id < kIds; id++) {
+                // Both ends of the roll rather than the top alone: a plant's
+                // widest part is not always its tallest, and the crown of a small
+                // one can still reach further sideways than the trunk of a big one.
+                for (const float scale : {kLeastScale, kMostScale}) {
+                    const flora::Skeleton skeleton =
+                        flora::Build(species, static_cast<flora::Stage>(stage), id, scale);
+
+                    float top    = skeleton.height;
+                    float bottom = 0.0f;
+
+                    for (int i = 0; i < skeleton.lobeCount; i++) {
+                        const flora::Lobe &lobe = skeleton.lobes[i];
+                        const float reach       = lobe.radius * lobe.flatten;
+
+                        top    = std::max(top, lobe.at.y + reach);
+                        bottom = std::min(bottom, lobe.at.y - reach);
+                    }
+
+                    // Exactly the arithmetic canopy::Render does, padding included,
+                    // or this measures a different question than the one that bites.
+                    const int wantW =
+                        static_cast<int>(std::ceil((skeleton.right - skeleton.left) / config::kFloraPixel))
+                        + canopy::kSpritePad * 2;
+                    const int wantH = static_cast<int>(std::ceil((top - bottom) / config::kFloraPixel))
+                                    + canopy::kSpritePad * 2;
+
+                    if (wantH > worstH || (wantH == worstH && wantW > worstW)) worstStage = stage;
+
+                    worstW = std::max(worstW, wantW);
+                    worstH = std::max(worstH, wantH);
+                }
+            }
+        }
+
+        const bool fits = worstW <= slotW && worstH <= slotH;
+        if (!fits) overflowed = true;
+
+        std::printf("%-8s worst %3d x %3d texels at stage %d   %s\n", flora::Def(species).name, worstW, worstH,
+                    worstStage, fits ? "fits" : "OVERFLOWS — cropped");
+
+        // And then the question the sizes are only a proxy for: is the foot of the
+        // drawn plant where the anchor says it is?
+        //
+        // Rasterised for real and read back, because that is the only way to ask.
+        // The anchor is a number computed from the skeleton and the drawing is
+        // made by a different pass over the same skeleton, so the two agreeing is
+        // a claim about the code rather than about the table — and it is exactly
+        // the claim that fails when a plant is cropped, since cropping moves the
+        // drawing and leaves the anchor where it was.
+        for (int stage = 0; stage < static_cast<int>(flora::kStageCount); stage++) {
+            flora::Plant plant;
+            plant.id      = 7;
+            plant.species = species;
+            plant.scale   = kMostScale;
+
+            std::vector<Color> pixels;
+            int w = 0;
+            int h = 0;
+            Vector2 anchor{};
+
+            canopy::Render(plant, static_cast<flora::Stage>(stage), flora::Season::Summer, false, pixels, w, h,
+                           anchor);
+
+            int lowest = -1;
+
+            for (int y = h - 1; y >= 0 && lowest < 0; y--) {
+                for (int x = 0; x < w; x++) {
+                    if (pixels[static_cast<std::size_t>(y) * w + x].a != 0) {
+                        lowest = y;
+                        break;
+                    }
+                }
+            }
+
+            // Printed as a number rather than as a pass, because the interesting
+            // value is not zero and never was. A plant is *allowed* to be drawn
+            // below its own base — foliage hangs, and a fern's fronds reach the
+            // ground on both sides of where it is rooted — so what this reports is
+            // how far below, and the judgement about whether that is foliage or a
+            // trunk is one only a person looking at the plant can make.
+            //
+            // Negative is the drawing stopping short of the anchor, which is the
+            // one direction that cannot be foliage: nothing hangs *upward*, so a
+            // plant whose lowest drawn texel is above its own base is a plant
+            // standing on nothing.
+            const float below = (static_cast<float>(lowest) - anchor.y) * config::kFloraPixel;
+
+            std::printf("         stage %d: anchor row %5.1f, lowest drawn row %3d of %3d, %+.0f px below the base\n",
+                        stage, anchor.y, lowest, h, below);
+
+            if (anchor.y > static_cast<float>(h)) overflowed = true;
+        }
+    }
+
+    std::printf("\n%s\n", overflowed ? "at least one plant does not fit its slot" : "every plant fits its slot");
+}
+
 void ReportTones() {
     constexpr int kAcross = 200;
     constexpr int kDown   = 60;
@@ -2118,6 +2329,23 @@ void DrawScene(const World &world, const Grove &grove, const Inventory &inventor
     if (debug.chunks) debug_view::DrawChunks(world, view);
     if (debug.light) debug_view::DrawLight(world, view);
 
+    // Last of the overlays, so the colliders sit over the grids rather than under
+    // them: what this is for is comparing a box against the picture it belongs to,
+    // and a chunk border drawn on top of that comparison is noise in it.
+    if (debug.bodies) {
+        debug_view::DrawGroundCollision(world, view);
+
+        grove.DrawCollision(season, world.Sky().Time());
+        grove.Fallen().DrawCollision(player.Centre());
+
+        // The body last and brightest. It is the one collider the player is
+        // steering, so it is the one they are checking the others against.
+        DrawRectangleLinesEx(player.Bounds(), 1.0f, GREEN);
+
+        const Rectangle swing = player.AttackHitbox();
+        if (swing.width > 0.0f) DrawRectangleLinesEx(swing, 1.0f, ORANGE);
+    }
+
     // Not while the panel is up: the pointer is over a slot, not over the world,
     // and a brush ring left under an inventory says the next click will dig
     // where it is sitting when it will not.
@@ -2246,6 +2474,10 @@ int main(int argc, char **argv) {
     // `--woods x0 x1` walks the scatter's cells and reports what grows where. See
     // ReportWoods.
     const bool cruising = argc >= 4 && TextIsEqual(argv[1], "--woods");
+
+    // `--sprites` reports whether every plant fits the slot it is drawn into. See
+    // ReportSprites.
+    const bool sizing = argc >= 2 && TextIsEqual(argv[1], "--sprites");
 
     // `--tones` reports how each material's paint divides between form and
     // texture. See ReportTones.
@@ -2983,6 +3215,13 @@ int main(int argc, char **argv) {
 
     if (weighing) {
         ReportTones();
+
+        CloseWindow();
+        return 0;
+    }
+
+    if (sizing) {
+        ReportSprites();
 
         CloseWindow();
         return 0;

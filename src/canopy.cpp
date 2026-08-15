@@ -3,6 +3,7 @@
 #include "config.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cmath>
 #include <cstdint>
 
@@ -136,8 +137,9 @@ constexpr int kRows    = 10;
 // rather than one.
 constexpr int kDrawBudget = 24;
 
-// Texels of clear space left around a plant inside its slot.
-constexpr int kPad = 2;
+// Texels of clear space left around a plant inside its slot. Declared in the
+// header, since --sprites has to size a plant exactly the way Render does.
+constexpr int kPad = kSpritePad;
 
 // Smallest half-height a mass of foliage may have and still be drawn, in texels.
 constexpr float kLeastMass = 1.8f;
@@ -993,8 +995,10 @@ void Render(const flora::Plant &plant, flora::Stage stage, flora::Season season,
     frame.left  = skeleton.left - kPad * pixel;
     frame.top   = top + kPad * pixel;
 
-    width = std::clamp(static_cast<int>(std::ceil((skeleton.right - skeleton.left) / pixel)) + kPad * 2, 1, kSlotW);
-    height = std::clamp(static_cast<int>(std::ceil((top - bottom) / pixel)) + kPad * 2, 1, kSlotH);
+    const int wantW = static_cast<int>(std::ceil((skeleton.right - skeleton.left) / pixel)) + kPad * 2;
+    const int wantH = static_cast<int>(std::ceil((top - bottom) / pixel)) + kPad * 2;
+    width  = std::clamp(wantW, 1, kSlotW);
+    height = std::clamp(wantH, 1, kSlotH);
 
     // A seed that separates one tree from the next, so no two of them tear along
     // the same line.

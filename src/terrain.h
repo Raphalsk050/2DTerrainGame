@@ -353,7 +353,21 @@ struct CaveSettings {
     //
     // This is what keeps the ground solid. Only an entrance may cross it, and it
     // crosses deliberately.
-    float crust     = 110.0f;
+    //
+    // It is also the hard ceiling on how thick the covers may be, and that is the
+    // one relationship worth knowing before touching either number. A cover is a
+    // slab hanging off the surface and a cave is a hole in the rock beneath it, so
+    // a cover deeper than this opens into the roof of a gallery and the first
+    // thing met underground is soil hanging from the ceiling. `kCoverCeiling` is
+    // held under it by a static_assert on the whole element table.
+    //
+    // A hundred and fifty-two, and it was a hundred and ten. What the extra forty
+    // buys is not caves — it is the room for the soil above them to be thick
+    // enough to read as a stratum rather than as a stripe, which is a question
+    // about the surface answered forty pixels underground. The cost is that every
+    // system starts that much deeper, which against a world caves descend
+    // thousands of pixels into is not a change anybody digging will find.
+    float crust     = 152.0f;
     float crustFade = 72.0f;
 
     // The systems.

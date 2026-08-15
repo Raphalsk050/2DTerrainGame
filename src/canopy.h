@@ -66,6 +66,13 @@ void Render(const flora::Plant &plant, flora::Stage stage, flora::Season season,
 int SlotWidth();
 int SlotHeight();
 
+// Texels of clear space left around a plant inside its slot.
+//
+// Out here rather than private to the rasteriser because it is part of the size a
+// plant asks for, and `--sprites` has to ask that question the same way Render
+// answers it — see ReportSprites, and the fault it exists to catch.
+inline constexpr int kSpritePad = 2;
+
 class Sheet {
 public:
     // Allocates the sheet. Needs a window open.

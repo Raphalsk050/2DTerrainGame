@@ -116,6 +116,24 @@ public:
     // drawn is what was meant. Drawn in screen space.
     void DrawSheet() const;
 
+    // What a plant *is* to everything that is not the eye: the box an axe has to
+    // land in, the rectangle the sprite is drawn into, and the point the plant is
+    // seated on. Drawn in world space, over the world.
+    //
+    // The three are separate answers to "where is this tree" and they come from
+    // separate code: the strike box is built from the species table, the sprite
+    // rectangle from the baked image and its anchor, and the base from the ground
+    // the plant was scattered onto. Nothing makes them agree — they are only ever
+    // as consistent as the arithmetic in three places happens to be — and when
+    // they disagree what a player meets is a tree that cannot be hit where it is
+    // drawn, which reads as the tree being in the wrong place rather than as the
+    // box being in the wrong place.
+    //
+    // That is not a thing any report can print, because the question is where two
+    // rectangles are relative to a picture. It has to be looked at, which is the
+    // whole of why this exists.
+    void DrawCollision(flora::Season season, float now) const;
+
     // Lands a blow. Reports what was collected outright — nothing yet, since a
     // tree gives up its wood when it hits the ground and not when it is struck.
     //

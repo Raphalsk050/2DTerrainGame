@@ -2,6 +2,7 @@
 
 #include "config.h"
 #include "element.h"
+#include "marching_squares.h"
 
 #include <algorithm>
 #include <cmath>
@@ -81,6 +82,60 @@ void ReadToggles(Toggles &toggles) {
     // saw was the sprite sheet dropping over the world every time they asked for
     // autumn.
     if (IsKeyPressed(KEY_F10)) toggles.atlas = !toggles.atlas;
+    if (IsKeyPressed(KEY_F11)) toggles.bodies = !toggles.bodies;
+}
+
+void DrawGroundCollision(const World &world, Rectangle view) {
+    const auto step = static_cast<float>(world.Spacing());
+
+    // Walked on the lattice, since that is the grid both answers are built on and
+    // a walk on any other one would be sampling the disagreement rather than
+    // reporting it.
+    const int first = static_cast<int>(std::floor(view.x / step)) - 1;
+    const int last  = static_cast<int>(std::ceil((view.x + view.width) / step)) + 1;
+
+    bool had = false;
+
+    float lastSolidX = 0.0f;
+    float lastSolidY = 0.0f;
+    float lastDrawnX = 0.0f;
+    float lastDrawnY = 0.0f;
+
+    for (int i = first; i <= last; i++) {
+        const float x = static_cast<float>(i) * step;
+
+        float crossing = 0.0f;
+        if (!world.SurfaceOf(x, crossing)) {
+            had = false;
+            continue;
+        }
+
+        // Where the ground is drawn: the crossing rounded onto the texel grid,
+        // which is the top edge of the topmost square actually laid down.
+        const float drawn = marching_squares::DrawnTop(crossing, config::kPixelSize);
+
+        // And where a body stops: the first lattice vertex a fall would find
+        // solid, which is the crossing rounded *up* to the lattice.
+        const float solid = std::ceil(crossing / step) * step;
+
+        if (had) {
+            DrawLineV({lastDrawnX, lastDrawnY}, {x, drawn}, Fade(SKYBLUE, 0.85f));
+            DrawLineV({lastSolidX, lastSolidY}, {x, solid}, Fade(RED, 0.85f));
+
+            // Marked where they actually part by more than a texel, so a screen of
+            // agreement stays quiet and the handful of columns that disagree are
+            // the thing the eye lands on.
+            if (std::fabs(solid - drawn) > config::kPixelSize) {
+                DrawLineV({x, drawn}, {x, solid}, Fade(ORANGE, 0.9f));
+            }
+        }
+
+        lastDrawnX = x;
+        lastDrawnY = drawn;
+        lastSolidX = x;
+        lastSolidY = solid;
+        had        = true;
+    }
 }
 
 void DrawLight(const World &world, Rectangle view) {

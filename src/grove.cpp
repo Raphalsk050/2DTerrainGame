@@ -604,18 +604,48 @@ void Grove::ReadGround(const World &world, Rectangle view) {
     for (int i = 0; i < count; i++) {
         const float x = static_cast<float>(first + i) * spacing;
 
-        // The top of the ground as it is *drawn*, not where the contour says it
-        // is. A square is filled when its centre is inside, so the drawn surface
-        // is the first such row at or below the crossing — up to most of a texel
-        // below it, by a different amount in every column. A trunk based on the
-        // crossing therefore stands that far above the ground it grew in, and
-        // beside a character standing on the drawn surface it is the character
-        // that reads as floating. The grass has always been placed this way; the
-        // trees were not, and the two disagreeing by a texel is the whole of it.
+        // The land's own surface and the skyline's scan for it, which are the same
+        // place over ordinary ground and a long way apart down a shaft.
+        const float land    = terrain::Height(x, world.Settings());
+        const float scanned = world.Skyline(first + i);
+
+        // Rounded to the row the ground is actually *drawn* at. A square is filled
+        // when its centre is inside, so the drawn surface is the first such row at
+        // or below the crossing — up to most of a texel from it, by a different
+        // amount in every column. A trunk based on the crossing stands that far off
+        // the ground it grew in, and beside a character standing on the drawn
+        // surface it is the character that reads as floating.
+        //
+        // Taken from the *land* and not from the skyline, and that is a second
+        // fault on top of the first. The skyline is a scan: it starts at
+        // `Height - kSkylineHeadroom` and steps down by the lattice until it is
+        // inside the ground, so what it returns is the first sample that was
+        // already underground rather than the surface — its own declaration in
+        // world.cpp says so and warns that the answer is not on the lattice. With a
+        // headroom of sixty-four and a step of six the scan grid sits two pixels
+        // below the surface, and rounding *that* to the texel grid carries a good
+        // third of all columns down a whole texel further. The result was a wood
+        // planted five pixels inside the hill, uniformly, everywhere.
+        //
+        // Over ordinary ground the crossing is the land's surface exactly — the
+        // density field is built as the signed distance from it — so this is not an
+        // approximation of the skyline, it is the number the skyline was
+        // approximating.
+        //
+        // The scan is still what answers where it has genuinely fallen: a cave
+        // entrance breaking the surface drops it by far more than its own
+        // quantisation, and there the ledge down the shaft is the real ground and
+        // the land overhead is a roof. One lattice step is the line between the
+        // two, because a step is the whole of the error the scan can have.
+        const bool shaft = (scanned - land) > spacing;
+
         surface_[static_cast<std::size_t>(i)] =
-            marching_squares::DrawnTop(world.Skyline(first + i), config::kPixelSize);
-        sunk_[static_cast<std::size_t>(i)] =
-            surface_[static_cast<std::size_t>(i)] - terrain::Height(x, world.Settings());
+            marching_squares::DrawnTop(shaft ? scanned : land, config::kPixelSize);
+
+        // Measured from the scan rather than from the row above, so it keeps saying
+        // exactly what it always said — how far the sky reached past the land — and
+        // does not start reporting the rounding as a hole.
+        sunk_[static_cast<std::size_t>(i)] = scanned - land;
     }
 
     ground_ = {.top     = surface_.data(),
@@ -1216,6 +1246,47 @@ std::optional<Rectangle> Grove::StrikeRect(const flora::Plant &plant, float now)
                      height * def.shape.clearance};
 }
 
+void Grove::DrawCollision(flora::Season season, float now) const {
+    const float pixel = config::kFloraPixel;
+
+    // The undergrowth first, under the trees, in the order Draw uses — an overlay
+    // laid out differently from the thing it is about is its own puzzle.
+    for (const flora::Plant &plant : undergrowth_) {
+        const canopy::Sprite *sprite = sheet_.Acquire(plant, flora::Stage::Mature, season, Snowy(plant));
+        if (sprite == nullptr) continue;
+
+        DrawRectangleLinesEx({plant.base.x - sprite->anchor.x * pixel, plant.base.y - sprite->anchor.y * pixel,
+                              sprite->source.width * pixel, sprite->source.height * pixel},
+                             1.0f, Fade(SKYBLUE, 0.35f));
+    }
+
+    for (const flora::Plant &plant : plants_) {
+        const Standing standing = Read(plant, now);
+        if (standing.cleared) continue;
+
+        // Where the picture goes. Taken from the sprite that is actually in the
+        // sheet rather than from the table, since the whole point is to show what
+        // was drawn and not what was meant to be.
+        const canopy::Sprite *sprite = sheet_.Acquire(plant, standing.stage, season, Snowy(plant));
+
+        if (sprite != nullptr) {
+            DrawRectangleLinesEx({plant.base.x - sprite->anchor.x * pixel, plant.base.y - sprite->anchor.y * pixel,
+                                  sprite->source.width * pixel, sprite->source.height * pixel},
+                                 1.0f, Fade(SKYBLUE, 0.7f));
+        }
+
+        // Where the axe goes.
+        const std::optional<Rectangle> strike = StrikeRect(plant, now);
+        if (strike.has_value()) DrawRectangleLinesEx(*strike, 1.0f, Fade(RED, 0.9f));
+
+        // And the seat itself, as a cross rather than a dot: what matters about it
+        // is the two lines, since a trunk that is off by a pixel is off along one
+        // of them and a dot hides which.
+        DrawLineV({plant.base.x - 6.0f, plant.base.y}, {plant.base.x + 6.0f, plant.base.y}, MAGENTA);
+        DrawLineV({plant.base.x, plant.base.y - 6.0f}, {plant.base.x, plant.base.y + 6.0f}, MAGENTA);
+    }
+}
+
 bool Grove::TimberAt(Rectangle probe, float now) const {
     for (const flora::Plant &plant : plants_) {
         const std::optional<Rectangle> box = StrikeRect(plant, now);
@@ -1355,10 +1426,9 @@ bool Grove::Plant(flora::Species species, Vector2 foot, float now) {
     fresh.planted   = true;
     fresh.species   = static_cast<std::uint8_t>(flora::SpeciesIndex(species));
 
-    // Exactly where the player asked, sunk the half a lattice step every other
-    // plant in the world is sunk by — see the scatter, which seats a trunk the
-    // same way. Without it a sapling stands on the ground rather than in it.
-    fresh.at = {foot.x, foot.y + ground_.spacing * 0.5f};
+    // Exactly where the player asked, seated the way every other plant in the
+    // world is seated — see the scatter, and the half step it no longer adds.
+    fresh.at = {foot.x, foot.y};
 
     remembered_.emplace(kPlantedBase + nextPlanted_++, fresh);
 
@@ -1375,9 +1445,9 @@ void Grove::DrawGhost(flora::Species species, Vector2 foot, flora::Season season
     ghost.scale   = 1.0f;
 
     // Seated the way every other plant in the world is — see the scatter, and
-    // Plant, which sinks a sapling by the same half step. The ghost has to stand
-    // exactly where the sapling will, or it is a promise about somewhere else.
-    ghost.base = {foot.x, foot.y + ground_.spacing * 0.5f};
+    // Plant, which seats a sapling the same way. The ghost has to stand exactly
+    // where the sapling will, or it is a promise about somewhere else.
+    ghost.base = {foot.x, foot.y};
 
     const canopy::Sprite *sprite = sheet_.Acquire(ghost, flora::Stage::Sapling, season, false);
 

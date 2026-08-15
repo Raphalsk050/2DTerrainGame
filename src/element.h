@@ -280,9 +280,47 @@ struct ElementSpawn {
     // painted stripe rather than as ground; a cover whose base wanders is soil
     // that has gathered where it could.
     //
+    // This is the *regional* half of that: `shape` is the material's own field,
+    // and at the frequency a cover asks for it that means one swell every few
+    // hundred pixels. What it says is that this stretch of country has deep soil
+    // and that one has thin soil, which is a thing worth knowing and is not what
+    // the eye is looking at.
+    //
     // Nothing may ask for more than kCoverCeiling — see the constant.
     float thickness     = 0.0f;
     float thicknessVary = 0.0f;
+
+    // The grain of the cover's floor: a second, much finer field, and how many
+    // pixels it moves the floor either way.
+    //
+    // Separate from the pair above because the two are answering different
+    // questions and one field cannot answer both. A cover with regional variation
+    // alone still meets the rock along a smooth curve — it is a stripe of slowly
+    // changing width, and a stripe is what it reads as. What makes a layer look
+    // like ground is that its floor is *rough at the scale of the ground it is
+    // part of*: it dips into hollows, thins over swells, and does so over tens of
+    // pixels rather than hundreds.
+    //
+    // Measured rather than judged, and the measurement is the point. `--covers`
+    // reports how far the floor moves between neighbouring columns. Before this
+    // existed the soil moved 0.18 px per lattice column while the ground above it
+    // moved 1.1 — the layer was six times flatter than the terrain it was lying
+    // on, which is exactly the "painted stripe" complaint stated as a number. The
+    // target is the ground's own figure: a floor that wanders like the surface
+    // does reads as ground, and one that wanders much more than it reads as
+    // static.
+    //
+    // It is bounded from below by the lattice, in the way every field in this
+    // generator is. The world is described one column every six pixels, so a
+    // feature finer than about thirty pixels has too few samples across it to be
+    // a shape and arrives as noise on the contour.
+    //
+    // Not the same field as `shape` read somewhere else, and deliberately: the
+    // regional swell and the local grain have to be able to disagree, or a
+    // stretch of deep soil is also a stretch of rough soil and the two are locked
+    // together forever.
+    terrain::NoiseShape grain{};
+    float grainVary = 0.0f;
 
     // How high the ground has to stand before the cover lies on it, as the world Y
     // it reaches full depth at and the drop below that over which it thins to
@@ -325,7 +363,26 @@ struct ElementSpawn {
 // CaveSettings::crust keeps every cave layer at least that far under the ground,
 // so a cover thinner than it can never open into the roof of a gallery. Ask for
 // more and the first thing you meet underground is a ceiling of hanging soil.
-inline constexpr float kCoverCeiling = 48.0f;
+//
+// A hundred and thirty-two against a crust of a hundred and fifty-two, and the
+// twenty between them is a real margin rather than a tight one. `CrustAllowance`
+// is a SmoothStep from the crust to the crust plus its fade, so it is *exactly*
+// zero above the crust — no system is dug there and no wall roughness is applied
+// — and it is still under a hundredth for some way below it. The first depth a
+// cave is meaningfully carved at is nearer a hundred and eighty.
+//
+// It was forty-eight, and raising it bought two different things. The first is
+// swing: a cover's mean and its variation come out of one budget, so at
+// forty-eight soil at its Minecraft-ish thirty-six had ten pixels left to vary
+// within and could not be made to look like anything but a stripe. The second is
+// the mean itself, which had to roughly double before the layer read as a
+// *stratum* — a band of ground with rock under it — rather than as a line drawn
+// along the underside of the grass.
+//
+// Both were needed and neither would have done on its own. A thin layer that
+// varies a lot is a ragged stripe, and a thick layer that does not vary is a
+// thicker stripe.
+inline constexpr float kCoverCeiling = 132.0f;
 
 // Distance between the two places a cover reads its own noise: once for its
 // thickness, once for the jitter on its climate.
@@ -564,15 +621,40 @@ inline constexpr ElementDef kElements[] = {
                 .shape = {.frequency = 2.6f, .octaves = 2, .seed = 8201},
                 .space = SpawnSpace::InsideGround,
 
-                // Two Minecraft blocks and a bit, which is what that game puts
-                // between the grass and the stone. Deep enough that an ordinary
-                // hole stays in the soil and reaching rock is a decision.
+                // Around six squares on average, with nearly the whole budget spent
+                // on the swing rather than the mean. The old pair was 36 ± 10 and
+                // it drew the stripe this whole arrangement exists to get rid of:
+                // a standard deviation of 3.2 px on a mean of 36, which is a layer
+                // of one thickness with a rounding error on it.
+                //
+                // Thirty-two with thirty either way is very nearly the same soil on
+                // average — an ordinary hole still stays in it and reaching rock is
+                // still a decision — but the two noises together carry it from a
+                // scrape over bare rock to a pocket seventeen squares deep. That
+                // range is the point and the mean is not: what makes ground worth
+                // digging is that the next hole is not the last hole.
                 //
                 // No climate: soil is what the ground is made of wherever nothing
                 // else has claimed it, so its bell is the default one and reads
                 // as one everywhere.
-                .thickness     = 36.0f,
-                .thicknessVary = 10.0f,
+                .thickness     = 50.0f,
+                .thicknessVary = 44.0f,
+
+                // A feature every hundred and eighty pixels, with two octaves under
+                // it reaching down to forty-five — about seven lattice columns,
+                // which is near the limit of what the world can describe. Soil is
+                // the roughest floor of the three: it holds an edge, so it keeps
+                // whatever shape it was left in.
+                //
+                // The frequency came down as the amplitude went up, and the two are
+                // not independent. What the eye reads as ground rather than as
+                // static is how far the floor moves *between neighbouring columns*,
+                // which is amplitude over wavelength — so doubling the swing at a
+                // fixed frequency does not make a rougher floor, it makes a noisy
+                // one. `--covers` reports that figure and the target is the ground's
+                // own 1.1 px per lattice column.
+                .grain     = {.frequency = 5.5f, .octaves = 3, .seed = 8202},
+                .grainVary = 38.0f,
             },
         .light = {.opacity = 1.0f},
     },
@@ -607,9 +689,32 @@ inline constexpr ElementDef kElements[] = {
                 .space     = SpawnSpace::InsideGround,
 
                 // Nearly as deep as the soil it displaces, so a desert is sand to
-                // dig through and not a dusting over brown ground.
-                .thickness     = 32.0f,
-                .thicknessVary = 9.0f,
+                // dig through and not a dusting over brown ground, and swinging as
+                // widely for the same reason soil does — a shade wider, even, since
+                // a desert is the one place where what the layer is doing *is* the
+                // landscape.
+                .thickness     = 48.0f,
+                .thicknessVary = 46.0f,
+
+                // Nearly as rough a floor as soil's, and the first attempt at this
+                // had it much smoother on the grounds that sand slumps and cannot
+                // hold a scarp. That is true of sand and it is an argument about
+                // the wrong surface. What comes to rest along a curve is the
+                // *top* of a sand bed — and the top of a cover here is the
+                // terrain's own surface, which this cannot move. The floor is the
+                // rock the sand is lying in, and buried rock is as ragged as rock
+                // anywhere: a desert is sand filling the hollows of a bedrock
+                // surface, which is the same relationship soil has with it.
+                //
+                // Measured, and it is why the reasoning got corrected rather than
+                // kept: at one feature every two hundred and fifty pixels the
+                // desert floor moved 0.48 px per lattice column against the 1.1 the
+                // ground above it moves, so the desert still had the flat painted
+                // underside this whole change exists to remove. Slightly coarser
+                // than soil — a desert's bedrock is the more buried of the two —
+                // and otherwise the same treatment.
+                .grain     = {.frequency = 4.5f, .octaves = 3, .seed = 8204},
+                .grainVary = 36.0f,
 
                 // Hot and dry, and well past where any tree in the table grows —
                 // the hottest of those is the apple at 0.60 — so a desert comes
@@ -663,8 +768,33 @@ inline constexpr ElementDef kElements[] = {
                 // A cap and not a layer. Thin enough that the soil it sits on is
                 // still there to be dug, which is what keeps a snowfield ground
                 // rather than a different world.
-                .thickness     = 11.0f,
-                .thicknessVary = 5.0f,
+                //
+                // Proportionally the widest swing of the three, and that is what
+                // snow actually does: it is the one cover that is *placed by the
+                // weather* rather than weathered out of the rock, so it gathers
+                // in every hollow and is scoured off every rib. Sixteen either way
+                // on a mean of sixteen means a mountainside is drifts and bare
+                // patches rather than a coat of paint over the crest — and the
+                // patches cost nothing extra, since a column whose snow came out
+                // at zero simply shows the ground underneath.
+                //
+                // It does not follow the other two up into the new headroom, and
+                // that is deliberate. A cover this thin is a cap by definition, and
+                // the whole of what keeps a snowfield ground rather than a separate
+                // world is that the soil beneath it is still there to be dug. A
+                // drift may be deep; a snowfield may not be a stratum.
+                .thickness     = 16.0f,
+                .thicknessVary = 10.0f,
+
+                // The finest grain in the table, matching the field above it. A
+                // drift is a small thing — it forms behind whatever broke the wind
+                // — so this runs at one feature every seventy pixels, near the
+                // limit of what the lattice can hold. Snow is also the one cover
+                // where the grain carries more than the regional swell: where it
+                // lies at all it lies everywhere, and what varies is how deep it
+                // has piled from one dip to the next.
+                .grain     = {.frequency = 11.0f, .octaves = 3, .seed = 8206},
+                .grainVary = 14.0f,
 
                 // The snow line, and it is what makes snow a mountain and not a
                 // latitude.
@@ -1150,12 +1280,12 @@ inline float WallLift(const ElementSpawn &spawn, float solid) {
 
 // A cover reaching past the crust would meet the cave layers, and the first thing
 // it produced would be soil hanging from the roof of a gallery. The thickest a
-// cover ever gets is its nominal depth plus the whole swing of its own noise, so
-// that is what has to clear the ceiling.
+// cover ever gets is its nominal depth plus the whole swing of *both* its noises,
+// so that is what has to clear the ceiling.
 consteval bool CoversFitUnderTheCrust() {
     for (const ElementDef &def : kElements) {
         if (def.spawn.generator != Generator::Cover) continue;
-        if (def.spawn.thickness + def.spawn.thicknessVary > kCoverCeiling) return false;
+        if (def.spawn.thickness + def.spawn.thicknessVary + def.spawn.grainVary > kCoverCeiling) return false;
     }
 
     return true;
@@ -1275,9 +1405,25 @@ inline float CoverThickness(const ElementSpawn &spawn, float worldX, float surfa
 
     if (weight <= 0.0f) return 0.0f;
 
+    // The regional swell and the local grain, summed. Both are read along the
+    // horizontal axis alone for the reason given above, and both are signed, so a
+    // column where the two agree is the deep pocket or the thin scrape and a
+    // column where they disagree is ordinary ground.
     const float vary = (terrain::Sample({worldX, 0.0f}, shape) - 0.5f) * 2.0f * spawn.thicknessVary;
 
-    return std::max(weight * (spawn.thickness + vary), 0.0f);
+    const float grain =
+        (spawn.grainVary > 0.0f) ? (terrain::Sample({worldX, 0.0f}, spawn.grain) - 0.5f) * 2.0f * spawn.grainVary
+                                 : 0.0f;
+
+    // Floored at nothing rather than at some minimum, which is what lets the rock
+    // reach the surface where the fields agree to take the whole layer away. That
+    // outcrop is not a special case anywhere — it is a column whose cover came out
+    // at zero, so the grass finds nothing to grow on and a tree finds nothing to
+    // root in without either being told about it. `--covers` reports the share of
+    // the world it happens over, because it is the one number here that can run
+    // away: a few per cent is a landscape with crags in it and twenty is a
+    // landscape that has lost its soil.
+    return std::max(weight * (spawn.thickness + vary + grain), 0.0f);
 }
 
 // Which cover lies on top of the rock in a column, or nothing where the rock is

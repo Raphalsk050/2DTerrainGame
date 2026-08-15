@@ -35,6 +35,21 @@ struct Toggles {
     // as notches is a question about the image.
     bool atlas = false;
 
+    // Everything in the world that collides, drawn as the collider rather than as
+    // the picture.
+    //
+    // Nothing else here answers the one question that produces the most
+    // convincing bugs: a body, a hitbox and a sprite are three different
+    // rectangles worked out by three different pieces of code, and when they
+    // disagree what a player sees is not "the box is wrong" but "the thing is in
+    // the wrong place". A tree that cannot be chopped where its trunk is drawn
+    // reads as a badly positioned tree; a character standing a pixel inside the
+    // ground reads as a badly drawn character.
+    //
+    // Drawing them together is the whole of the fix, because the disagreement is
+    // the finding and neither rectangle is wrong on its own.
+    bool bodies = false;
+
     // Runs the weather far faster than real time.
     //
     // A front takes minutes to cross, which is right to play under and hopeless to
@@ -70,5 +85,20 @@ void DrawLayers(const World &world, Rectangle view);
 // coarsely it is known, which is what a rule reading a light level is really
 // asking about.
 void DrawLight(const World &world, Rectangle view);
+
+// The surface the world's collision actually presents, column by column, against
+// the surface the world is drawn at.
+//
+// Two lines, and they are meant to be read against each other. `World::IsSolidAt`
+// snaps to the nearest lattice vertex, so what a body rests on is a staircase on a
+// six pixel grid; the ground is *drawn* on the five pixel texel grid, from a
+// contour interpolated between those same vertices. The two are near each other
+// everywhere and equal almost nowhere, and every "the character is standing a
+// little inside the hill" is one of the places they part.
+//
+// Nothing here is a judgement about which is right. They are different grids
+// answering different questions, and the only thing worth knowing is how far apart
+// they get.
+void DrawGroundCollision(const World &world, Rectangle view);
 
 } // namespace debug_view
