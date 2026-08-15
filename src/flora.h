@@ -1,5 +1,6 @@
 #pragma once
 
+#include "element.h"
 #include "item.h"
 #include "raylib.h"
 #include "terrain.h"
@@ -45,7 +46,7 @@ inline constexpr float kNever = 1.0e9f;
 // empty ground around it.
 enum class Layer { Canopy, Undergrowth, Count };
 
-enum class Species { Oak, Pine, Birch, Apple, Fern, Count };
+enum class Species { Oak, Pine, Birch, Apple, Fern, Scrub, Count };
 
 // How far along a plant is. Growth moves between these; the world's untouched
 // plants are all at the last one, since a wood nobody has cut is a mature wood.
@@ -205,8 +206,24 @@ struct SpeciesClimate {
 
 struct SpeciesGrowth {
     // Weather minutes from a planted seed to a mature tree under average light
-    // and rain. Measured in the same clock the day and the weather run on, so it
-    // runs fast under F7 with everything else.
+    // and rain, for a tree of average vigour. Measured in the same clock the day
+    // and the weather run on, so it runs fast under F7 with everything else.
+    //
+    // Anchored on Minecraft, which is the reference this world's block, reach,
+    // stack and throw delay all came from. A sapling there has a one in seven
+    // chance of advancing per random tick and needs two advances, which comes out
+    // at about **sixteen minutes on average** and anywhere from five to thirty in
+    // practice; every species uses the same rate, the differences between them
+    // being about space rather than time. Sixteen minutes is a little under a
+    // Minecraft day and a little over half of this one, and that was the fault
+    // being fixed: every tree here matured in four to eight minutes, so a whole
+    // wood could be planted and felled inside one afternoon.
+    //
+    // The spread is not in this number. Every tree rolls its own vigour against
+    // it — see kVigourLeast — so the figure here is the middle of a species and
+    // never the answer for any particular tree, which is what Minecraft's very
+    // long tail buys and what a fixed time cannot: two saplings put in together
+    // must not come up together.
     float maturityMinutes = 16.0f;
 
     // How much of the growth rate hangs on light and on water, in [0,1]. At zero
@@ -218,6 +235,27 @@ struct SpeciesGrowth {
     // Hits a mature tree takes before it comes down. Scaled by the stage, so a
     // sapling goes in one.
     float toughness = 4.0f;
+};
+
+// What a species will root in, as the covers it accepts by name.
+//
+// Named grounds rather than another climate bell, and the difference is the whole
+// of why trees were standing in the desert. A bell is a *tendency*: an oak thins
+// out as the country dries, and thinning out is a share, and a share of a wood
+// still leaves trees. That is right for how thick a wood is and wrong for whether
+// there is one — a trunk growing out of open sand is not a tree at the edge of its
+// range, it is a mistake, and no tuning of a bell can make it never happen while
+// leaving the rest of the range alone.
+//
+// It is also the one restriction Minecraft puts on a sapling, and it is why the
+// desert there is bare without anything in that world knowing what a desert is.
+//
+// Bare rock accepts nothing: every field here is about a cover, and a column with
+// no cover on it is stone.
+struct SpeciesGround {
+    bool soil = true;
+    bool sand = false;
+    bool snow = false;
 };
 
 struct SpeciesPalette {
@@ -255,6 +293,7 @@ struct SpeciesDef {
     SpeciesShape shape;
     SpeciesClimate climate;
     SpeciesGrowth growth;
+    SpeciesGround ground;
 
     SpeciesPalette palette[kSeasonCount];
     DropRule drops[kDropRules];
@@ -320,10 +359,17 @@ inline constexpr SpeciesDef
                         .ceilingFade      = 96.0f,
                         .abundance        = 1.0f,
                     },
-                .growth = {.maturityMinutes = 6.0f,
+                // A little over Minecraft's average, because an oak is the big
+                // slow broadleaf of this table and the birch beside it is what a
+                // player in a hurry plants.
+                .growth = {.maturityMinutes = 22.0f,
                            .lightNeed       = 0.55f,
                            .waterNeed       = 0.5f,
                            .toughness       = 5.0f},
+
+                // Earth, and only earth. The oak is the temperate tree and this
+                // is what keeps it out of the sand and off the snowfields.
+                .ground = {.soil = true},
                 .palette =
                     {
                         {.barkDark  = {58, 38, 22, 255},
@@ -391,14 +437,37 @@ inline constexpr SpeciesDef
                         .temperatureWidth = 0.28f,
                         .humidity         = 0.52f,
                         .humidityWidth    = 0.44f,
-                        .ceiling          = 8.0f,
-                        .ceilingFade      = 110.0f,
+
+                        // The treeline, and it is now a real one: the pine is the
+                        // only species in the table that climbs a mountain, and
+                        // this is where it gives up. Full wood below y = -60,
+                        // nothing above y = -220 — which against a snow line
+                        // starting at -170 means the top of a pinewood is on the
+                        // snow and the bare rock above it is the summit.
+                        //
+                        // It was 8, from before there were mountains, and that put
+                        // the treeline a hundred and thirty pixels above the plains
+                        // — halfway up an ordinary hill. Every range would have been
+                        // bare from its foothills.
+                        .ceiling          = -220.0f,
+                        .ceilingFade      = 160.0f,
                         .abundance        = 1.0f,
                     },
-                .growth = {.maturityMinutes = 8.0f,
+                // The slowest in the table, and the tallest. Half again as long as
+                // an oak takes, which at the vigour spread means an unlucky pine
+                // is more than two days of this world's own clock.
+                .growth = {.maturityMinutes = 30.0f,
                            .lightNeed       = 0.4f,
                            .waterNeed       = 0.35f,
                            .toughness       = 6.0f},
+
+                // And snow as well as earth, which is not a licence but a
+                // requirement: snow is a cap eleven pixels deep laid over the soil
+                // and it outranks it, so the surface of every cold column in the
+                // world reads as snow. A pine that would not root in it is a pine
+                // that cannot grow in the country it is centred on, and the taiga
+                // comes out bare.
+                .ground = {.soil = true, .snow = true},
                 .palette =
                     {
                         {.barkDark  = {48, 30, 18, 255},
@@ -460,10 +529,17 @@ inline constexpr SpeciesDef
                         .ceilingFade      = 92.0f,
                         .abundance        = 0.75f,
                     },
-                .growth = {.maturityMinutes = 5.0f,
+                // Minecraft's own average exactly. The birch is the pioneer of the
+                // table — thin, quick, first onto open ground — so it is the one
+                // species that keeps the reference figure unaltered.
+                .growth = {.maturityMinutes = 16.0f,
                            .lightNeed       = 0.65f,
                            .waterNeed       = 0.6f,
                            .toughness       = 3.5f},
+
+                // Earth and snow, for the pine's reason: the birch overlaps it on
+                // the cold side and shares the same ground there.
+                .ground = {.soil = true, .snow = true},
                 .palette =
                     {
                         {.barkDark  = {112, 116, 112, 255},
@@ -525,10 +601,16 @@ inline constexpr SpeciesDef
                         .ceilingFade      = 80.0f,
                         .abundance        = 0.35f,
                     },
-                .growth = {.maturityMinutes = 4.0f,
+                // Slower than the oak it is shaped like. It is the tree that pays
+                // a crop, and a fruit tree that comes into bearing faster than the
+                // timber tree beside it would make the orchard the obvious plant
+                // in every situation.
+                .growth = {.maturityMinutes = 26.0f,
                            .lightNeed       = 0.7f,
                            .waterNeed       = 0.65f,
                            .toughness       = 3.0f},
+
+                .ground = {.soil = true},
                 .palette =
                     {
                         // Spring is the one palette that is not foliage: the top two
@@ -593,10 +675,15 @@ inline constexpr SpeciesDef
                         .ceilingFade      = 90.0f,
                         .abundance        = 1.0f,
                     },
-                .growth = {.maturityMinutes = 4.0f,
+                // The one plant that stays quick. Undergrowth is not timber and
+                // nobody waits for it; what a fern is for is the floor of a wood
+                // filling back in behind a player who walked through it.
+                .growth = {.maturityMinutes = 6.0f,
                            .lightNeed       = 0.2f,
                            .waterNeed       = 0.8f,
                            .toughness       = 1.0f},
+
+                .ground = {.soil = true},
                 .palette =
                     {
                         {.barkDark  = {58, 52, 34, 255},
@@ -617,6 +704,98 @@ inline constexpr SpeciesDef
                          .leaf      = {{58, 60, 44, 255}, {80, 84, 60, 255}, {102, 106, 78, 255}, {126, 130, 98, 255}}},
                     },
                 .drops     = {{.item = Item::Fibre, .least = 1, .most = 2, .chance = 0.8f}},
+                .deciduous = false,
+            },
+            {
+                // What grows where nothing else will.
+                //
+                // The desert used to be wooded, and the reason was not the climate
+                // table — it was flora::Settings::supportFloor, which keeps a share
+                // of a wood's thickness wherever the climate suits nobody so that
+                // the ground *between* two species' ranges is a thin wood rather
+                // than a bare one. That is right almost everywhere and exactly
+                // wrong in a desert, which is not between two ranges: it is past
+                // the end of all of them. The ground rule is what settles it, and
+                // once it does the desert is genuinely empty — so it needs
+                // something of its own, or a whole biome is a place with nothing
+                // in it.
+                //
+                // Undergrowth rather than canopy, and that is the honest shape of
+                // it: this is a knee-high bush of dead-looking twigs, not a small
+                // tree. Nothing about the desert should read as shade.
+                .name        = "scrub",
+                .layer       = Layer::Undergrowth,
+                .height      = {6.0f, 12.0f, 19.0f, 22.0f},
+                .canopyWidth = {14.0f, 24.0f, 34.0f, 38.0f},
+                .shape =
+                    {
+                        // Wide, low and open: a tangle sitting straight on the
+                        // sand, with more gaps in it than mass. The high jitter and
+                        // the ragged edge are what keep it from reading as a green
+                        // fern that happens to be brown.
+                        .clearance   = 0.10f,
+                        .trunkReach  = 0.42f,
+                        .trunkWidth  = 0.07f,
+                        .trunkTaper  = 0.45f,
+                        .lean        = 0.9f,
+                        .tiers       = 3,
+                        .reach       = 1.15f,
+                        .taper       = 0.70f,
+                        .jitter      = 0.34f,
+                        .crown       = Crown::Clump,
+                        .mass        = 0.44f,
+                        .ragged      = 0.42f,
+                        .gaps        = 0.52f,
+                        .branchReach = 1.0f,
+                    },
+                .climate =
+                    {
+                        // Sand's own bell, near enough: hot and dry, centred where
+                        // the desert is rather than at the edge of it. It does not
+                        // have to be exact, because the ground rule below is what
+                        // actually decides where this grows — the climate only says
+                        // how thick it is inside that.
+                        .temperature      = 0.84f,
+                        .temperatureWidth = 0.26f,
+                        .humidity         = 0.18f,
+                        .humidityWidth    = 0.28f,
+                        .ceiling          = 40.0f,
+                        .ceilingFade      = 120.0f,
+                        .abundance        = 1.0f,
+                    },
+                .growth = {.maturityMinutes = 9.0f,
+                           .lightNeed       = 0.05f,
+                           .waterNeed       = 0.05f,
+                           .toughness       = 1.0f},
+
+                // Sand alone. It is the only thing in the table that will take it,
+                // and a scrub bush standing in a meadow would undo the whole point
+                // of the rule.
+                .ground = {.soil = false, .sand = true},
+                .palette =
+                    {
+                        // Barely a season to it. A desert plant is the same dead
+                        // straw in April as in October, which is most of what says
+                        // desert — the year turning is a thing that happens to
+                        // country with water in it.
+                        {.barkDark  = {84, 66, 40, 255},
+                         .bark      = {116, 94, 58, 255},
+                         .barkLight = {146, 122, 80, 255},
+                         .leaf = {{104, 92, 48, 255}, {140, 124, 66, 255}, {176, 158, 92, 255}, {208, 192, 128, 255}}},
+                        {.barkDark  = {84, 64, 38, 255},
+                         .bark      = {118, 92, 56, 255},
+                         .barkLight = {150, 122, 78, 255},
+                         .leaf = {{110, 94, 46, 255}, {148, 128, 64, 255}, {184, 162, 88, 255}, {216, 198, 124, 255}}},
+                        {.barkDark  = {80, 60, 36, 255},
+                         .bark      = {112, 88, 52, 255},
+                         .barkLight = {144, 118, 74, 255},
+                         .leaf = {{102, 84, 42, 255}, {138, 116, 58, 255}, {174, 150, 82, 255}, {206, 186, 118, 255}}},
+                        {.barkDark  = {76, 60, 40, 255},
+                         .bark      = {106, 86, 58, 255},
+                         .barkLight = {136, 114, 80, 255},
+                         .leaf = {{96, 86, 56, 255}, {128, 116, 78, 255}, {160, 146, 104, 255}, {192, 178, 136, 255}}},
+                    },
+                .drops     = {{.item = Item::Fibre, .least = 1, .most = 3, .chance = 0.9f}},
                 .deciduous = false,
             },
 };
@@ -645,6 +824,41 @@ inline constexpr std::optional<Species> SpeciesOf(Item sapling) {
 inline constexpr const SpeciesDef &Def(Species species) {
     return kSpecies[SpeciesIndex(species)];
 }
+
+// Whether a species will take root in a ground.
+//
+// `cover` is what the surface is made of, or nothing where it is bare rock — the
+// shape SurfaceCoverAt answers in, and the shape a world lookup answers in too,
+// so the scatter and the hand ask the same question of the same rule. Anything
+// that is not a cover is refused: a tree cannot be planted in a torch.
+inline constexpr bool RootsIn(const SpeciesDef &def, std::optional<Element> cover) {
+    if (!cover.has_value()) return false;
+
+    switch (*cover) {
+    case Element::Soil: return def.ground.soil;
+    case Element::Sand: return def.ground.sand;
+    case Element::Snow: return def.ground.snow;
+    default: break;
+    }
+
+    return false;
+}
+
+// How far either side of its species' nominal time one plant's own pace may fall.
+//
+// The spread Minecraft gets from rolling a one-in-seven chance against a random
+// tick, which is what makes two saplings planted together come up minutes apart
+// — and the thing a fixed maturity cannot express at all. There it is exponential
+// and unbounded; here it is a flat roll between these two, which gives the same
+// thing that actually matters (no two trees on one clock) without the tail that
+// would leave one sapling in a row still ankle-high an hour later.
+//
+// At these figures a birch is anywhere from seven to thirty-five minutes and a
+// pine from thirteen to sixty-six, against a day of twenty-four — so a wood is
+// visibly of mixed age while it comes up, and nothing in it matures inside the
+// afternoon it was planted.
+inline constexpr float kVigourLeast = 0.45f;
+inline constexpr float kVigourMost  = 2.2f;
 
 // How a layer is scattered.
 struct LayerSettings {

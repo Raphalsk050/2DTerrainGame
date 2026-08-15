@@ -297,7 +297,18 @@ const char *Editor::Update(World &world, Inventory &inventory, Grove &grove, con
             // rounds to.
             const float under = top + static_cast<float>(world.Spacing()) * 0.5f;
 
-            rooted_ = world.OccupantAt({target.x, under}) == Element::Soil;
+            // Against the species' own rule rather than against soil by name, so
+            // there is exactly one statement in the world of what a plant will
+            // root in and the scatter and the hand cannot drift apart. A seed with
+            // no tree behind it — nothing has one yet — is refused rather than
+            // allowed anywhere, which is the safe way round.
+            const std::optional<flora::Species> seed = flora::SpeciesOf(inventory.Held().AsItem());
+
+            // The world as built, not the generator's cover. This is the one place
+            // that distinction goes the other way from flora::Grow: a player who
+            // has carried soil into a desert and laid a bed of it has made ground a
+            // tree can root in, and the noise underneath knows nothing about it.
+            if (seed.has_value()) rooted_ = flora::RootsIn(flora::Def(*seed), world.OccupantAt({target.x, under}));
         }
     }
 
@@ -352,7 +363,7 @@ const char *Editor::Update(World &world, Inventory &inventory, Grove &grove, con
     // ghost has been standing on since the hand came near it.
     if (Def(held.AsItem()).placement == Placement::Plant) {
         if (!footing_.has_value()) return "nothing to plant it on";
-        if (!rooted_) return "a sapling needs soil to root in";
+        if (!rooted_) return "this will not root in that ground";
 
         // Whatever tree this seed is, wherever the player is standing.
         //
@@ -385,6 +396,33 @@ void Editor::DrawCursor(const Inventory &inventory, const Grove &grove, flora::S
     const Vector2 target = GetScreenToWorld2D(mouse, camera);
 
     const Stack &carried = inventory.Held();
+
+    // Both figures are in screen pixels and both are divided by the zoom, so a
+    // mark keeps its size and its weight however far the view is pushed in. A
+    // world-sized icon doubles with the zoom and a world-sized stroke doubles
+    // with it again, which is how a cursor ends up a blot.
+    const float zoom  = std::max(camera.zoom, 0.01f);
+    const float thick = kIconStroke / zoom;
+    const float scale = kIconSize * 0.5f / zoom;
+
+    // Over wood, the left hand is an axe and the mark says so.
+    //
+    // Before the ghost and not after it, which is the fix. A player with a sapling
+    // in hand who points at a trunk is about to chop it — that is what the left
+    // button will do, decided by `timber_` and nothing else — and the cursor was
+    // answering with a picture of the sapling standing at the foot of the tree,
+    // which is a promise about the *other* button and the one that is not going to
+    // be pressed. One cursor and two hands: it has to show whichever of them the
+    // click will be, and on a trunk that is the axe.
+    //
+    // A material in hand is the one exception, and it is the same exception it
+    // always was: a brush lays ground for as long as the button is held, the ring
+    // is how wide the stroke is, and building up against a tree is a thing people
+    // do. The ring stays.
+    if (timber_ && carried.holds != Holds::Material) {
+        DrawAxe(target, scale, thick, kChopColor);
+        return;
+    }
 
     // A thing that goes into the world whole gets a ghost of itself standing
     // where it would stand, and no ring: the ring is about an area a brush
@@ -429,24 +467,6 @@ void Editor::DrawCursor(const Inventory &inventory, const Grove &grove, flora::S
     // Reading that off the cursor is what keeps two buttons workable without a
     // badge somewhere else saying which is which, since the eye is already here.
     const Stack &held = inventory.Held();
-
-    // Over wood, the left hand is an axe and the ring would be a lie: the brush
-    // radius says an area will come away, and what will actually happen is one blow
-    // to one trunk. Drawn as a pair of notches instead — a mark that is plainly not
-    // the digging ring, so the player can see the tool change under the cursor
-    // before committing to it.
-    // Both figures are in screen pixels and both are divided by the zoom, so the
-    // mark keeps its size and its weight however far the view is pushed in. A world
-    // -sized icon doubles with the zoom and a world-sized stroke doubles with it
-    // again, which is how a cursor ends up a blot.
-    const float zoom  = std::max(camera.zoom, 0.01f);
-    const float thick = kIconStroke / zoom;
-    const float scale = kIconSize * 0.5f / zoom;
-
-    if (timber_ && held.holds != Holds::Material) {
-        DrawAxe(target, scale, thick, kChopColor);
-        return;
-    }
 
     Color color = kFarColor;
 

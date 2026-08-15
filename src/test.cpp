@@ -15,6 +15,11 @@ int main(int argc, char **argv) {
     const auto stage     = (argc > 2) ? static_cast<flora::Stage>(std::atoi(argv[2])) : flora::Stage::Mature;
     const auto season    = (argc > 3) ? static_cast<flora::Season>(std::atoi(argv[3])) : flora::Season::Summer;
 
+    // A fourth argument lays snow on every crown, which is how the snowfield trees
+    // are judged: it is baked into the sprite, so a screenshot of the world is the
+    // only other way to see one and a screenshot needs a snowfield to stand in.
+    const bool snowy = argc > 4 && std::atoi(argv[4]) != 0;
+
     const int cellW = canopy::SlotWidth() + 4;
     const int cellH = canopy::SlotHeight() + 4;
 
@@ -41,7 +46,7 @@ int main(int argc, char **argv) {
             int h = 0;
             Vector2 anchor{};
 
-            canopy::Render(plant, stage, season, pixels, w, h, anchor);
+            canopy::Render(plant, stage, season, snowy, pixels, w, h, anchor);
 
             // Sat on a common floor line so the sizes can be compared.
             const int originX = i * cellW + (cellW - w) / 2;
@@ -65,7 +70,7 @@ int main(int argc, char **argv) {
         std::printf("%-7s drawn\n", flora::kSpecies[s].name);
     }
 
-    ExportImage(sheet, argv[argc > 4 ? 4 : 0] == nullptr ? "sheet.png" : "sheet.png");
+    ExportImage(sheet, "sheet.png");
     UnloadImage(sheet);
 
     std::printf("wrote sheet.png (%d x %d)\n", columns * cellW, rows * cellH);

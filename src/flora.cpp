@@ -1,8 +1,11 @@
 #include "flora.h"
 
+#include "element.h"
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <optional>
 
 namespace flora {
 namespace {
@@ -199,9 +202,18 @@ bool Grow(Layer layer, std::int64_t cell, const Settings &settings, const terrai
     // readings differ by less than the field's own rounding.
     const terrain::Climate climate = terrain::ClimateAt(centre, terrain);
 
-    // Every species of this layer weighed against this place: how well the
-    // climate suits it, how common it is meant to be, and how much this stretch
-    // of country favours it.
+    // And what the ground here is made of, read at the same point and for the
+    // same reason the climate is: the position a plant ends up in depends on how
+    // wide it is, which depends on which species it is, which is what is being
+    // decided. A cell is a hundred and ten pixels; the coarsest of the three
+    // cover fields has features four times that, and its border is broken into
+    // patches by its own jitter — so a reading half a cell off is inside the
+    // noise the border already has.
+    const std::optional<Element> cover = SurfaceCoverAt(centre, terrain);
+
+    // Every species of this layer weighed against this place: whether it will
+    // root in the ground at all, how well the climate suits it, how common it is
+    // meant to be, and how much this stretch of country favours it.
     float weight[kSpeciesCount] = {};
     float suited[kSpeciesCount] = {};
 
@@ -211,6 +223,18 @@ bool Grow(Layer layer, std::int64_t cell, const Settings &settings, const terrai
     for (std::size_t e = 0; e < kSpeciesCount; e++) {
         const SpeciesDef &def = kSpecies[e];
         if (def.layer != layer) continue;
+
+        // The ground first, and as a gate rather than a weight.
+        //
+        // Before `best` as well as before the roll, which is the half of it that
+        // actually emptied the desert. `best` is what the support floor lifts, and
+        // the floor is deliberately generous — it is what makes the country
+        // between two species' ranges a thin wood instead of a bare one. A desert
+        // is not between two ranges, it is past the end of every one of them, and
+        // a suitability of a thousandth still cleared the floor and put a full
+        // half-thickness wood on the sand. A species that cannot root here does
+        // not get to say how much life the place supports.
+        if (!RootsIn(def, cover)) continue;
 
         suited[e] = Suitability(def, climate);
         best      = std::max(best, suited[e]);
@@ -319,6 +343,19 @@ bool Grow(Layer layer, std::int64_t cell, const Settings &settings, const terrai
     const float density = wood * support * treeline * flat;
 
     if (Roll(cell, 29, seed) >= density) return false;
+
+    // And the ground again, now under the trunk rather than under the middle of
+    // the cell it grew in.
+    //
+    // The gate above had to run before the species was known, and the jitter can
+    // carry a plant half a cell from where that reading was taken — which over a
+    // whole world left a handful of oaks standing a few pixels onto a snowfield
+    // and one scrub bush in the grass. Small, and the wrong kind of small: the
+    // rule this is enforcing is "never", and a rule that is kept 99.6% of the time
+    // is one somebody will find the exception to and report as a bug. What it
+    // costs is a bare pixel or two at a border a plant would have straddled, which
+    // is what the edge of a desert looks like anyway.
+    if (!RootsIn(def, SurfaceCoverAt(x, terrain))) return false;
 
     out.id      = cell;
     out.species = static_cast<Species>(chosen);

@@ -135,7 +135,7 @@ void SeasonTones(const Cover &cover, flora::Season season, float blend, Color ou
 
 } // namespace
 
-soil::Ramp RampAt(const terrain::Climate &climate, flora::Season season, float blend, float wet) {
+Look LookAt(const terrain::Climate &climate, flora::Season season, float blend, float wet) {
     // Every cover weighed, and the result mixed by weight rather than the best one
     // taken outright.
     //
@@ -144,7 +144,14 @@ soil::Ramp RampAt(const terrain::Climate &climate, flora::Season season, float b
     // country that is a little of both. This is the "blend the parameters, not the
     // result" rule the generator follows for terrain, applied to colour — which
     // for something that is only ever drawn *is* the parameter.
+    //
+    // And applied to the dressing on exactly the same terms, out of the same
+    // weights, in the same pass. The alternative is two passes that can disagree,
+    // and a stretch of world coloured as a desert and planted as a meadow is the
+    // most obvious way for them to.
     Color mixed[kElementTones]{};
+
+    Dressing dress{.tufts = 0.0f, .stones = 0.0f};
 
     float total = 0.0f;
 
@@ -162,15 +169,23 @@ soil::Ramp RampAt(const terrain::Climate &climate, flora::Season season, float b
         // so the intermediate never leaves the range a colour can hold.
         total += weight;
 
+        const float share = weight / total;
+
         for (std::size_t i = 0; i < kElementTones; i++) {
-            mixed[i] = soil::Blend(mixed[i], tones[i], weight / total);
+            mixed[i] = soil::Blend(mixed[i], tones[i], share);
         }
+
+        dress.tufts += (cover.dress.tufts - dress.tufts) * share;
+        dress.stones += (cover.dress.stones - dress.stones) * share;
     }
 
     // Somewhere between every cover's range — high ground in a cold desert, say.
     // The meadow answers, because ground with soil on it and no better claim on it
     // is ordinary ground.
-    if (total <= 0.0f) SeasonTones(kCovers[0], season, blend, mixed);
+    if (total <= 0.0f) {
+        SeasonTones(kCovers[0], season, blend, mixed);
+        dress = kCovers[0].dress;
+    }
 
     // Then the drought, which pulls whatever grew towards dead straw.
     const float parch = kParch * (1.0f - SmoothStep(kDryAt, kWetAt, wet));
@@ -181,17 +196,17 @@ soil::Ramp RampAt(const terrain::Climate &climate, flora::Season season, float b
         }
     }
 
-    return soil::Build(mixed);
+    return {.ramp = soil::Build(mixed), .dress = dress};
 }
 
 namespace {
 
 // What one column of the profile says, from a world position.
 struct Reading {
-    float top   = 0.0f;
-    float cover = 0.0f;
-    float push  = 0.0f;
-    const soil::Ramp *ramp = nullptr;
+    float top         = 0.0f;
+    float cover       = 0.0f;
+    float push        = 0.0f;
+    const Look *look  = nullptr;
 };
 
 // How much of one tuft is standing, in [0,1]. One where nothing has happened to
@@ -211,7 +226,7 @@ Reading Read(const Blades &ground, float worldX) {
 
     const auto at = static_cast<std::size_t>(column);
 
-    return {ground.top[at], ground.cover[at], ground.push[at], &ground.ramp[at]};
+    return {ground.top[at], ground.cover[at], ground.push[at], &ground.look[at]};
 }
 
 // The cell a world position falls in. The whole of a tuft's identity: the same
@@ -238,10 +253,18 @@ bool Grow(std::int64_t cell, const Blades &ground, int seed, float &outX, Readin
 
     if (outAt.cover <= 0.0f) return false;
 
-    // One roll against the cover, so tufts arrive one at a time as the ground
-    // recovers rather than the whole field fading up together. A fade reads as a
-    // rendering artefact; this reads as spreading.
-    if (Roll(cell, 5, seed) >= outAt.cover) return false;
+    // One roll against the cover *and* against how thickly this country is
+    // vegetated at all, so tufts arrive one at a time as the ground recovers
+    // rather than the whole field fading up together. A fade reads as a rendering
+    // artefact; this reads as spreading.
+    //
+    // The two are multiplied and not confused. The cover is what digging and
+    // regrowth move, and it runs to one on ground nobody has touched; the dressing
+    // is what the biome is, and in a desert it is a quarter. A single roll against
+    // their product means a desert is thin because it is a desert and a fresh
+    // scrape is thin because it is fresh, and the same cell is the same tuft in
+    // both cases rather than rolling twice for its own existence.
+    if (Roll(cell, 5, seed) >= outAt.cover * outAt.look->dress.tufts) return false;
 
     // As many blades as the tuft has texel columns to stand them in, so the
     // clump is filled rather than sampled. What varies between one tuft and the
@@ -261,6 +284,72 @@ bool Grow(std::int64_t cell, const Blades &ground, int seed, float &outX, Readin
     outScale = (0.55f + 0.45f * outAt.cover) * left;
 
     return true;
+}
+
+// The stone lying where a tuft is not.
+//
+// Drawn from the same cell and the same rolls the tuft would have used, so a
+// stretch of desert is the same desert every frame and from every direction the
+// player walks into it — the whole field is a pure function of the cell, exactly
+// as the grass is and for the same reason.
+//
+// Its own salts throughout, so nothing about a stone is the tuft's roll read
+// twice: a cell that failed the tuft roll narrowly is not thereby a cell with a
+// large stone in it.
+void DrawStone(std::int64_t cell, const Blades &ground, int seed) {
+    const float baseX = (static_cast<float>(cell) + 0.5f) * kTuftSpan;
+
+    const Reading at = Read(ground, baseX);
+
+    // Bare rock and open sky hold nothing, and neither does ground that has been
+    // dug and is coming back — a fresh scrape is earth, and earth has no grit
+    // lying on it yet.
+    if (at.cover < kRipe) return;
+
+    const float stones = at.look->dress.stones;
+    if (stones <= 0.0f) return;
+
+    if (Roll(cell, 71, seed) >= stones) return;
+
+    const float pixel = config::kFloraPixel;
+
+    // Somewhere across the cell rather than in the middle of it, so a run of them
+    // is a scatter and not a dotted line.
+    const float across = (Roll(cell, 73, seed) - 0.5f) * kTuftSpan * 0.6f;
+
+    const Reading under = Read(ground, baseX + across);
+    if (under.cover < kRipe) return;
+
+    // How big this one is: one, two or three texels across and one or two down,
+    // and never wider than it is tall by more than the pair above allows.
+    const int wide = 1 + static_cast<int>(Roll(cell, 79, seed) * static_cast<float>(kStoneWide));
+    const int tall = 1 + static_cast<int>(Roll(cell, 83, seed) * static_cast<float>(kStoneTall));
+
+    // Resting on the drawn surface, exactly as a blade of grass stands on it: the
+    // bottom row is the first texel above the ground. Anything lower would be drawn
+    // into the ground itself, which is the terrain's texels to own and not this
+    // pass's.
+    const float foot = DrawnTop(under.top);
+
+    const float left = Snap(baseX + across - static_cast<float>(wide) * pixel * 0.5f);
+
+    const soil::Ramp &ramp = under.look->ramp;
+
+    for (int row = 0; row < tall; row++) {
+        for (int col = 0; col < wide; col++) {
+            // The lit crest and the shadowed foot, out of the ground's own ramp so
+            // a stone belongs to the country it is lying in. One step of relief
+            // over the whole thing, which at this size is all there is room for.
+            const float lit =
+                0.5f - kStoneShade * soil::kStep + ((row == 0) ? 1.4f : -0.5f) * soil::kStep
+                + (Roll(cell, 89 + row * 7 + col, seed) - 0.5f) * soil::kStep;
+
+            const int index = std::clamp(static_cast<int>(lit * static_cast<float>(kElementRamp)), 0, kElementRamp - 1);
+
+            DrawRectangleV({left + static_cast<float>(col) * pixel, foot - static_cast<float>(tall - row) * pixel},
+                           {pixel, pixel}, ramp.tone[index]);
+        }
+    }
 }
 
 } // namespace
@@ -286,9 +375,12 @@ void DrawTufts(const Blades &ground, Rectangle view, float now, int seed) {
         int blades       = 0;
         float scale      = 1.0f;
 
-        if (!Grow(cell, ground, seed, baseX, at, blades, scale)) continue;
+        if (!Grow(cell, ground, seed, baseX, at, blades, scale)) {
+            DrawStone(cell, ground, seed);
+            continue;
+        }
 
-        const soil::Ramp &ramp = *at.ramp;
+        const soil::Ramp &ramp = at.look->ramp;
 
         // How tall this tuft runs.
         //

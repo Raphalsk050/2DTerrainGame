@@ -161,6 +161,29 @@ constexpr std::int64_t kGhostBase = 1LL << 52;
 // one standing there.
 constexpr float kGhostFade = 0.45f;
 
+// Share of the world's own plants that are not yet grown.
+//
+// A wood is a grown wood — that is what makes "no record means a mature tree" the
+// right default, and it stays right. But *every* tree being full grown was its own
+// kind of wrong, and it is the one a player meets with an axe in their hand: the
+// scatter varies a plant's size by a third either way, so a wood holds trees at
+// two thirds the height of their neighbours, and every one of them took a full
+// tree's five blows and paid a full tree's timber. What looked like a sapling was
+// an oak wearing a smaller coat.
+//
+// An eighth, which is about what a managed wood carries as young growth. They are
+// real saplings and young trees — one blow and a seed back, or a short tree and
+// less wood — and they come up over the session at their own paces.
+constexpr float kYoungShare = 0.12f;
+
+// How far along the youngest of them start.
+//
+// Off the floor, so the eighth above is mostly *young* trees rather than mostly
+// seedlings: a wood with one plant in ten ankle-high reads as a nursery. At a
+// quarter, half of the young growth is past the sapling stage on the first frame
+// and the rest arrives there within a few minutes.
+constexpr float kYoungFloor = 0.25f;
+
 // Weather minutes a tree takes to close over a blow it survived.
 //
 // It has to heal, and not only because a scarred wood is odd: the overlay lets a
@@ -312,17 +335,57 @@ flora::Stage StageOf(float growth) {
     return flora::Stage::Sapling;
 }
 
+// How fast this particular plant goes, against the middle of its species.
+//
+// The spread Minecraft gets for nothing out of rolling a chance against a random
+// tick, and the thing a table of fixed maturities cannot say at all: two saplings
+// planted together must not come up together, and a row of them along a fence has
+// to arrive as a row of different trees over several minutes rather than as a
+// wall appearing at once.
+//
+// Hashed out of the plant's own cell, so it is the same tree's own pace in every
+// session and no two neighbours share one. See flora::kVigourLeast.
+float Vigour(std::int64_t cell, int seed) {
+    return flora::kVigourLeast + (flora::kVigourMost - flora::kVigourLeast) * Chance(cell, 149, seed);
+}
+
+// Seconds this plant takes to come up, under average light and rain.
+float Maturing(const flora::SpeciesDef &def, std::int64_t cell, int seed) {
+    return std::max(def.growth.maturityMinutes * kMinute / Vigour(cell, seed), 1.0f);
+}
+
+// How much of a full-grown tree of its species this plant is, by the size it is
+// actually drawn at.
+//
+// One number standing for "how big is this thing really", and it carries both
+// halves of that: which stage it is at, and the plant's own size against its
+// species. Both were being ignored by everything that mattered — a sapling and a
+// hundred-and-thirty-pixel oak took the same five blows and paid the same four to
+// seven wood, and so did a stunted tree two thirds the size of the one beside it.
+// What a player sees is the size; what they should get is the size.
+//
+// Never zero, so a plant is always worth at least a blow and at least a piece.
+float Stature(const flora::Plant &plant, flora::Stage stage) {
+    const flora::SpeciesDef &def = flora::Def(plant.species);
+
+    const float full = def.height[flora::StageIndex(flora::Stage::Mature)];
+    const float here = def.height[flora::StageIndex(stage)] * plant.scale;
+
+    return std::clamp(here / std::max(full, 1e-3f), 0.12f, 1.5f);
+}
+
 // How fast a plant grows, as a share of the way to maturity per second.
 //
-// The species names how long it takes under average light and rain, and the two
-// factors below are written so that at the averages they multiply to one — so
-// `maturityMinutes` means what it says, and better than average is faster rather
-// than the number being a floor nothing reaches.
-float Rate(const flora::SpeciesDef &def, const terrain::Climate &climate, float light, float water, float meanLight,
-           float meanWater) {
+// The species names how long it takes under average light and rain, the plant's
+// own vigour moves that either way, and the two factors below are written so that
+// at the averages they multiply to one — so `maturityMinutes` means what it says,
+// and better than average is faster rather than the number being a floor nothing
+// reaches.
+float Rate(const flora::SpeciesDef &def, std::int64_t cell, int seed, const terrain::Climate &climate, float light,
+           float water, float meanLight, float meanWater) {
     const flora::SpeciesGrowth &growth = def.growth;
 
-    const float pace = 1.0f / std::max(growth.maturityMinutes * kMinute, 1.0f);
+    const float pace = 1.0f / Maturing(def, cell, seed);
 
     const auto against = [](float need, float have, float mean) {
         // Below the mean this bites and above it this helps, both in proportion
@@ -767,11 +830,14 @@ void Grove::Ripen(const World &world, float now, float dt) {
         const float away = std::max(gap - dt, 0.0f);
         const float here = std::min(gap, dt);
 
-        if (away > 0.0f) state.growth += away * Rate(def, climate, meanLight_, meanWater_, meanLight_, meanWater_);
+        if (away > 0.0f) {
+            state.growth +=
+                away * Rate(def, plant.id, settings_.seed, climate, meanLight_, meanWater_, meanLight_, meanWater_);
+        }
 
         if (here > 0.0f) {
-            state.growth += here * Rate(def, climate, world.LightLevelAt(plant.base), world.HumidityAt(plant.base),
-                                        meanLight_, meanWater_);
+            state.growth += here * Rate(def, plant.id, settings_.seed, climate, world.LightLevelAt(plant.base),
+                                        world.HumidityAt(plant.base), meanLight_, meanWater_);
         }
 
         state.growth    = std::min(state.growth, 1.0f);
@@ -781,6 +847,13 @@ void Grove::Ripen(const World &world, float now, float dt) {
 
 void Grove::Yield(const flora::Plant &plant, const TreeState &state, float now, float share, bool woodOnly) {
     const flora::SpeciesDef &def = flora::Def(plant.species);
+
+    // What comes off a tree is what was in it, and what was in it is how big it
+    // was. The table's counts are a full-grown one of its species; everything
+    // smaller — a young tree, or a mature one the scatter stunted — pays what its
+    // own size is worth. Rounded up further down, so the smallest thing worth
+    // felling is still worth a piece.
+    share *= Stature(plant, StageOf(state.growth));
 
     const float height = def.height[flora::StageIndex(flora::Stage::Mature)] * plant.scale;
 
@@ -832,7 +905,7 @@ void Grove::Draw(const weather::Sky &sky, flora::Season season, float now) const
 
     // The floor first, so a trunk stands in front of the ferns around it.
     for (const flora::Plant &plant : undergrowth_) {
-        const canopy::Sprite *sprite = sheet_.Acquire(plant, flora::Stage::Mature, season);
+        const canopy::Sprite *sprite = sheet_.Acquire(plant, flora::Stage::Mature, season, Snowy(plant));
         if (sprite == nullptr) continue;
 
         const float lean = Lean(sky, plant, now);
@@ -863,7 +936,7 @@ void Grove::Draw(const weather::Sky &sky, flora::Season season, float now) const
         // The stage is part of what a sprite *is*, so it goes into the key: a
         // sapling and the tree it becomes are two drawings, and the sheet keeps
         // whichever is being asked for.
-        const canopy::Sprite *sprite = sheet_.Acquire(plant, standing.stage, season);
+        const canopy::Sprite *sprite = sheet_.Acquire(plant, standing.stage, season, Snowy(plant));
 
         // Nothing yet: the frame's drawing budget is spent and this tree will be
         // there on one of the next few. Skipped rather than drawn some other way,
@@ -948,11 +1021,44 @@ void Grove::Draw(const weather::Sky &sky, flora::Season season, float now) const
     }
 }
 
+bool Grove::Snowy(const flora::Plant &plant) const {
+    return SurfaceCoverAt(plant.base.x, terrain_) == Element::Snow;
+}
+
+float Grove::Aged(const flora::Plant &plant, float now) const {
+    const float roll = Chance(plant.id, 137, settings_.seed);
+
+    // Most of the wood is grown, and answering so costs one hash.
+    if (roll >= kYoungShare) return 1.0f;
+
+    // The rest is somewhere on its way. Where it started is its own — spread
+    // evenly over the run above the floor, so a young wood holds every age at
+    // once rather than a cohort — and how fast it closes that is its own vigour.
+    //
+    // A pure function of the cell and the clock, which is the whole reason this
+    // can exist at all: an untouched wood of mixed ages keeps no records, exactly
+    // as an untouched wood of mature trees keeps none. The moment the player
+    // touches one, Remember seeds its record from this and Ripen takes over
+    // against the light and the rain actually falling on it.
+    const float from = kYoungFloor + (1.0f - kYoungFloor) * (roll / kYoungShare);
+
+    const flora::SpeciesDef &def = flora::Def(plant.species);
+
+    return std::min(from + std::max(now, 0.0f) / Maturing(def, plant.id, settings_.seed), 1.0f);
+}
+
 Grove::Standing Grove::Read(const flora::Plant &plant, float now) const {
     Standing standing;
 
     const auto found = remembered_.find(plant.id);
-    if (found == remembered_.end()) return standing;
+
+    // Nothing has happened to it, so the world answers: undamaged, unfelled, and
+    // as far along as its own cell and the clock say it is.
+    if (found == remembered_.end()) {
+        standing.stage = StageOf(Aged(plant, now));
+
+        return standing;
+    }
 
     const TreeState &state = found->second;
 
@@ -1010,6 +1116,13 @@ Grove::TreeState &Grove::Remember(const flora::Plant &plant, float now) {
     TreeState fresh;
     fresh.updatedAt = now;
     fresh.species   = static_cast<std::uint8_t>(flora::SpeciesIndex(plant.species));
+
+    // Seeded from what the world was already saying about it, or a young tree
+    // would jump to full size on the frame somebody first swung at it. From here
+    // on Ripen carries it, against the light and the rain that are actually
+    // falling rather than against the averages Aged assumes — which is the whole
+    // difference between a plant nobody is watching and one somebody is.
+    fresh.growth = Aged(plant, now);
 
     return remembered_.emplace(plant.id, fresh).first->second;
 }
@@ -1127,11 +1240,16 @@ void Grove::Strike(Rectangle hitbox, float damage, Vector2 from, float now) {
 
         const Standing standing = Read(plant, now);
 
+        // How much tree there is to cut through. See Stature: a plant that is
+        // drawn small has to *be* small, and this is the half of that the axe
+        // feels.
+        const float stature = Stature(plant, standing.stage);
+
         if (standing.stump) {
             TreeState &state = Remember(plant, now);
 
             Blow(state, now);
-            state.stumpHealth -= damage / std::max(def.growth.toughness * kStumpShare, 0.5f);
+            state.stumpHealth -= damage / std::max(def.growth.toughness * stature * kStumpShare, 0.5f);
 
             if (state.stumpHealth > 0.0f) return;
 
@@ -1184,7 +1302,7 @@ void Grove::Strike(Rectangle hitbox, float damage, Vector2 from, float now) {
         TreeState &state = Remember(plant, now);
 
         Blow(state, now);
-        state.health -= damage / std::max(def.growth.toughness, 0.5f);
+        state.health -= damage / std::max(def.growth.toughness * stature, 0.5f);
 
         if (state.health > 0.0f) return;
 
@@ -1261,7 +1379,7 @@ void Grove::DrawGhost(flora::Species species, Vector2 foot, flora::Season season
     // exactly where the sapling will, or it is a promise about somewhere else.
     ghost.base = {foot.x, foot.y + ground_.spacing * 0.5f};
 
-    const canopy::Sprite *sprite = sheet_.Acquire(ghost, flora::Stage::Sapling, season);
+    const canopy::Sprite *sprite = sheet_.Acquire(ghost, flora::Stage::Sapling, season, false);
 
     // The frame's drawing budget is spent and this is the first hover. It will be
     // there next frame; a marker drawn in its place would only be a second answer
@@ -1422,8 +1540,14 @@ void Grove::Shade(World &world, float now) const {
         // The crown alone, not the whole sprite: the bare trunk below it stops
         // nothing worth solving for, and including it would put a column of dusk
         // down to the ground under every tree.
-        const float height = def.height[flora::StageIndex(flora::Stage::Mature)] * plant.scale;
-        const float width  = def.canopyWidth[flora::StageIndex(flora::Stage::Mature)] * plant.scale;
+        //
+        // And the crown it actually has, not the one it will have. A sapling
+        // casting a full oak's shade darkens a strip of ground a hundred pixels
+        // wide from under a plant the size of a boot.
+        const std::size_t grown = flora::StageIndex(standing.stage);
+
+        const float height = def.height[grown] * plant.scale;
+        const float width  = def.canopyWidth[grown] * plant.scale;
 
         const float foot = height * def.shape.clearance;
 

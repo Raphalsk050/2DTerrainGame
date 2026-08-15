@@ -181,6 +181,17 @@ private:
     // than a canopy.
     void ReadGround(const World &world, Rectangle view);
 
+    // Whether a plant is standing in a snowfield, and so wears snow on whatever
+    // of it faces the sky.
+    //
+    // Asked of the generator's own covers rather than of the world, for the same
+    // reason placement is: what a tree looks like must not change because somebody
+    // dug a hole beside it, and a crown that lost its snow when the ground under
+    // the trunk was cleared would do exactly that. It is also what makes this
+    // cheap enough to ask per plant per frame — no chunk, no lattice, two noise
+    // fields and a climate.
+    bool Snowy(const flora::Plant &plant) const;
+
     // What has happened to one plant, and the whole of what the world cannot
     // work out for itself.
     //
@@ -277,6 +288,17 @@ private:
     };
 
     Standing Read(const flora::Plant &plant, float now) const;
+
+    // How far along a plant the overlay has never heard of is, in [0,1].
+    //
+    // The world's own answer, and a pure function of the plant's cell and the
+    // clock — so a wood of mixed ages costs exactly as many records as a wood of
+    // mature trees, which is none. Most plants answer one outright; the rest
+    // start somewhere short of it and close the gap at their own pace.
+    //
+    // It is what `Read` falls back on and what `Remember` seeds a fresh record
+    // from, which is what keeps a young tree young when somebody finally hits it.
+    float Aged(const flora::Plant &plant, float now) const;
 
     // What is left where a tree came down, as the rectangle it occupies.
     //

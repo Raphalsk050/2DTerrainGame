@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstddef>
 #include <iterator>
+#include <optional>
 
 // Materials the world is made of.
 //
@@ -282,6 +283,29 @@ struct ElementSpawn {
     // Nothing may ask for more than kCoverCeiling — see the constant.
     float thickness     = 0.0f;
     float thicknessVary = 0.0f;
+
+    // How high the ground has to stand before the cover lies on it, as the world Y
+    // it reaches full depth at and the drop below that over which it thins to
+    // nothing. Y grows downward, so the *smaller* number is the higher ground.
+    //
+    // The snow line, and it had to become a term of its own. Altitude was supposed
+    // to need none: terrain::ClimateSettings cools the air by `temperatureLapse`
+    // per pixel of elevation, so a material that wanted the tops only had to ask
+    // for cold and the peaks would answer. That reasoning is sound and it does not
+    // survive contact with a world that also has cold *regions* in it — the
+    // temperature field runs the whole range at sea level, so the coldest lowland
+    // is as cold as a peak and snow lay in flat country a long way from any
+    // mountain. Nothing about a bell can separate the two, because to a bell they
+    // are the same reading.
+    //
+    // A height can. And the two together are the real thing rather than a patch:
+    // the bell decides whether this stretch of country has a snow line at all and
+    // how far down the lapse carries it, and this decides that it is a line on a
+    // mountain. Warm ranges come out bare, cold ones white from the treeline up.
+    //
+    // Defaults to a height no ground reaches, which reads as no requirement.
+    float crest     = kUnboundedDepth;
+    float crestFade = 1.0f;
 
     // Where the material belongs, and how far the noise is allowed to argue with
     // that at the border.
@@ -642,20 +666,42 @@ inline constexpr ElementDef kElements[] = {
                 .thickness     = 11.0f,
                 .thicknessVary = 5.0f,
 
+                // The snow line, and it is what makes snow a mountain and not a
+                // latitude.
+                //
+                // Measured, not reasoned: `--covers` reports the surface's own range
+                // over a stretch of world, and with the ranges switched off it runs
+                // -14 to 310. So ordinary high ground never reaches y = -14 and a
+                // line at -60 clears it with room to spare, while the ranges climb
+                // past -360. Full depth from y = -190 up, nothing below y = -60, and
+                // the hundred and thirty between is the belt where a mountainside is
+                // patchy — which is what a snow line looks like from a distance and
+                // is why this is a fade rather than an edge.
+                //
+                // It replaces nothing: the climate bell below still decides whether
+                // a range is cold enough to hold snow at all, and the lapse rate
+                // still carries a northern peak past it sooner than a southern one.
+                // What this adds is the one thing a bell cannot say, which is
+                // "high". Before it, the coldest lowland in the world read exactly
+                // like a summit and lay under snow a day's walk from any mountain.
+                .crest     = -190.0f,
+                .crestFade = 130.0f,
+
                 // Colder than anything else asks for — the pine, the coldest tree
-                // in the table, centres on 0.30. Narrow with it, so snow is the
-                // tops and the far north and not a general chill: the climate
-                // loses 0.0011 of temperature per pixel of elevation, so the peaks
-                // reach this on their own without altitude being named here.
+                // in the table, centres on 0.30. Widened now that the crest above
+                // does the work of keeping snow off the plains: what this is for is
+                // no longer "only the far north" but "not the tropics", so a
+                // temperate range wears a cap and only a range standing in a desert
+                // comes out bare.
                 //
                 // Indifferent to how wet it is, since what falls as snow is
                 // decided by the cold alone.
-                .climate       = {.temperature      = 0.10f,
+                .climate       = {.temperature      = 0.20f,
                                   .humidity         = 0.5f,
-                                  .temperatureWidth = 0.18f,
+                                  .temperatureWidth = 0.40f,
                                   .humidityWidth    = kUnboundedDepth,
                                   .fullAt           = 0.50f,
-                                  .goneAt           = 0.32f},
+                                  .goneAt           = 0.30f},
                 .climateJitter = 0.14f,
             },
         .light = {.opacity = 1.0f},
@@ -1192,7 +1238,19 @@ inline float BandPenalty(const ElementSpawn &spawn, Vector2 world, float depth) 
 // horizontal axis alone, because a cover is a property of a column: sampling them
 // in two dimensions would make the thickness change on the way down through the
 // slab, which is not a thickness at all.
-inline float CoverThickness(const ElementSpawn &spawn, float worldX, float temperature, float humidity) {
+inline float CoverThickness(const ElementSpawn &spawn, float worldX, float surface, float temperature,
+                            float humidity) {
+    // The altitude first, because it is the cheap half and it is a gate rather
+    // than a weight: a material with a crest is not thinner down in the valley,
+    // it is absent, and asking the noise about a column that cannot hold it is
+    // three fields spent to arrive at zero.
+    //
+    // Y grows downward, so high ground is the smaller number and the ramp runs
+    // from the crest downward.
+    if (spawn.crest < kUnboundedDepth) {
+        if (surface >= spawn.crest + std::max(spawn.crestFade, 1e-3f)) return 0.0f;
+    }
+
     const terrain::NoiseShape shape = SpawnNoise(spawn);
 
     const float jitter =
@@ -1203,12 +1261,65 @@ inline float CoverThickness(const ElementSpawn &spawn, float worldX, float tempe
     // Full depth where the place suits it, nothing where it does not, and a short
     // run between the two. See ElementClimate::fullAt for what the alternatives
     // drew instead.
-    const float weight = ClimateRamp(spawn.climate.goneAt, spawn.climate.fullAt, suits);
+    float weight = ClimateRamp(spawn.climate.goneAt, spawn.climate.fullAt, suits);
+    if (weight <= 0.0f) return 0.0f;
+
+    // And then the rest of the snow line, as a share rather than the gate above:
+    // the top of a range is under a full cap and the flank below it wears less and
+    // less of one, which is what a snow line looks like from a distance. Ascending
+    // and turned over, never ClimateRamp with its edges reversed — that guards its
+    // span positive and would clamp the whole world to nothing.
+    if (spawn.crest < kUnboundedDepth) {
+        weight *= 1.0f - ClimateRamp(spawn.crest, spawn.crest + std::max(spawn.crestFade, 1e-3f), surface);
+    }
+
     if (weight <= 0.0f) return 0.0f;
 
     const float vary = (terrain::Sample({worldX, 0.0f}, shape) - 0.5f) * 2.0f * spawn.thicknessVary;
 
     return std::max(weight * (spawn.thickness + vary), 0.0f);
+}
+
+// Which cover lies on top of the rock in a column, or nothing where the rock is
+// bare.
+//
+// A pure function of the horizontal position and the settings, exactly as the
+// covers themselves are: a cover's depth is decided by the climate at its column
+// and by its own noise along that column, and where two of them would both lie
+// the higher precedence keeps the ground. So anything that has to know what a
+// stretch of country is made of — a tree deciding whether it can root there, a
+// crown deciding whether it is standing in a snowfield, a shower deciding whether
+// it is falling on a desert — can ask without a chunk, a lattice or a world.
+//
+// It answers about the ground the *generator* lays and not the ground as built,
+// which is the right question for placement and the wrong one for anything the
+// player has changed. The reason is the one flora::Ground gives for reading the
+// skyline rather than the surface: a wood must not rearrange itself around a hole
+// somebody dug. A hand putting a sapling down asks the world instead — see
+// Editor::rooted_.
+inline std::optional<Element> SurfaceCoverAt(float worldX, const terrain::Settings &s) {
+    const terrain::Climate climate = terrain::ClimateAt(worldX, s);
+
+    // The land's own surface, which a cover with a crest is measured against. Free
+    // here: ClimateAt has already paid for it — the lapse rate needs the elevation.
+    const float surface = terrain::Height(worldX, s);
+
+    std::optional<Element> found;
+    int rank = -1;
+
+    for (std::size_t e = 0; e < kElementCount; e++) {
+        const ElementDef &def = kElements[e];
+
+        if (def.spawn.generator != Generator::Cover) continue;
+        if (def.rules.precedence <= rank) continue;
+
+        if (CoverThickness(def.spawn, worldX, surface, climate.temperature, climate.humidity) <= 0.0f) continue;
+
+        found = static_cast<Element>(e);
+        rank  = def.rules.precedence;
+    }
+
+    return found;
 }
 
 inline constexpr const ElementDef &StyleOf(Element element) {

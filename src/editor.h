@@ -96,12 +96,14 @@ public:
     // answer, because two would be a preview that lies.
     std::optional<Vector2> Footing() const { return footing_; }
 
-    // Whether the ground there will take a seed.
+    // Whether the ground there will take the seed in hand.
     //
-    // Soil, and soil alone — the one restriction Minecraft puts on a sapling, and
-    // the only one worth having: a tree needs earth to root in, and everything
-    // else about where a tree may go is the player's to decide. Nothing about the
-    // climate, the biome or which tree it is.
+    // Whatever the species itself says it roots in — see flora::SpeciesGround —
+    // read against the world as built rather than as generated, so a bed of soil
+    // the player carried into a desert is ground a tree will take. That is the
+    // whole of the restriction, and it is the same one Minecraft puts on a
+    // sapling: everything else about where a tree may go is the player's to
+    // decide, and a seed in a hand is one particular tree wherever it is carried.
     bool Rooted() const { return rooted_; }
 
 private:

@@ -56,8 +56,11 @@ struct Sprite {
 // notch is a question about the image. `pixels` is filled row by row, `width` and
 // `height` are the size it came out, and `anchor` is where the trunk foot sits
 // inside it.
-void Render(const flora::Plant &plant, flora::Stage stage, flora::Season season, std::vector<Color> &pixels,
-            int &width, int &height, Vector2 &anchor);
+// `snowy` lays a cap of snow on whichever texels face the sky, for a tree
+// standing in a snowfield. Baked and not tinted: a cap is texels, and no colour
+// multiply over a finished tree could put one there.
+void Render(const flora::Plant &plant, flora::Stage stage, flora::Season season, bool snowy,
+            std::vector<Color> &pixels, int &width, int &height, Vector2 &anchor);
 
 // The largest a plant can come out, in texels. What a slot has to hold.
 int SlotWidth();
@@ -85,7 +88,7 @@ public:
     // frames every time; and a caller that reads this to decide where a canopy
     // casts its shade would otherwise shade trees it had not drawn, which put
     // grey blobs in an empty sky.
-    const Sprite *Acquire(const flora::Plant &plant, flora::Stage stage, flora::Season season);
+    const Sprite *Acquire(const flora::Plant &plant, flora::Stage stage, flora::Season season, bool snowy);
 
     Texture2D Texture() const { return texture_; }
     bool Ready() const { return texture_.id != 0; }
@@ -102,10 +105,10 @@ public:
     int Capacity() const;
 
 private:
-    // Identity of what a slot holds. A cell index, which of the stages it is at
-    // and which season it wears — the three things that change what a tree looks
-    // like.
-    static std::uint64_t Key(std::int64_t cell, flora::Stage stage, flora::Season season);
+    // Identity of what a slot holds. A cell index, which of the stages it is at,
+    // which season it wears and whether it is standing in snow — the four things
+    // that change what a tree looks like.
+    static std::uint64_t Key(std::int64_t cell, flora::Stage stage, flora::Season season, bool snowy);
 
     struct Slot {
         std::uint64_t key = 0;
@@ -123,7 +126,8 @@ private:
         bool taken = false;
     };
 
-    void Draw(const flora::Plant &plant, flora::Stage stage, flora::Season season, Slot &slot, int column, int row);
+    void Draw(const flora::Plant &plant, flora::Stage stage, flora::Season season, bool snowy, Slot &slot,
+              int column, int row);
 
     Texture2D texture_{};
 

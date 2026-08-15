@@ -1,5 +1,6 @@
 #pragma once
 
+#include "element.h"
 #include "grid.h"
 #include "raylib.h"
 #include "terrain.h"
@@ -760,6 +761,265 @@ struct Settings {
     // its speed would fall away with the rain. A drop should fall at the speed a
     // drop falls at whatever the weather is doing.
     float rainSpan = 1400.0f;
+
+    // Where the shower comes down as snow rather than as rain.
+    //
+    // Read off the column's own temperature and nothing else, which is what decides
+    // it: the same field that lays the snow cover on the ground is the one that
+    // says what is falling on it, so a snowfield is a place where it snows and the
+    // two can never disagree. It is the counterpart of `drought` — one says a
+    // shower does not arrive here at all, the other says it arrives as something
+    // else — and both are exceptions the uniform weather above cannot express on
+    // its own.
+    struct Snowfall {
+        // Temperature at which every drop is a flake, and the one above which none
+        // of them is. Between the two the same shower falls as both at once, which
+        // is sleet and is exactly what the edge of a cold region looks like.
+        //
+        // Wider than the ground cover's own range on the cold side, deliberately.
+        // Snow lies where the bell clears 0.32, which is about a temperature of
+        // 0.29; making it *fall* a little above that means the snowfields are
+        // always snowing rather than sometimes being rained on, and the belt where
+        // it snows onto bare ground is the approach to them.
+        float below = 0.30f;
+        float above = 0.46f;
+
+        // Share of the rain's own speed a flake falls at.
+        //
+        // A seventh. Rain comes down at nine metres a second and snow at about one,
+        // and that ratio is most of what tells them apart at a glance — a flake
+        // that fell at anything near a drop's speed would read as white rain.
+        float speed = 0.15f;
+
+        // And how much of the rain's own lean it takes.
+        //
+        // Under a half, and it is not a statement about how light a flake is — a
+        // flake is much lighter than a drop and really does get carried further. It
+        // is a statement about the *slant*: the lean is a ratio of sideways speed to
+        // downward speed, and the downward speed here is already a seventh. Left at
+        // one, a gale would lay the fall over at seven to one and draw horizontal
+        // white tracers. At this figure a storm slants it about two to one, which is
+        // a blizzard, and still air drops it very nearly straight.
+        float drift = 0.42f;
+
+        // How far a flake wanders across its own path, in pixels, and how fast.
+        //
+        // The one thing that is not shared with the rain and the one that says snow
+        // more than anything else does. A drop falls; a flake is light enough to be
+        // pushed about by air that is not going anywhere, so it flutters. Per flake,
+        // out of its own hash, so no two are in step.
+        float wander = 7.0f;
+        float rate   = 1.15f;
+
+        // What it is drawn towards. Nearly white, and mixed against the air behind
+        // it exactly as a raindrop is, so it reads against a bright noon and a dark
+        // storm alike.
+        Color tone = {238, 246, 255, 255};
+    };
+
+    Snowfall snow{};
+
+    // The mist that lies on the ground under a closed sky.
+    //
+    // An overcast day was only a change of colour: the sky washed grey, the ground
+    // went a shade darker, and nothing at all stood between the eye and the far
+    // side of the valley. Grey is what an overcast sky *is*; it is not what
+    // overcast weather looks like on the ground, and the difference is the air —
+    // damp, still air that has something in it.
+    //
+    // Built as a bank with a level top rather than a blanket that follows the
+    // hills, and that is the whole of the look. Fog pools: it fills the low ground
+    // to a height and leaves the tops standing out of it, so a hillside is half in
+    // and half out and the far ridge is a silhouette. A veil laid evenly over
+    // everything is a screen-space tint, which is the thing this is not.
+    //
+    // Everything in it is a pure function of the clock and the position, in the
+    // manner of the cloud and the rain: nothing is spawned, nothing is stored, and
+    // two views of the same afternoon agree about where the fog is.
+    struct Mist {
+        // How overcast the sky has to be before any of it gathers, where it is as
+        // thick as it gets, and how thick that is.
+        //
+        // The threshold is high on purpose. Fair weather with a few clouds in it is
+        // not a foggy morning, and mist that came up whenever the sky was half
+        // covered would be on screen most of the time — which is the fastest way to
+        // turn an effect into a smear over the whole game. Blustery covers half the
+        // sky and this sits above it; overcast covers 0.78 and storm 0.94, so the
+        // two moods that are meant to have fog in them are the two that get it.
+        //
+        // `fullAt` is below the storm's own cover rather than at one, so an
+        // overcast afternoon is already nearly the whole of the effect and a storm
+        // is the same weather with rain in it. A ramp that only closed at a
+        // completely covered sky would leave the common case at half strength,
+        // which is where this was first set and why the first bank drawn was
+        // invisible.
+        float gathersAt = 0.52f;
+        float fullAt    = 0.84f;
+
+        // And how solid the thickest of it ever gets, as an alpha.
+        //
+        // One, which is thick — the deepest cell of the bank is opaque and a wood
+        // seen through it is a set of shapes. That is a deliberate call and it is
+        // only liveable because of what is *under* it in this list: nothing reaches
+        // this figure except the cells that are both well down the bank and inside
+        // the thickest part of both fields at once, so the opaque part of the
+        // picture is a small share of it and the rest is a gradient down to nothing.
+        // Turn it down before turning anything else down if the world stops reading.
+        float strength = 1.0f;
+
+        // How much the rain adds on top of that. Rain is falling damp air, and the
+        // bottom of a rainstorm is the one place fog is a certainty.
+        float rainLift = 0.45f;
+
+        // How much of it the wind takes away, as a share, at the hardest this world
+        // can blow. Fog is a property of still air; a gale is the thing that
+        // clears one, and a storm that both blew and sat in a fog bank would be two
+        // weathers at once.
+        float windClears = 0.75f;
+
+        // Height the top of the bank stands above the nominal ground, in pixels,
+        // and how far either side of the level the noise moves it.
+        //
+        // Read against the relief, which reaches about a hundred and twenty pixels:
+        // at these figures the plains are well under the bank and the tops of the
+        // hills stand out of it, which is the shape the whole thing is for.
+        float rise  = 104.0f;
+        float swell = 46.0f;
+
+        // Distance below the top over which it comes in, in pixels. The bank has no
+        // lid — what a fog bank has instead is a depth over which it stops being one,
+        // and a hard edge across the sky would read as a wall of paint.
+        //
+        // Well short of `rise`, and that is the correction the first bank needed: at
+        // very nearly the whole depth of the bank the fade never finished before it
+        // met the ground, so the only fog at full strength was a strip a few pixels
+        // tall lying along the surface — which is to say none. A third of the depth
+        // leaves the bottom two thirds solid, which is where a fog bank is a fog
+        // bank.
+        float fade = 38.0f;
+
+        // How much of the fog is already there at the top of the bank, against the
+        // bottom of it.
+        //
+        // The term that makes it ground fog rather than a low cloud. Without it the
+        // bank is the same density all the way down and the noise decides
+        // everything, so the thickest air in the picture is as likely to be over the
+        // treetops as around the trunks — and what that draws is a slab hanging in
+        // the sky. Fog settles: it is thickest along the ground and thins upward,
+        // and the surface a player is standing on is the surface it is lying on.
+        float floorShare = 0.42f;
+
+        // The two drifting fields the bank is made of, and how fast each travels
+        // against the wind that carries it.
+        //
+        // Two and not one, and they travel at different speeds on purpose. One
+        // field alone drifts as a rigid cutout however good its shape is — the same
+        // fault the cloud deck was rebuilt to avoid — while two crossing each other
+        // at different rates never repeat, and the slower one reads as depth behind
+        // the faster.
+        //
+        // Both have to hold several features across one view, and that is a
+        // requirement rather than taste. At a feature per screen the field is very
+        // nearly constant over everything the player can see, so a screenful is
+        // either uniformly clear or uniformly closed — which is not weather, it is
+        // a fade to grey that happens to be driven by noise. Measured: at 0.9 one
+        // probe came out at a tenth of the field and another, two hundred seconds
+        // later, at nine tenths, and neither had any structure in it at all.
+        terrain::NoiseShape near{.frequency = 4.5f, .octaves = 3, .aspect = 3.4f, .seed = 5610};
+        terrain::NoiseShape far{.frequency = 1.8f, .octaves = 2, .aspect = 4.6f, .seed = 5611};
+
+        // And the roll of the bank's own top surface, which is a different question
+        // from what is in the air below it and needs its own field: read off one of
+        // the two above it would tie where the fog is deep to where its surface is
+        // high, and a fog bank's top is level-ish however thick the fog under it is.
+        terrain::NoiseShape surface{.frequency = 3.0f, .octaves = 2, .seed = 5612};
+
+        // Pixels per second each of them travels, against the same swept bearing
+        // the cloud deck runs on — so `Settings::cloudWind` at eighteen is the
+        // figure to read these against.
+        //
+        // They are speeds and not shares, and getting that wrong is what made the
+        // first bank sit perfectly still: written as 0.55 and 0.22 they meant *half
+        // a pixel a second*, so the fog crossed a tuft of grass every twenty
+        // seconds and a player watching it saw a texture, not weather. The near
+        // layer runs faster than the deck and the far one much slower, which is the
+        // parallax — two fields at one speed are one field.
+        float nearWind = 26.0f;
+        float farWind  = 9.0f;
+
+        // And how fast each travels through the depth of its own field, in pixels
+        // per second.
+        //
+        // The other half of the same lesson, learned once already on the cloud deck
+        // — see Settings::evolve. Drift alone is a stencil: the shape never changes,
+        // so the eye locks onto a bank and watches one rigid cutout ride past on a
+        // conveyor. Depth is the only axis that can change the silhouette, since the
+        // world is flat and there is nothing to scroll along.
+        //
+        // It matters more here than it does aloft, because `swept_` passes through
+        // zero every time the wind comes round — and it should, that lull is the one
+        // moment a tree stands upright. A bank that only drifted would freeze solid
+        // for the whole of it. This is what keeps the fog alive in dead air.
+        //
+        // A feature of the near field is a couple of hundred pixels, so a few pixels
+        // a second is a bank that has re-formed by the time it has crossed the
+        // screen. Above ten it boils.
+        float churn = 5.0f;
+
+        // Share of the bank the near field decides. The rest is the far one, so
+        // neither can close the bank on its own and the two have to agree before
+        // anywhere is solid.
+        float nearShare = 0.55f;
+
+        // Side of one drawn cell, in world pixels.
+        //
+        // Two of the ground's own texels. The whole world is drawn on a five pixel
+        // grid and fog drawn on a finer one would be the only smooth thing on
+        // screen; drawn on a coarser one it is visibly a grid of squares. This is
+        // the size at which it reads as the same picture as everything else.
+        //
+        // It is also what the pass costs, since everything below is per cell.
+        // Measured full screen and flying, with the bank forced on so the figure is
+        // the worst case rather than the common one: **0.46 ms**, a little under
+        // what the grass tufts cost and under two per cent of the frame. On a clear
+        // afternoon it is one test and nothing.
+        float cell = 10.0f;
+
+        // How far towards white the air's own colour is taken before it is used.
+        // Fog is brighter than the air behind it for the same reason rain is —
+        // it is lit from every direction at once. A fifth, because the air under an
+        // overcast sky is already most of the way to grey and taking it further
+        // makes a bank read as a sheet of paper laid over the frame.
+        float pale = 0.20f;
+    };
+
+    Mist mist{};
+
+    // Where it does not rain, however hard it is raining everywhere else.
+    //
+    // The weather is a state of the whole world and the rain is uniform under it —
+    // that is the decision at the head of this file and it is the right one, because
+    // rain read off each column's own cloud made one cluster rain while its
+    // neighbour in the same storm stayed dry. What it cannot express on its own is a
+    // desert, which is not a place the shower missed: it is a place showers do not
+    // reach, and it is the one exception worth carving out because a rainstorm over
+    // open sand is the single most obviously wrong thing a weather system can draw.
+    //
+    // Written as the same climate bell every other placed thing in this project uses
+    // — the sand under it, the grass beside it, the trees that will not grow in it —
+    // so the four of them describe one desert rather than four overlapping ones.
+    // Centred a little wider than the sand's own bell, so the rain thins out across
+    // the approach to a desert instead of stopping at its edge.
+    //
+    // `fullAt` is where the rain is entirely held back and `goneAt` where none of it
+    // is, so this reads backwards from a cover's pair: what the bell measures here is
+    // how much of a desert a column is.
+    ElementClimate drought = {.temperature      = 0.86f,
+                              .humidity         = 0.16f,
+                              .temperatureWidth = 0.30f,
+                              .humidityWidth    = 0.32f,
+                              .fullAt           = 0.42f,
+                              .goneAt           = 0.12f};
 };
 
 // Everything about a column of sky that does not depend on the height in it.
@@ -886,7 +1146,45 @@ public:
     float ShadeAt(float worldX) const;
 
     // How hard it is raining in a column, in [0,1].
+    //
+    // The weather's own figure everywhere but a desert, which gets none of it. See
+    // Settings::drought.
     float RainAt(float worldX) const;
+
+    // How thick the mist is over the whole world right now, in [0,1].
+    //
+    // One figure and not a field, in the same way the rain is one figure: what
+    // decides whether there is fog is the state of the air, and the air is the
+    // weather's. Where it *lies* is very much a field — see DrawMist — but how much
+    // of it there is at all is an afternoon, not a place.
+    float MistAt() const;
+
+    // The bank of fog lying in the low ground, drawn over the world and inside the
+    // light.
+    //
+    // Takes the ground for the reason DrawRain does: what it needs to know is where
+    // the surface is, so the bank can stop at it rather than being painted down
+    // through the rock — and the surface as *built*, since a wall somebody put up
+    // stands in the fog exactly as a hill does.
+    void DrawMist(Rectangle view, const Ground &ground) const;
+
+    // Share of the rain a column's own climate holds off, in [0,1]. One over the
+    // middle of a desert and zero over anywhere that is not one.
+    //
+    // Exposed because two callers already hold the climate they would otherwise
+    // make this read again — the cloud column, and anything walking a run of the
+    // world — and because it is the number to look at when asking why a stretch of
+    // ground is dry.
+    float DroughtAt(const terrain::Climate &climate) const;
+
+    // Share of what is falling on a column that falls as snow, in [0,1].
+    //
+    // Not a second kind of weather and not a share of the rain taken away: it is
+    // the same shower, arriving in a different state. So it multiplies nothing —
+    // `RainAt` still says how hard it is coming down, and this says what it is when
+    // it lands. See Settings::Snowfall.
+    float FreezingAt(const terrain::Climate &climate) const;
+    float FreezingAt(float worldX) const;
 
     // Which way the air is going and how much of its force is behind that, in
     // [-1,1]. One reading for the whole world: a gust is local, a quarter is not.
@@ -1102,13 +1400,29 @@ public:
     // over rather than guessing at a margin.
     float RainReach() const;
 
-    // Rain, as streaks from the cloud base down to whatever stops them.
+    // What is coming down, as streaks from the cloud base to whatever stops them —
+    // and as flakes wherever the column is cold enough to freeze them. One pass and
+    // not two: it is one shower, and a belt of country where half of it arrives as
+    // each is a thing that happens rather than a case to be handled.
     void DrawRain(Rectangle view, const Ground &ground) const;
 
 private:
     // Which way a drop falls: down at its own speed, pushed sideways by the wind.
     // One place, because the reach and the drawing have to agree about the slant.
     Vector2 RainFall() const;
+
+    // And which way a flake does, which is a good deal further over for the same
+    // wind because it is falling so much slower.
+    Vector2 SnowFall() const;
+
+    // One flake of a shower that is coming down frozen.
+    //
+    // Takes what DrawRain has already worked out for this drop — its size, its
+    // column, the cloud it left — rather than working any of it out again, so a
+    // sleet shower's rain and its snow are the same shower seen twice and not two
+    // fields of particles that happen to overlap.
+    void DrawFlake(Rectangle view, const Ground &ground, int drop, float gauge, float scale, float column, float from,
+                   Vector2 fall) const;
 
     // Cutoffs the cloud field has to clear, one per step of `cover` from empty sky
     // to full.

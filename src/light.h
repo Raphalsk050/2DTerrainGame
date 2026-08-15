@@ -176,11 +176,24 @@ struct Settings {
     // over, so this is the reach of the whole solve: cascade zero's interval
     // times (4^cascades - 1) / 3. Beyond it, light simply is not collected.
     //
-    // Four reaches about a screen height at the resolution below, which is as
-    // far as anything on screen can be from anything else that lights it. A
-    // fifth doubles the reach again for roughly a millisecond, and is worth it
-    // only if the view grows.
-    int cascades = 4;
+    // Five, and the fifth is not a luxury. At the lattice spacing this world uses
+    // — six pixels, which is cascade zero's interval — four cascades reach 6 × 85
+    // = **510 world pixels**, and a screen at the framing this game is built
+    // against is nineteen hundred across. So a lamp anywhere but the near quarter
+    // of the view contributed exactly nothing to the player standing in front of
+    // it, however bright it was, and it did so with a hard edge: light that was
+    // there at five hundred pixels and gone at five hundred and eleven. That is
+    // the "the light disappears before it should" fault, and no amount of
+    // strength could reach past it, because strength is not what the bound is
+    // about.
+    //
+    // Five reaches 6 × 341 = 2046, which covers a full-screen view corner to
+    // corner with room over. It costs one more march, and the marches are not
+    // equal: a cascade's ray is four times the one below it while its step is
+    // twice, so the top one is the dearest of them. In practice much of that is
+    // given back, because a ray that leaves the lit region stops — and at this
+    // reach most of the top cascade's rays leave it within a few steps.
+    int cascades = 5;
 
     // Directions in cascade zero. The cascade above has four times as many, so
     // by the fourth there are hundreds and a distant source is placed to within

@@ -31,10 +31,37 @@ namespace sod {
 // The same bell every other climate-placed thing in this project uses, so a
 // meadow, a pine and a desert are all selected by one kind of rule and can be
 // reasoned about together.
+// How thickly a stretch of ground is dressed, and with what.
+//
+// The half of a ground cover that is not its colour, and it had to become its own
+// thing the moment there was a desert: a meadow and a desert are not two shades of
+// the same lawn. What separates them is how much of the ground holds anything at
+// all, and what the ground holds where it is not a plant.
+//
+// Both are read against the *cover* — how established the grass in a column is,
+// which is what digging and regrowth move — and never folded into it. They are two
+// different facts: a desert that is thinly vegetated is not a desert whose grass
+// was dug up last minute and is coming back, and folding them would have a
+// player's spade make a meadow out of a dune.
+struct Dressing {
+    // Share of the cells along the ground that hold a tuft.
+    float tufts = 1.0f;
+
+    // And of the ones that do not, the share that hold a stone instead.
+    //
+    // Stones rather than nothing, because bare ground with nothing on it reads as
+    // ground that has not been finished. What a desert floor actually has between
+    // its bushes is grit and pebbles, and one texel cluster per cell is the whole
+    // of what it takes to say so.
+    float stones = 0.0f;
+};
+
 struct Cover {
     const char *name;
 
     ElementClimate climate;
+
+    Dressing dress;
 
     // Four tones per season, darkest first, expanded into the seven the grass is
     // drawn from — the same arrangement flora::SpeciesPalette uses for leaves,
@@ -55,6 +82,10 @@ inline constexpr Cover kCovers[] = {
                     .humidityWidth    = 0.34f,
                     .fullAt           = 0.40f,
                     .goneAt           = 0.05f},
+
+        // Every cell, and no stones. A meadow is closed ground: what is between
+        // one tuft and the next is another tuft.
+        .dress = {.tufts = 1.0f, .stones = 0.0f},
         .tone =
             {
                 // Spring is the year's brightest and yellowest green, and it is
@@ -88,6 +119,12 @@ inline constexpr Cover kCovers[] = {
                     .humidityWidth    = 0.26f,
                     .fullAt           = 0.40f,
                     .goneAt           = 0.05f},
+
+        // Opening up, with the ground beginning to show through. The belt between
+        // a meadow and a desert has to look like one or the desert arrives with no
+        // approach to it, and that is as true of how thick the grass is as it is
+        // of what colour it is.
+        .dress = {.tufts = 0.72f, .stones = 0.10f},
         .tone =
             {
                 {{84, 92, 40, 255}, {120, 128, 54, 255}, {162, 166, 76, 255}, {200, 198, 112, 255}},
@@ -108,12 +145,48 @@ inline constexpr Cover kCovers[] = {
                     .humidityWidth    = 0.34f,
                     .fullAt           = 0.40f,
                     .goneAt           = 0.05f},
+
+        // Nearly closed, with the odd stone showing. A pinewood floor is moss and
+        // needle litter over rock that is never far down.
+        .dress = {.tufts = 0.90f, .stones = 0.08f},
         .tone =
             {
                 {{32, 74, 48, 255}, {50, 106, 64, 255}, {78, 142, 84, 255}, {118, 180, 116, 255}},
                 {{28, 68, 46, 255}, {46, 98, 62, 255}, {72, 132, 80, 255}, {110, 170, 110, 255}},
                 {{58, 72, 44, 255}, {86, 102, 58, 255}, {120, 136, 76, 255}, {158, 172, 104, 255}},
                 {{56, 66, 60, 255}, {80, 92, 84, 255}, {106, 118, 108, 255}, {136, 148, 136, 255}},
+            },
+    },
+    {
+        .name = "desert",
+
+        // Where the sand is. The same pair of numbers the sand's own row in the
+        // element table asks for, near enough — four things describe this one
+        // desert now, and they are meant to describe the same desert: the sand
+        // under it, the scrub standing in it, the rain that does not fall on it,
+        // and this.
+        .climate = {.temperature      = 0.88f,
+                    .humidity         = 0.16f,
+                    .temperatureWidth = 0.26f,
+                    .humidityWidth    = 0.28f,
+                    .fullAt           = 0.38f,
+                    .goneAt           = 0.05f},
+
+        // A quarter of the ground holding anything, and a good share of the rest
+        // holding a stone. This is the row the whole Dressing idea exists for: a
+        // desert drawn as a meadow in different greens is a desert nobody believes,
+        // and no palette can fix that — what says desert is the *ground showing*.
+        .dress = {.tufts = 0.26f, .stones = 0.42f},
+        .tone =
+            {
+                // Dead straw and bleached stalk, and almost no turn to the year:
+                // there is no spring in a desert to be green in. The four rows are
+                // very slightly apart so that the blend between seasons has
+                // somewhere to go rather than being a hard repeat.
+                {{112, 96, 56, 255}, {148, 130, 78, 255}, {184, 166, 106, 255}, {214, 200, 146, 255}},
+                {{116, 98, 54, 255}, {152, 132, 74, 255}, {190, 170, 102, 255}, {220, 206, 148, 255}},
+                {{110, 92, 52, 255}, {146, 126, 72, 255}, {182, 162, 100, 255}, {212, 198, 142, 255}},
+                {{104, 90, 58, 255}, {138, 122, 80, 255}, {172, 156, 108, 255}, {202, 190, 148, 255}},
             },
     },
 };
@@ -156,14 +229,26 @@ inline constexpr float kGrassStrata = 0.0f;
 // top of the ground is green and the side of it is earth.
 inline constexpr float kFacingReach = 0.60f;
 
-// The greens for one column: the climate's cover, the time of year, and how damp
-// the ground is right now.
+// Everything one column's ground cover looks like: its colours, and how much of
+// it there is.
+//
+// One struct and one call, because both halves are a mix over the same covers
+// weighted the same way, and reading them separately would walk that mix twice
+// for every column of every frame — and, worse, would let the two drift, so a
+// stretch of country could be coloured as a desert and planted as a meadow.
+struct Look {
+    soil::Ramp ramp;
+    Dressing dress;
+};
+
+// The look of one column: the climate's cover, the time of year, and how damp the
+// ground is right now.
 //
 // `blend` is how far the year has turned towards the next season and `wet` is
 // weather::Sky::HumidityAt — the place's own climate raised by rain that has
 // fallen and lowered by the sun since, which is what makes a field visibly
 // greener after a shower.
-soil::Ramp RampAt(const terrain::Climate &climate, flora::Season season, float blend, float wet);
+Look LookAt(const terrain::Climate &climate, flora::Season season, float blend, float wet);
 
 // Blades in one tuft.
 inline constexpr int kBladesPerTuft = 5;
@@ -227,10 +312,10 @@ inline constexpr float kBladeUrgency = 1.30f;
 // carries is the answers. The same arrangement flora::Ground and weather::Ground
 // have, for the same reason.
 struct Blades {
-    const float *top    = nullptr; // World Y of the top of the ground.
-    const float *cover  = nullptr; // How established the grass is, in [0,1].
-    const float *push   = nullptr; // Wind as a share of the hardest this world blows, in [-1,1].
-    const soil::Ramp *ramp = nullptr;
+    const float *top   = nullptr; // World Y of the top of the ground.
+    const float *cover = nullptr; // How established the grass is, in [0,1].
+    const float *push  = nullptr; // Wind as a share of the hardest this world blows, in [-1,1].
+    const Look *look   = nullptr; // What this stretch of country is dressed in.
 
     int count       = 0;
     int firstColumn = 0;
@@ -251,8 +336,25 @@ struct Blades {
     int cells               = 0;
     std::int64_t firstCell  = 0;
 
-    bool Empty() const { return ramp == nullptr || count <= 0; }
+    bool Empty() const { return look == nullptr || count <= 0; }
 };
+
+// The stone that sits where a tuft does not, in plant texels.
+//
+// Three by two at the largest and one texel at the smallest, drawn from the
+// ground's own ramp rather than a colour of its own — a pebble is a piece of the
+// ground it is lying on, and one authored grey would be the same grey in a desert
+// and on a taiga floor.
+//
+// Deliberately tiny. What this is for is breaking up bare ground, not putting
+// scenery on it: at four texels across it stops reading as grit and starts
+// reading as a boulder somebody forgot to make collidable.
+inline constexpr int kStoneWide = 3;
+inline constexpr int kStoneTall = 2;
+
+// How far a stone's tone sits from the middle of the ramp, in tone steps. Below
+// it, so a pebble is the dark mark on pale ground that grit actually is.
+inline constexpr float kStoneShade = 2.2f;
 
 // How established the grass in a column has to be before a tuft standing in it
 // is worth anything.

@@ -131,6 +131,90 @@ struct SurfaceSettings {
     NoiseShape hills{};
     float hillAmplitude = 0.0f;
 
+    // ------------------------------------------------------------ the mountains
+    //
+    // A range is not a bigger hill, and it cannot be made by turning
+    // `reliefAmplitude` up. Relief is a smooth swell of the same shape everywhere,
+    // so raising it raises the whole world at once and what comes out is high
+    // ground, not mountains — every stretch of the map gets taller and none of it
+    // gets a peak.
+    //
+    // Two things separate a mountain range from high ground, and each one is a
+    // field here. The first is that it has an *edge*: a range stands where the rest
+    // of the country does not, so most of the world has to have none of it at all.
+    // The second is that it has a *crest*: the outline creases to a point rather
+    // than rounding over, which a smooth field cannot do at any amplitude.
+
+    // Where the ranges are. Very low frequency and thresholded, so a range is
+    // somewhere reached after a long walk rather than a feature of the landscape
+    // everywhere.
+    NoiseShape range{};
+
+    // Share of the world with mountains in it, and the half-width of the ramp onto
+    // one, in units of the field above.
+    //
+    // Measured rather than declared, in the manner of every other coverage in this
+    // project — see Calibrate. The ramp is what makes a range something walked up
+    // into: cut at the threshold instead, the foothills would be a cliff running
+    // along a contour of a noise field, which is the one shape no mountain has.
+    float rangeCoverage = 0.16f;
+    float rangeEdge     = 0.14f;
+
+    // The crest itself, as a folded field.
+    //
+    // `1 - |signed|` creases along every zero crossing of the field underneath and
+    // rounds over at every peak of it, so what it draws is a run of sharp ridges
+    // with broad valleys between them. That is the standard way to get a ridgeline
+    // out of Perlin noise and it is the whole of why this layer is not just another
+    // octave: the crease is a feature no sum of smooth octaves contains.
+    NoiseShape ridge{};
+
+    // Pixels the crests stand above the land around them, at the middle of a range.
+    float ridgeAmplitude = 0.0f;
+
+    // The shape of the crest, as an exponent on the fold.
+    //
+    // One leaves the fold as it comes, which is a clean triangle — `1 - |x|` is a
+    // point by construction. Above one the profile is pushed towards its apex and
+    // the flanks fall away faster, which gives a range of spikes. **Below one it
+    // does the opposite**: the mid-range is lifted, so the shoulders broaden and the
+    // summit flattens into something with a top to it.
+    //
+    // Below one is where this wants to live, and the reason is the player. A peak
+    // sharpened to a point is one lattice column wide at the top: there is nowhere
+    // to stand, nothing to find up there, and the climb ends on a spike. What makes
+    // a mountain worth walking up is that it has shelves on the way and a summit at
+    // the end of it, and both of those are the fold's mid-range — which is exactly
+    // what an exponent under one keeps.
+    //
+    // It is also bounded by the lattice from the other side. The whole layer is read
+    // one column at a time by everything that stands on the ground or lights it, and
+    // a crest that climbs hundreds of pixels between two columns is a vertical cliff
+    // to all of them — the same fault `terraceSharp` exists to bound, at ten times
+    // the scale. `--surface` measures the worst step between neighbours; at 2.2 it
+    // reached 29.5 px against a terrace riser of 24, which is more than a whole
+    // ledge crossed in one column.
+    float ridgeSharp = 1.0f;
+
+    // Shelves cut across a mountainside, as a terrace of the crest's own.
+    //
+    // The world's terrace is a quarter of the character's jump, which is the right
+    // ledge for a hillside and far too fine to give a mountain any structure: at
+    // the slope a range runs, one of those ledges is twenty pixels of run, and a
+    // flank made of them reads as a smooth ramp with a texture on it. Walkable, and
+    // nothing to walk *to*.
+    //
+    // A shelf is the other thing: a broad flat run to follow along the face, a
+    // riser to climb, and then another. It is what turns a climb into a route, and
+    // it is where anything a mountain has to offer would be put.
+    //
+    // Applied to the crest alone rather than to the finished height, so the plains
+    // keep the ledges they were tuned with. It has to stay under the jump — see
+    // `shelfStep` against the seventy-two the character clears — or the shelves
+    // stop being a staircase and become a set of walls.
+    float shelfStep = 0.0f;
+    float shelf     = 0.0f;
+
     // Texture underfoot. Cheap to sample and easy to overdo: this is the term
     // that turns a walkable slope into a staircase of one-pixel steps.
     NoiseShape detail{};
@@ -412,6 +496,14 @@ struct Settings {
     CaveSettings caves{};
     AquiferSettings aquifer{};
     ClimateSettings climate{};
+
+    // Cutoffs measured from the fields themselves so the coverage figures above
+    // mean what they say. Filled by Calibrate; never written by hand.
+    struct Calibration {
+        float range = 1.0f;
+    };
+
+    Calibration calibration{};
 
     // Added to every layer's own seed, so one number reseeds the entire world
     // while the layers stay decorrelated from each other. Sharing one seed

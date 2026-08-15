@@ -61,13 +61,25 @@ constexpr float kTossLift  = 80.0f;
 // is one.
 constexpr float kDigOut = 90.0f;
 
-// Seconds before a pickup nobody came for gives up. Long enough to fell a second
-// tree and come back, short enough that a wood the player has worked through is
-// not still littered an hour later.
-constexpr float kLifetime = 90.0f;
+// How near two settled pickups of one kind have to be before they become one, in
+// world pixels.
+//
+// About two blocks, which is the spread a felled tree throws its wood over — so a
+// felling gathers into one or two piles rather than staying as the handful of
+// separate pieces that made the fall read. Wider and a pile reaches across a
+// clearing and hoovers up something the player deliberately left somewhere else;
+// narrower and a scatter never closes up at all.
+constexpr float kGather = 32.0f;
 
-// Seconds of the end of that spent blinking, so a pickup about to go says so.
-constexpr float kWarning = 6.0f;
+// Nothing here expires.
+//
+// There was a ninety second lifetime, and it was simply a way of losing the
+// player's material: a bag that fills while a hillside is being dug leaves the
+// overflow on the ground, and the overflow is exactly what the player has to walk
+// back for. Minecraft's five minutes is a concession to a server holding
+// thousands of entities; this pool holds two hundred and fifty six, they gather
+// into stacks as they settle, and they are gone the moment the view leaves them
+// anyway. There is nothing left for a timer to buy.
 
 
 
@@ -99,12 +111,67 @@ Drops::Pickup *Drops::Claim() {
     return nullptr;
 }
 
+void Drops::Spill(Stack &stack, Vector2 near) {
+    if (stack.Empty()) return;
+
+    // Nearest first, so what cannot have a slot of its own joins the pile it
+    // would have landed in rather than one on the far side of the wood. A pass
+    // per unit poured, over a pool that is by definition full — which only ever
+    // happens once something upstream has gone very wrong, and is the one moment
+    // it is worth being slow to avoid losing anything.
+    while (!stack.Empty()) {
+        Pickup *best   = nullptr;
+        float nearest  = 0.0f;
+
+        for (Pickup &pickup : pool_) {
+            if (!pickup.live || !pickup.stack.Alike(stack) || pickup.stack.Room() <= 0) continue;
+
+            const float dx = pickup.at.x - near.x;
+            const float dy = pickup.at.y - near.y;
+
+            const float away = dx * dx + dy * dy;
+
+            if (best != nullptr && away >= nearest) continue;
+
+            best    = &pickup;
+            nearest = away;
+        }
+
+        if (best == nullptr) return;
+
+        const int poured = std::min(best->stack.Room(), stack.count);
+
+        best->stack.count += poured;
+        stack.count -= poured;
+    }
+}
+
 void Drops::Scatter(Stack stack, Vector2 from, float away, float now) {
     if (stack.Empty()) return;
 
-    for (int i = 0; i < stack.count; i++) {
+    // How the throw is divided. One piece per unit up to the bound, and then the
+    // remainder rides on the pieces evenly — so a tree's four to nine pieces of
+    // wood arrive as four to nine objects, and a slot of stone arrives as eight
+    // of eight rather than as sixty-four of one.
+    const int pieces = std::min(stack.count, kPieces);
+    const int each   = stack.count / pieces;
+    int spare        = stack.count - each * pieces;
+
+    for (int i = 0; i < pieces; i++) {
+        const int count = each + ((spare > 0) ? 1 : 0);
+        if (spare > 0) spare--;
+
         Pickup *pickup = Claim();
-        if (pickup == nullptr) return;
+
+        // The pool is full. What is left goes into whatever of its own kind is
+        // already lying here, because the one thing that must not happen is the
+        // player's material quietly ceasing to exist.
+        if (pickup == nullptr) {
+            Stack rest = {.holds = stack.holds, .what = stack.what, .count = count + each * (pieces - i - 1) + spare};
+
+            Spill(rest, from);
+            return;
+        }
 
         // Seeded off the pool index as well as the loop counter, so a second
         // handful thrown from the same place on the same frame does not land in
@@ -115,7 +182,7 @@ void Drops::Scatter(Stack stack, Vector2 from, float away, float now) {
         pickup->at       = from;
         pickup->velocity = {away * kThrowSpeed * (0.35f + 0.65f * spread),
                             -kThrowLift * (0.6f + 0.5f * Spray(seed + 5))};
-        pickup->stack    = {.holds = stack.holds, .what = stack.what, .count = 1};
+        pickup->stack    = {.holds = stack.holds, .what = stack.what, .count = count};
         pickup->bornAt   = now;
         pickup->holdFor  = kSettleDelay;
         pickup->settled  = false;
@@ -127,7 +194,11 @@ void Drops::Toss(Stack stack, Vector2 from, Vector2 towards, float now) {
     if (stack.Empty()) return;
 
     Pickup *pickup = Claim();
-    if (pickup == nullptr) return;
+
+    if (pickup == nullptr) {
+        Spill(stack, from);
+        return;
+    }
 
     const float dx = towards.x - from.x;
     const float dy = towards.y - from.y;
@@ -146,14 +217,52 @@ void Drops::Toss(Stack stack, Vector2 from, Vector2 towards, float now) {
     pickup->live     = true;
 }
 
+void Drops::Merge() {
+    for (std::size_t i = 0; i < kSlots; i++) {
+        Pickup &into = pool_[i];
+
+        // Only into something that has come to rest. A pickup still in the air
+        // is mid-arc and part of what the throw is saying, and one being drawn
+        // towards the player is on its way out of the world — swallowing either
+        // makes a piece disappear in front of the eye that was following it.
+        if (!into.live || !into.settled || into.stack.Room() <= 0) continue;
+
+        for (std::size_t j = i + 1; j < kSlots; j++) {
+            Pickup &from = pool_[j];
+
+            if (!from.live || !from.settled || !from.stack.Alike(into.stack)) continue;
+
+            const float dx = from.at.x - into.at.x;
+            const float dy = from.at.y - into.at.y;
+
+            if (dx * dx + dy * dy > kGather * kGather) continue;
+
+            const int poured = std::min(into.stack.Room(), from.stack.count);
+            if (poured <= 0) break;
+
+            into.stack.count += poured;
+            from.stack.count -= poured;
+
+            // The younger of the two decides when the pile may be picked up, so
+            // a stack thrown away and then landed on by a felling cannot come
+            // back to hand before the throw's own hold is up.
+            if (from.bornAt + from.holdFor > into.bornAt + into.holdFor) {
+                into.bornAt  = from.bornAt;
+                into.holdFor = from.holdFor;
+            }
+
+            if (from.stack.count <= 0) from.live = false;
+
+            if (into.stack.Room() <= 0) break;
+        }
+    }
+}
+
 void Drops::Update(const World &world, Vector2 player, float dt, float now, Inventory &into) {
+    Merge();
+
     for (Pickup &pickup : pool_) {
         if (!pickup.live) continue;
-
-        if (now - pickup.bornAt > kLifetime) {
-            pickup.live = false;
-            continue;
-        }
 
         // Buried. A tree that goes over into a hillside leaves its wood inside
         // the hill, and every axis of movement is blocked from in there — so it
@@ -171,7 +280,17 @@ void Drops::Update(const World &world, Vector2 player, float dt, float now, Inve
 
         const float distance = std::max(std::sqrt(dx * dx + dy * dy), 1e-3f);
 
-        if (distance < kCollect && (now - pickup.bornAt) > pickup.holdFor) {
+        // Whether there is anywhere for it to go at all.
+        //
+        // Asked before the pull rather than only at the moment of collection, and
+        // that is the whole of what was wrong with a full bag: a pickup with no
+        // room waiting for it was still drawn in, still could not be taken, and
+        // so orbited the player for ever — a shoal of wood following them about
+        // the world. What a full bag means is that the thing stays on the ground,
+        // and staying on the ground includes staying where it is.
+        const bool wanted = into.Room(pickup.stack) > 0;
+
+        if (wanted && distance < kCollect && (now - pickup.bornAt) > pickup.holdFor) {
             const int refused = into.Add(pickup.stack);
 
             if (refused <= 0) {
@@ -194,7 +313,7 @@ void Drops::Update(const World &world, Vector2 player, float dt, float now, Inve
         // its first act, so the next frame fell through to gravity and the item
         // got one nudge per landing instead of a pull. What a player saw was a
         // thing stuttering towards them a hop at a time.
-        const bool drawn = (now - pickup.bornAt) > pickup.holdFor && distance < kReach;
+        const bool drawn = wanted && (now - pickup.bornAt) > pickup.holdFor && distance < kReach;
 
         if (drawn) {
             const float share = 0.35f + 0.65f * (1.0f - distance / kReach);
@@ -258,15 +377,9 @@ void Drops::Update(const World &world, Vector2 player, float dt, float now, Inve
     }
 }
 
-void Drops::Draw(float now) const {
+void Drops::Draw() const {
     for (const Pickup &pickup : pool_) {
         if (!pickup.live) continue;
-
-        // Blinking out its last few seconds, on the same clock it is aged by, so
-        // it keeps time with itself under fast weather.
-        const float remaining = kLifetime - (now - pickup.bornAt);
-
-        if (remaining < kWarning && std::fmod(remaining, 0.36f) < 0.18f) continue;
 
         const float pixel = config::kFloraPixel;
         const float side  = kPictureSide * pixel;

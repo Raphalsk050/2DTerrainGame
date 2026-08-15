@@ -426,7 +426,13 @@ float Sky::HumidityAt(float worldX) const {
     // the first thing anything in this world has ever asked of the temperature.
     const float dried = drought_ * day.dryGain * (0.5f + climate.temperature);
 
-    return std::clamp(climate.humidity + wet_ * day.wetGain - dried, 0.0f, 1.0f);
+    // Rain the column never got does not wet it. Without this a storm passing over
+    // the world greens a desert it is visibly not raining on — the grass ramp and
+    // the growth rate both read this, so the ground would say it had been watered
+    // while the sky said it had not.
+    const float fell = wet_ * (1.0f - DroughtAt(climate));
+
+    return std::clamp(climate.humidity + fell * day.wetGain - dried, 0.0f, 1.0f);
 }
 
 // ------------------------------------------------------------------ the field
@@ -645,12 +651,18 @@ Column Sky::ColumnAt(float worldX) const {
 
     column.cutoff = Cutoff(column.cover);
 
-    // The weather's rain, not this column's. There used to be a twelve-step march
-    // down the band here, measuring how thick the cloud was and raining out of the
-    // thick ones — which is what made a small cluster rain while its neighbour, in
-    // the same weather, stayed dry. It was also four fifths of what this function
-    // cost.
-    column.rain = now_.rain;
+    // The weather's rain, not this column's cloud. There used to be a twelve-step
+    // march down the band here, measuring how thick the cloud was and raining out
+    // of the thick ones — which is what made a small cluster rain while its
+    // neighbour, in the same weather, stayed dry. It was also four fifths of what
+    // this function cost.
+    //
+    // The one thing the column does get to say is whether it is a desert, and it
+    // says it off the climate this function has already read. That is a different
+    // kind of statement from the old one: it is about the country and not about the
+    // cloud, so it is the same answer every time a shower crosses and two
+    // neighbouring columns in one desert agree.
+    column.rain = now_.rain * (1.0f - DroughtAt(climate));
 
     return column;
 }
@@ -792,12 +804,36 @@ float Sky::ShadeAt(float worldX) const {
     return CoverAt(worldX) * held * day;
 }
 
-float Sky::RainAt(float worldX) const {
-    (void)worldX;
+float Sky::DroughtAt(const terrain::Climate &climate) const {
+    const ElementClimate &wants = settings_.drought;
 
-    // The weather's, everywhere. Kept taking a position so the caller does not have
-    // to know that, and so a future local squall has somewhere to go.
-    return now_.rain;
+    return ClimateRamp(wants.goneAt, wants.fullAt, ClimateBell(wants, climate.temperature, climate.humidity));
+}
+
+float Sky::FreezingAt(const terrain::Climate &climate) const {
+    const Settings::Snowfall &s = settings_.snow;
+
+    // Ascending and then turned over, rather than handing ClimateRamp its edges the
+    // other way about.
+    //
+    // That is not a style choice and it cost a probe to find: ClimateRamp guards its
+    // span with `max(edge1 - edge0, 1e-3)`, so a descending pair divides by a
+    // thousandth and every temperature in the world clamps to nothing. It returned
+    // zero everywhere and a storm in the far north came down as rain, with nothing
+    // anywhere to say why.
+    return 1.0f - SmoothStep(s.below, s.above, climate.temperature);
+}
+
+float Sky::FreezingAt(float worldX) const {
+    return FreezingAt(terrain::ClimateAt(worldX, terrain_));
+}
+
+float Sky::RainAt(float worldX) const {
+    // No cost at all when nothing is falling, which is most of the time and is what
+    // spares every caller of this a climate read on a clear afternoon.
+    if (now_.rain <= 0.0f) return 0.0f;
+
+    return now_.rain * (1.0f - DroughtAt(terrain::ClimateAt(worldX, terrain_)));
 }
 
 float Sky::Bearing() const {
@@ -1312,6 +1348,16 @@ Vector2 Sky::RainFall() const {
     return Unit({Mean() * settings_.rainDrift, settings_.rainSpeed}, {0.0f, 1.0f});
 }
 
+Vector2 Sky::SnowFall() const {
+    const Settings::Snowfall &s = settings_.snow;
+
+    // The same wind against a much slower fall, which is the whole difference. A
+    // flake carries less of the lean than a drop does — see Snowfall::drift for why
+    // that reads backwards and is right anyway — but it is falling at a seventh of
+    // the speed, so what comes out is still a good deal more slanted.
+    return Unit({Mean() * settings_.rainDrift * s.drift, settings_.rainSpeed * s.speed}, {0.0f, 1.0f});
+}
+
 float Sky::RainReach() const {
     // Sized from the gale rather than from the wind now blowing, and that is the
     // difference between a buffer and a bug. The ground under the view is fetched
@@ -1327,7 +1373,88 @@ float Sky::RainReach() const {
 
     const Vector2 hardest = Unit({reach * settings_.rainDrift, settings_.rainSpeed}, {0.0f, 1.0f});
 
-    return std::abs(hardest.x / std::max(hardest.y, 1e-3f)) * std::max(settings_.rainSpan, 1.0f);
+    // And the same for a flake, which is the one that decides it. A flake falls at
+    // a seventh of a drop's speed, so even carrying under half the lean it slants
+    // two or three times as far — and a reach sized for the rain alone would leave
+    // a strip along the upwind edge of a blizzard with no snow in it and the ground
+    // under the far edge never fetched.
+    //
+    // Taken as the larger of the two rather than switched on whether it is snowing,
+    // because whether it is snowing is a property of a column and this is a figure
+    // for the whole view. The cost is a wider fetch in warm country, which is what
+    // the paragraph above already accepts for light weather.
+    const Vector2 coldest = Unit({reach * settings_.rainDrift * settings_.snow.drift,
+                                  settings_.rainSpeed * settings_.snow.speed},
+                                 {0.0f, 1.0f});
+
+    const float lean = std::max(std::abs(hardest.x / std::max(hardest.y, 1e-3f)),
+                                std::abs(coldest.x / std::max(coldest.y, 1e-3f)));
+
+    return lean * std::max(settings_.rainSpan, 1.0f);
+}
+
+void Sky::DrawFlake(Rectangle view, const Ground &ground, int drop, float gauge, float scale, float column, float from,
+                    Vector2 fall) const {
+    const Settings &s           = settings_;
+    const Settings::Snowfall &f = s.snow;
+
+    const float pixel = std::max(config::kPixelSize, 1.0f);
+    const float span  = std::max(s.rainSpan, 1.0f);
+
+    // The same cycle a drop runs, at the flake's own speed. Its place in that cycle
+    // comes from the same hash, so a shower that is half sleet does not have its
+    // rain and its snow starting from two different heights.
+    const float travel = std::fmod(Hash(drop * 104729 + 7) * span + time_ * s.rainSpeed * f.speed * scale, span);
+
+    // Across its own path, and this is the whole of what says snow.
+    //
+    // A drop falls; a flake is light enough to be pushed about by air that is not
+    // going anywhere. Read off the clock and the flake's own phase rather than off
+    // any field, because it is not a property of a place — two flakes side by side
+    // wander in different directions, which is exactly what a field cannot say.
+    //
+    // Two waves and not one, at rates that do not divide. A single sine is a
+    // pendulum: the flake retraces the same arc for ever, and a screenful of them
+    // beats together into a pattern the eye finds within a second. Beaten against a
+    // faster, smaller one, the path never closes and what it draws is the tumbling
+    // a flake actually does.
+    const float phase = Hash(drop * 7717 + 5) * 2.0f * kPi;
+
+    const float sway =
+        std::sin(time_ * f.rate + phase) + 0.45f * std::sin(time_ * f.rate * 2.7f + phase * 3.1f);
+
+    const float swing = sway * f.wander * (0.55f + 0.45f * gauge);
+
+    // And a little up and down with it, at a third of the amount. A flake that only
+    // moved sideways reads as one being blown along a wire; what lifts on a gust and
+    // settles again is what reads as weightless.
+    const float bob = std::cos(time_ * f.rate * 1.6f + phase) * f.wander * 0.3f;
+
+    Vector2 at = {column + fall.x * travel + swing, from + fall.y * travel + bob};
+
+    // Off the view. Tested before the ground under it, for the reason the rain
+    // gives: most of what this loop reaches is off the side, and finding the ground
+    // beneath one costs eight samples of noise.
+    if (at.y < view.y || at.y > view.y + view.height) return;
+    if (at.x < view.x - pixel || at.x > view.x + view.width + pixel) return;
+
+    // Landed. A flake is a single square and has no length to cut back, so unlike a
+    // streak it is simply gone the moment it reaches what it fell onto.
+    if (at.y > GroundAt(ground, at.x, terrain_)) return;
+
+    // Lighter than the air behind it, on the same terms as a drop — see the note
+    // beside the rain's own colour. Snow is nearer to white than rain is, because
+    // it is a solid thing scattering light rather than a lens bending it.
+    const Color behind = AirAt(at.y, now_.cover);
+    const Color lit    = Mix(behind, f.tone, 0.70f + 0.25f * gauge);
+
+    // On the world's own lattice, the way every square in this world is placed. A
+    // flake drawn at a fractional offset lands on different screen pixels from one
+    // frame to the next and shimmers.
+    const float x = std::floor(at.x / pixel) * pixel;
+    const float y = std::floor(at.y / pixel) * pixel;
+
+    DrawRectangleRec({x, y, pixel, pixel}, Fade(lit, 0.45f + 0.45f * gauge));
 }
 
 void Sky::DrawRain(Rectangle view, const Ground &ground) const {
@@ -1338,6 +1465,7 @@ void Sky::DrawRain(Rectangle view, const Ground &ground) const {
     const Settings &s = settings_;
 
     const Vector2 fall = RainFall();
+    const Vector2 flakeFall = SnowFall();
 
     const float perDrop = terrain::kFeatureSpan / std::max(s.rainDensity, 1.0f);
     const float span    = std::max(s.rainSpan, 1.0f);
@@ -1376,14 +1504,41 @@ void Sky::DrawRain(Rectangle view, const Ground &ground) const {
     const int bases    = static_cast<int>(std::ceil((view.width + 2.0f * lean) / kBaseStep)) + 2;
 
     std::vector<float> base(static_cast<std::size_t>(bases));
-    for (int i = 0; i < bases; i++) base[i] = UndersideAt(firstX + static_cast<float>(i) * kBaseStep);
+
+    // And how much of the weather's rain reaches each of those columns, which
+    // outside a desert is all of it. On the same grid as the cloud base and for the
+    // same reason: it costs two noise fields to answer and a drop is four pixels
+    // from its neighbour, so it is a per-sample question and not a per-drop one.
+    std::vector<float> wet(static_cast<std::size_t>(bases));
+
+    // And how much of what does reach them arrives frozen. On the same grid and out
+    // of the same climate read, which is the whole reason it costs nothing: the
+    // column had to be asked about the drought anyway.
+    std::vector<float> chill(static_cast<std::size_t>(bases));
+
+    for (int i = 0; i < bases; i++) {
+        const float at = firstX + static_cast<float>(i) * kBaseStep;
+
+        const terrain::Climate climate = terrain::ClimateAt(at, terrain_);
+
+        base[i]  = UndersideAt(at);
+        wet[i]   = now_.rain * (1.0f - DroughtAt(climate));
+        chill[i] = FreezingAt(climate);
+    }
 
     for (int drop = first; drop <= last; drop++) {
-        // Thinned by how hard it is raining, from the drop's own hash rather than by
-        // a count: a drizzle is the same drops falling, fewer of them.
-        if (Hash(drop * 7919 + 13) > now_.rain) continue;
-
         const float column = (drop + Hash(drop)) * perDrop;
+
+        // Where this one is between the two samples either side of it. Worked out
+        // before the thinning, because the thinning now depends on it.
+        const float along = (column - firstX) / kBaseStep;
+        const int cell    = std::clamp(static_cast<int>(along), 0, bases - 2);
+        const float into  = std::clamp(along - static_cast<float>(cell), 0.0f, 1.0f);
+
+        // Thinned by how hard it is raining *here*, from the drop's own hash rather
+        // than by a count: a drizzle is the same drops falling, fewer of them, and
+        // a desert is the far end of the same thinning — none of them.
+        if (Hash(drop * 7919 + 13) > wet[cell] + (wet[cell + 1] - wet[cell]) * into) continue;
 
         // Size. Three rough gauges rather than one, because rain of a single gauge
         // is a comb; the big ones are longer, faster and more opaque, which is most
@@ -1398,19 +1553,27 @@ void Sky::DrawRain(Rectangle view, const Ground &ground) const {
 
         const float length = s.rainLength * scale;
 
+        // The cloud this one fell out of, read between the same two samples.
+        // Interpolated rather than picked, or the top of the fall would step down
+        // in fifty-pixel blocks.
+        const float from = base[cell] + (base[cell + 1] - base[cell]) * into;
+
+        // Whether it is coming down frozen.
+        //
+        // Its own hash, independent of the one that decided this drop falls at all,
+        // so which drops are flakes has nothing to do with which drops there are.
+        // Rolled per drop rather than switched per region, which is what gives the
+        // belt between the two a shower of both at once — sleet, and the honest
+        // shape of the edge of a cold country.
+        if (Hash(drop * 5171 + 29) < chill[cell] + (chill[cell + 1] - chill[cell]) * into) {
+            DrawFlake(view, ground, drop, gauge, scale, column, from, flakeFall);
+            continue;
+        }
+
         // Position along the fall, over a span that does not depend on the weather,
         // so the speed is exactly `rainSpeed` whatever the sky is doing. Bigger drops
         // fall faster, which is also true.
         const float travel = std::fmod(Hash(drop * 104729 + 7) * span + time_ * s.rainSpeed * scale, span);
-
-        // The cloud this one fell out of, read between the two samples either side
-        // of its column. Interpolated rather than picked, or the top of the rain
-        // would step down in fifty-pixel blocks.
-        const float along = (column - firstX) / kBaseStep;
-        const int cell    = std::clamp(static_cast<int>(along), 0, bases - 2);
-        const float into  = std::clamp(along - static_cast<float>(cell), 0.0f, 1.0f);
-
-        const float from = base[cell] + (base[cell + 1] - base[cell]) * into;
 
         Vector2 head       = {column + fall.x * travel, from + fall.y * travel};
         const Vector2 tail = {head.x - fall.x * length, head.y - fall.y * length};
@@ -1461,6 +1624,163 @@ void Sky::DrawRain(Rectangle view, const Ground &ground) const {
         // were; the finest are what got fainter, which is where the weight the width
         // used to carry has gone.
         DrawStreak(tail, head, pixel, Fade(line, 0.40f + 0.50f * gauge));
+    }
+}
+
+// ------------------------------------------------------------------- the mist
+
+float Sky::MistAt() const {
+    const Settings::Mist &m = settings_.mist;
+
+    // Under a closed sky and no other. Ramped from the threshold to a completely
+    // covered sky rather than switched at it, so a gathering overcast brings the
+    // fog up with it instead of turning it on.
+    const float closed = SmoothStep(m.gathersAt, m.fullAt, now_.cover);
+
+    // And the rain on top, which is damp air falling through damper air.
+    const float damp = std::min(closed + m.rainLift * now_.rain, 1.0f);
+
+    // Then the wind, which is the one thing that takes it away. Read off the mean
+    // rather than off a gust: what clears a valley is the air moving through it for
+    // a while, not a squall crossing it.
+    const float blown = std::clamp(std::fabs(now_.wind) / std::max(gale_, 1e-3f), 0.0f, 1.0f);
+
+    return std::clamp(damp * (1.0f - m.windClears * blown), 0.0f, 1.0f);
+}
+
+void Sky::DrawMist(Rectangle view, const Ground &ground) const {
+    const Settings::Mist &m = settings_.mist;
+
+    // No weather, no cost. This is the common case by a long way and it is worth
+    // one test to keep the whole pass off a clear afternoon's frame.
+    const float thickness = MistAt() * m.strength;
+    if (thickness <= 0.01f) return;
+
+    const float cell = std::max(m.cell, 1.0f);
+
+    // Both fields carried along by the wind on the same swept bearing the cloud
+    // deck uses, at their own speeds. See Settings::Mist::nearWind.
+    const float nearDrift = swept_ * m.nearWind;
+    const float farDrift  = swept_ * m.farWind;
+
+    // And moving through their own depth as they go, so what arrives is a
+    // different bank rather than the same one further along. The offsets are set
+    // once here rather than inside the loops: a NoiseShape is a handful of floats
+    // and copying one per cell would be the most expensive thing in the pass.
+    terrain::NoiseShape near = m.near;
+    terrain::NoiseShape far  = m.far;
+
+    near.offsetZ += time_ * m.churn;
+
+    // The far field at a share of it, in the same proportion as its drift. A
+    // distant bank should change more slowly as well as travel more slowly, or the
+    // parallax is only in one of the two and the eye notices which.
+    far.offsetZ += time_ * m.churn * (m.farWind / std::max(m.nearWind, 1e-3f));
+
+    // Where the top of the bank stands. The nominal ground, lifted, and then moved
+    // by a very slow swell so the surface of the fog is a surface and not a ruled
+    // line drawn across the county.
+    const float level = settings_.air.horizon - m.rise;
+
+    // Snapped to the cell grid and anchored to the world, so the squares do not
+    // crawl as the view scrolls — the same rule the atmosphere bands, the terrain
+    // and the grass all keep.
+    const float firstX = std::floor((view.x - cell) / cell) * cell;
+    const float lastX  = view.x + view.width + cell;
+
+    // Nothing above the highest the bank can reach, and nothing below the view.
+    const float ceiling = std::max(view.y, std::floor((level - m.swell - m.fade) / cell) * cell);
+    const float floor   = view.y + view.height;
+
+    if (ceiling >= floor) return;
+
+    const int rows = static_cast<int>((floor - ceiling) / cell) + 1;
+    if (rows <= 0) return;
+
+    // The air's own colour at each height, lifted towards white, worked out once
+    // for the whole pass.
+    //
+    // A function of the height alone, so a row of two hundred cells shares one — and
+    // the reason it comes from the air at all is that fog is the same colour as what
+    // is behind it, only nearer. Held in a small buffer rather than recomputed
+    // because the loop below runs columns first: the row is the inner axis now, and
+    // an eight-octave air read per cell would be most of the pass.
+    std::vector<Color> tone(static_cast<std::size_t>(rows));
+
+    for (int r = 0; r < rows; r++) {
+        const float y = ceiling + static_cast<float>(r) * cell;
+
+        tone[static_cast<std::size_t>(r)] =
+            Mix(AirAt(y + cell * 0.5f, now_.cover), Color{255, 255, 255, 255}, m.pale);
+    }
+
+    // Columns outside, rows inside, and that order is worth stating: where the
+    // ground is and where the top of the bank is are both properties of a column,
+    // and asking them per cell was two thirds of the pass's noise for an answer
+    // that could not change down a column.
+    for (float x = firstX; x < lastX; x += cell) {
+        const float mx = x + cell * 0.5f;
+
+        // The top of the bank here. It rolls on a field of its own — see
+        // Mist::surface — so the fog has a surface rather than a ruled line.
+        const float top = level + Swing(Share({mx - farDrift, 0.0f}, m.surface)) * m.swell;
+
+        // Stopped at the ground. A bank of fog lies *on* the world; painted through
+        // it, every hillside would be seen through its own weather and the whole
+        // effect would read as a tint over the frame.
+        const float land = GroundAt(ground, mx, terrain_);
+
+        // A hilltop standing clear out of the bank, which is the whole point of
+        // giving it a level top. Nothing to draw in this column at all.
+        if (land <= top) continue;
+
+        for (int r = 0; r < rows; r++) {
+            const float y  = ceiling + static_cast<float>(r) * cell;
+            const float my = y + cell * 0.5f;
+
+            if (my > land) break;
+
+            const float under = my - top;
+            if (under <= 0.0f) continue;
+
+            // Two terms out of the same distance, and they are two different facts.
+            // The first is the top edge — how far in from the surface of the bank
+            // this cell is, over a few cells. The second is the settling: fog is
+            // thickest along the ground and thins upward over the whole depth of
+            // the bank, which is what keeps it lying in the valleys rather than
+            // hanging over them.
+            const float deep = std::min(under / std::max(m.fade, 1.0f), 1.0f);
+
+            const float settled = std::min(under / std::max(m.rise, 1.0f), 1.0f);
+
+            const float lying = m.floorShare + (1.0f - m.floorShare) * settled;
+
+            // And what is actually in the air there: two fields crossing at
+            // different speeds, neither able to close the bank on its own.
+            const float thick = Share({mx - nearDrift, my}, near) * m.nearShare
+                              + Share({mx - farDrift, my}, far) * (1.0f - m.nearShare);
+
+            // Opened up rather than used raw, and centred on the field's own middle
+            // rather than on where the middle looks like it should be.
+            //
+            // A summed fbm does not fill [0,1] — it crowds hard around a half, and
+            // kFbmPeak is set so that its *ninety-ninth percentile* reaches the ends.
+            // So a window written at what looks like a sensible threshold either
+            // catches nothing or catches everything, and both were drawn before this
+            // was: a bank that was invisible, and then one that closed the whole
+            // screen. Symmetric about a half, the average share is a half and the
+            // extremes are what the extremes of the field are.
+            //
+            // The window is what turns an even grey wall into banks with clearer air
+            // between them, which is what fog is: below the first figure there is
+            // nothing in the air, above the second it is closed.
+            const float share = SmoothStep(0.32f, 0.72f, thick);
+
+            const float alpha = thickness * deep * lying * share;
+            if (alpha <= 0.012f) continue;
+
+            DrawRectangleRec({x, y, cell, cell}, Fade(tone[static_cast<std::size_t>(r)], alpha));
+        }
     }
 }
 

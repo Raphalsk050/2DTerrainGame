@@ -103,7 +103,7 @@ Color Outline(Color contour) {
 // is which greens the ramp is made of, which is the one thing that is not a
 // property of the shape.
 struct SodPainter {
-    const soil::Ramp *ramps = nullptr;
+    const sod::Look *looks = nullptr;
     int count               = 0;
     int firstColumn         = 0;
     float spacing           = 1.0f;
@@ -112,7 +112,7 @@ struct SodPainter {
     Color operator()(const marching_squares::Texel &texel) const {
         const int column = static_cast<int>(std::floor(texel.at.x / spacing)) - firstColumn;
 
-        const soil::Paint paint{.ramp   = ramps[std::clamp(column, 0, count - 1)],
+        const soil::Paint paint{.ramp   = looks[std::clamp(column, 0, count - 1)].ramp,
                                 .grain  = sod::kGrassGrain,
                                 .patch  = sod::kGrassPatch,
                                 .strata = sod::kGrassStrata,
@@ -309,7 +309,12 @@ float World::GeneratedValue(Element element, Vector2 world, const terrain::Groun
     }
 
     case Generator::Cover: {
-        const float thickness = CoverThickness(spawn, world.x, climate.temperature, climate.humidity);
+        // The land's own surface here, which a cover with a snow line is measured
+        // against. Free rather than a second evaluation of the surface: the depth
+        // is signed and measured from it, so the height is the position minus it.
+        const float surface = world.y - ground.depth;
+
+        const float thickness = CoverThickness(spawn, world.x, surface, climate.temperature, climate.humidity);
         if (thickness <= 0.0f) return 0.0f;
 
         // How far inside the slab this vertex is, in pixels: the smaller of its
@@ -1961,7 +1966,7 @@ void World::ReadSod(Rectangle view) {
         }
 
         if (highest - kAbove > view.y + view.height || lowest + kBelow < view.y) {
-            sodRamp_.clear();
+            sodLook_.clear();
             sodCover_.clear();
             sodTop_.clear();
             sodPush_.clear();
@@ -1973,7 +1978,7 @@ void World::ReadSod(Rectangle view) {
         }
     }
 
-    sodRamp_.resize(static_cast<std::size_t>(columns));
+    sodLook_.resize(static_cast<std::size_t>(columns));
     sodCover_.assign(static_cast<std::size_t>(columns), 1.0f);
     sodTop_.assign(static_cast<std::size_t>(columns), 0.0f);
     sodPush_.assign(static_cast<std::size_t>(columns), 0.0f);
@@ -2034,14 +2039,29 @@ void World::ReadSod(Rectangle view) {
             float cover = 0.0f;
 
             if (SurfaceOf(x, top)) {
-                // Grass grows on soil and on nothing else, which is the whole of
-                // the rule: dig past the soil and the floor is rock and stays
-                // bare, and a desert or a snowfield grows nothing because its
-                // surface is not soil either. Nothing here has to know about sand
-                // or snow.
+                // Which grounds hold a ground cover at all.
+                //
+                // Soil and sand, and nothing else: dig past either and the floor
+                // is rock and stays bare, and a snowfield grows nothing because
+                // what is on top of it is snow.
+                //
+                // Sand is the new one and it is not "grass in the desert". This
+                // number is how *established* a column is, which is what digging
+                // and regrowth move; how thick the vegetation is at all is the
+                // biome's, and in a desert sod::Cover says a quarter of the cells
+                // and a good share of stones. So what a full cover on sand buys is
+                // that the desert is dressed rather than swept — dry stalks and
+                // grit standing between the scrub — and every column of it is
+                // settled ground rather than ground that is waiting to recover.
+                //
+                // The band of green the terrain paints is unaffected and stays
+                // soil's: it is the soil's own field read a second way, and under a
+                // desert the soil is thirty pixels down with sand on top of it.
                 const Vector2 under = {x, top + static_cast<float>(spacing_) * 0.5f};
 
-                if (OccupantAt(under) == Element::Soil) cover = 1.0f;
+                const std::optional<Element> ground = OccupantAt(under);
+
+                if (ground == Element::Soil || ground == Element::Sand) cover = 1.0f;
             }
 
             // The climate with them, since it is a function of the column alone
@@ -2051,7 +2071,7 @@ void World::ReadSod(Rectangle view) {
 
         // Not cached with the rest: the season turns and the air dries out, so
         // the same column ramps differently from one day to the next.
-        sodRamp_[static_cast<std::size_t>(i)] = sod::RampAt(column.climate, season, turn.blend, sky_.HumidityAt(x));
+        sodLook_[static_cast<std::size_t>(i)] = sod::LookAt(column.climate, season, turn.blend, sky_.HumidityAt(x));
 
         // As a share of the hardest this world can blow, so a field is at rest on a
         // still day and near its limit in a storm. Per column rather than per view,
@@ -2325,8 +2345,8 @@ sod::Blades World::Grass() const {
     return {.top         = sodTop_.data(),
             .cover       = sodCover_.data(),
             .push        = sodPush_.data(),
-            .ramp        = sodRamp_.data(),
-            .count       = static_cast<int>(sodRamp_.size()),
+            .look        = sodLook_.data(),
+            .count       = static_cast<int>(sodLook_.size()),
             .firstColumn = sodFirstColumn_,
             .spacing     = config::kFloraPixel,
             .standing    = sodStanding_.data(),
@@ -2873,9 +2893,9 @@ void World::DrawTerrain(Rectangle view) const {
     // not a material: it is the soil's own field read a second way. Rasterised by
     // the same routine at the same texel size, so it lands on the ground's own
     // staircase by construction rather than by being lined up with it.
-    if (config::kPixelArt && !sodRamp_.empty()) {
-        const SodPainter grass{.ramps       = sodRamp_.data(),
-                               .count       = static_cast<int>(sodRamp_.size()),
+    if (config::kPixelArt && !sodLook_.empty()) {
+        const SodPainter grass{.looks       = sodLook_.data(),
+                               .count       = static_cast<int>(sodLook_.size()),
                                .firstColumn = sodFirstColumn_,
                                .spacing     = config::kFloraPixel,
                                .seed        = settings_.seed + kSodSeed};
@@ -3006,6 +3026,12 @@ void World::DrawStars(Rectangle view) const {
     // No lean to allow for — a star is drawn where it is — so the view itself is the
     // whole of what has to be covered.
     sky_.DrawStars(view, GroundUnder(view, 0.0f));
+}
+
+void World::DrawMist(Rectangle view) const {
+    // A cell either side, since the bank is drawn on its own world-anchored grid and
+    // the cell straddling the edge of the view has to be prepared like any other.
+    sky_.DrawMist(view, GroundUnder(view, 32.0f));
 }
 
 void World::DrawVertexOverlay(Rectangle view, float vertexSize, Color filledColor, Color emptyColor) const {

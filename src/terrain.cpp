@@ -143,10 +143,10 @@ float Quantile(const NoiseShape &shape, float coverage, Vector2 centre, float wi
 // What it buys is flat ground on a slope. A continuous incline is walkable but
 // featureless; ledges give somewhere to stand, and the risers between them read
 // as cliffs.
-float Terrace(float height, const SurfaceSettings &s) {
-    if (s.terrace <= 0.0f || s.terraceStep <= 0.0f) return height;
+float Snap(float height, float step, float strength, float sharpness) {
+    if (strength <= 0.0f || step <= 0.0f) return height;
 
-    const float at = height / s.terraceStep;
+    const float at = height / step;
 
     // Which ledge this is on, and how far up the riser above it.
     const float ledge = std::floor(at);
@@ -164,14 +164,19 @@ float Terrace(float height, const SurfaceSettings &s) {
     // where a ledge is, steep where the riser is, and continuous through both. At
     // a sharpness of one it is the identity and there is no terrace at all, which
     // is the right answer for a knob turned down.
-    const float sharp = std::max(s.terraceSharp, 1.0f);
+    const float sharp = std::max(sharpness, 1.0f);
 
     const float up   = std::pow(climb, sharp);
     const float down = std::pow(1.0f - climb, sharp);
 
     const float shaped = (up + down > 1e-9f) ? up / (up + down) : climb;
 
-    return height + ((ledge + shaped) * s.terraceStep - height) * std::min(s.terrace, 1.0f);
+    return height + ((ledge + shaped) * step - height) * std::min(strength, 1.0f);
+}
+
+// The world's own terrace, which is the ledges every hillside is walked up.
+float Terrace(float height, const SurfaceSettings &s) {
+    return Snap(height, s.terraceStep, s.terrace, s.terraceSharp);
 }
 
 // Horizontal position the surface is read at.
@@ -367,7 +372,80 @@ void Calibrate(Settings &settings) {
 
     caves.calibration.regionShallow = Quantile(Reseed(caves.region, settings.seed), caves.regionCoverageShallow, centre,
                                               kSampledWidth, kSampledDepth);
+
+    // And where the mountains are.
+    //
+    // Over a far wider run than the caves, because the field it measures is the
+    // slowest in the generator: a range is tens of thousands of pixels across, so a
+    // window the width of the cave sample would hold two or three of them and the
+    // quantile would be a statement about those two rather than about the world.
+    //
+    // Square rather than a line, even though the range field is only ever read at
+    // y = 0. Quantile lays its samples on a grid, so a run with no height to it
+    // spends ninety-six of its ninety-six rows re-reading the same ninety-six
+    // columns — a hundred features estimated from a hundred samples. Perlin is
+    // isotropic, so every plane through it is distributed like every other and a
+    // square of the field answers the same question with a hundred times the
+    // evidence.
+    constexpr float kRangeSpan = 600000.0f;
+
+    settings.calibration.range = Quantile(Reseed(settings.surface.range, settings.seed),
+                                          settings.surface.rangeCoverage, {0.0f, 0.0f}, kRangeSpan, kRangeSpan);
 }
+
+namespace {
+
+// Pixels the mountains add to a column, or nothing where there is no range.
+//
+// Two fields, and the order they are asked in is the whole of what makes this
+// affordable. `range` says whether this stretch of world has mountains at all and
+// is one octave of a very slow field; `ridge` is the crest itself and costs three
+// more. Everything in the generator that touches the ground reads Height — the
+// skyline, the grass band, every vertex of every chunk — so a layer that sampled
+// both everywhere would be paid for by the whole world to draw the sixth of it
+// that has mountains in it. Asked this way round, the world outside a range pays
+// one octave and stops.
+float Mountains(float worldX, const Settings &s) {
+    const SurfaceSettings &surface = s.surface;
+
+    if (surface.ridgeAmplitude <= 0.0f) return 0.0f;
+
+    const Vector2 at = {worldX, 0.0f};
+
+    const float cutoff = s.calibration.range;
+
+    const float where =
+        SmoothStep(cutoff - surface.rangeEdge, cutoff + surface.rangeEdge, Sample(at, Reseed(surface.range, s.seed)));
+
+    if (where <= 0.0f) return 0.0f;
+
+    // The crest. `1 - |signed|` creases along every zero crossing of the field
+    // beneath it, so what this draws is a run of sharp ridges with valleys between
+    // them rather than the rounded swell a smooth field gives at any amplitude.
+    const float fold = 1.0f - std::abs(Signed(at, Reseed(surface.ridge, s.seed)));
+
+    // Pushed towards its own top, which narrows what is left standing. See
+    // SurfaceSettings::ridgeSharp.
+    const float crest = std::pow(std::clamp(fold, 0.0f, 1.0f), std::max(surface.ridgeSharp, 0.05f));
+
+    // Squared into the range, not ramped. A range rises out of the country around
+    // it and the foothills are the part of it that is barely there; a linear ramp
+    // puts half a mountain at the border and reads as a wall of hills with a
+    // straight edge along the outside.
+    const float rise = crest * surface.ridgeAmplitude * where * where;
+
+    // Then cut into shelves, which is what makes a face something to walk rather
+    // than something to slide down. The crest alone, so the plains keep the ledges
+    // they were tuned with — see SurfaceSettings::shelfStep.
+    //
+    // The world's own terrace runs over this afterwards, in Height. The two do not
+    // fight: a shelf step that is a whole number of terrace steps lands its risers
+    // on the fine grid, so what comes out is a broad flat run made of ledges rather
+    // than two staircases beating against each other.
+    return Snap(rise, surface.shelfStep, surface.shelf, surface.terraceSharp);
+}
+
+} // namespace
 
 float Height(float worldX, const Settings &s) {
     const SurfaceSettings &surface = s.surface;
@@ -385,6 +463,8 @@ float Height(float worldX, const Settings &s) {
     float elevation = Signed(at, Reseed(surface.relief, s.seed)) * surface.reliefAmplitude;
     elevation += Signed(at, Reseed(surface.hills, s.seed)) * surface.hillAmplitude * relief;
     elevation += Signed(at, Reseed(surface.detail, s.seed)) * surface.detailAmplitude * relief;
+
+    elevation += Mountains(worldX, s);
 
     // Y grows downward, so elevation is subtracted: more of it is higher ground
     // and a smaller Y.

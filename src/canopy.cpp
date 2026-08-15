@@ -107,6 +107,17 @@ constexpr float kLeafDither = 0.13f;
 constexpr float kSeamDrop      = 1.5f;
 constexpr float kUndersideDrop = 2.4f;
 
+// How deep the snow lies on a crown, in texels.
+//
+// Three, and it is bounded from both sides by the size of the thing it is lying
+// on. A mass of foliage is about nine texels tall — enough to carry a crest, a
+// middle and a shaded belly — so a cap of four or more would be most of a mass and
+// the tree would come out as a white blob with green under it. One texel is a line
+// drawn along the top, which is the same failure the grass band had at one texel
+// and for the same reason: a single row cannot carry a lit face and a shaded edge,
+// so it reads as an outline rather than as a layer.
+constexpr int kSnowDeep = 3;
+
 // The sheet, in texels. One slot holds the largest plant the table can produce
 // at the largest size it rolls.
 constexpr int kSlotW = 96;
@@ -651,11 +662,67 @@ void LaySun(Canvas &canvas) {
     for (float &value : canvas.sun) value = std::clamp(1.0f - value / reach, 0.0f, 1.0f);
 }
 
-void Paint(const Canvas &canvas, const flora::SpeciesPalette &palette, int seed, std::vector<Color> &out) {
+// Whether a texel is part of the plant at all — foliage, trunk or limb.
+//
+// One test rather than two, because what snow lands on is the top of the *tree*
+// and a bare winter branch catches it exactly as a crown does.
+bool Solid(const Canvas &canvas, int x, int y) {
+    if (!canvas.Holds(x, y)) return false;
+
+    const std::size_t at = canvas.Index(x, y);
+
+    return canvas.leaf[at] > kLeafThreshold || canvas.wood[at] > 0.0f;
+}
+
+// How much snow is lying on a texel, in [0,1].
+//
+// A count of how far below the exposed top of its own mass the texel sits, which
+// is the whole of it: snow lies on what faces the sky and on nothing else, and
+// "faces the sky" at this size means "there is nothing directly above it". So the
+// first texel under open air is full, the one below it less, and by kSnowDeep
+// there is none.
+//
+// Straight up rather than along the key the shading uses. Snow falls; it does not
+// arrive at an angle, and lighting it from the same direction as the leaves is
+// what the tone below is for.
+//
+// The depth wanders a texel either way from the plant's own noise, so a crown does
+// not come out with a level white line ruled across it — which is precisely what a
+// fixed depth draws, and it reads as a stripe rather than as weather.
+float Snowed(const Canvas &canvas, int x, int y, int seed) {
+    if (!Solid(canvas, x, y)) return 0.0f;
+
+    const auto fx = static_cast<float>(x);
+    const auto fy = static_cast<float>(y);
+
+    const float deep =
+        std::max(1.0f, static_cast<float>(kSnowDeep) + (Value(fx / 3.4f, fy / 3.4f, seed + 131) - 0.5f) * 2.4f);
+
+    for (int up = 1; up <= static_cast<int>(deep) + 1; up++) {
+        if (!Solid(canvas, x, y - up)) {
+            return std::clamp(1.0f - static_cast<float>(up - 1) / deep, 0.0f, 1.0f);
+        }
+    }
+
+    return 0.0f;
+}
+
+void Paint(const Canvas &canvas, const flora::SpeciesPalette &palette, bool snowy, int seed, std::vector<Color> &out) {
     out.assign(static_cast<std::size_t>(canvas.w) * canvas.h, Color{0, 0, 0, 0});
 
     Color ramp[kLeafTones];
     BuildRamp(palette, ramp);
+
+    // The snow, taken from the material's own row rather than from four whites
+    // written here.
+    //
+    // A crown under snow and the ground under the same tree have to be the same
+    // white, and the ground's is in the element table. Written down twice, they
+    // would agree on the day it was typed and stop agreeing the first time
+    // somebody retunes one of them — and a tree wearing a slightly different snow
+    // from the field it stands in is exactly the kind of wrongness nobody can name
+    // while looking straight at it.
+    const Color *lying = Def(Element::Snow).paint.tone;
 
     for (int y = 0; y < canvas.h; y++) {
         for (int x = 0; x < canvas.w; x++) {
@@ -726,6 +793,29 @@ void Paint(const Canvas &canvas, const flora::SpeciesPalette &palette, int seed,
                 if (Value(fx / 9.0f, fy / 1.15f, seed + 71) > 0.80f) colour = Shade(colour, 0.62f);
             }
 
+            // And then the snow over all of it, where the tree is standing in a
+            // snowfield.
+            //
+            // Laid last, over both the leaves and the wood, because that is what it
+            // does: it is not a tone of the foliage, it is a material sitting on
+            // top of one. Blended rather than replaced, so the tone underneath
+            // still shows through the thinner edge of the cap — a hard white lid
+            // reads as paint, and a crown is not a smooth surface for snow to sit
+            // flat on.
+            if (snowy && colour.a != 0) {
+                const float lies = Snowed(canvas, x, y, seed);
+
+                if (lies > 0.0f) {
+                    // The lit crest and the body under it, which is as much relief
+                    // as three texels of snow can carry. The deepest of the four
+                    // tones is left for where the cap runs out, so its edge is a
+                    // shadowed rim rather than a cut.
+                    const int tone = (lies > 0.72f) ? 3 : (lies > 0.34f ? 2 : 1);
+
+                    colour = Blend(colour, lying[tone], std::min(lies * 1.25f, 1.0f));
+                }
+            }
+
             out[at] = colour;
         }
     }
@@ -733,10 +823,19 @@ void Paint(const Canvas &canvas, const flora::SpeciesPalette &palette, int seed,
 
 } // namespace
 
-std::uint64_t Sheet::Key(std::int64_t cell, flora::Stage stage, flora::Season season) {
-    // A cell index shifted up by four, which is exact for any world anyone can
-    // walk across: it leaves sixty bits of cell, and a cell is a hundred pixels.
-    return (static_cast<std::uint64_t>(cell) << 4) | (flora::StageIndex(stage) << 2) | flora::SeasonIndex(season);
+std::uint64_t Sheet::Key(std::int64_t cell, flora::Stage stage, flora::Season season, bool snowy) {
+    // A cell index shifted up by five, which is exact for any world anyone can
+    // walk across: it leaves fifty-nine bits of cell, and a cell is a hundred
+    // pixels.
+    //
+    // Snow is a bit of the key and not a tint applied at the draw, because it is
+    // baked into the sprite: a cap of snow is texels, laid on whichever of them
+    // face the sky, and there is no colour multiply over a finished tree that could
+    // produce one. It is also the reason it costs nothing per frame — a tree in a
+    // snowfield is baked once with its snow on and drawn from the sheet like any
+    // other.
+    return (static_cast<std::uint64_t>(cell) << 5) | (static_cast<std::uint64_t>(snowy) << 4)
+           | (flora::StageIndex(stage) << 2) | flora::SeasonIndex(season);
 }
 
 int Sheet::Capacity() const { return kColumns * kRows; }
@@ -789,10 +888,10 @@ void Sheet::Begin() {
     drawnThisFrame_ = 0;
 }
 
-const Sprite *Sheet::Acquire(const flora::Plant &plant, flora::Stage stage, flora::Season season) {
+const Sprite *Sheet::Acquire(const flora::Plant &plant, flora::Stage stage, flora::Season season, bool snowy) {
     if (!Ready()) return nullptr;
 
-    const std::uint64_t key = Key(plant.id, stage, season);
+    const std::uint64_t key = Key(plant.id, stage, season, snowy);
 
     if (const auto found = lookup_.find(key); found != lookup_.end()) {
         Slot &slot = slots_[static_cast<std::size_t>(found->second)];
@@ -854,7 +953,7 @@ const Sprite *Sheet::Acquire(const flora::Plant &plant, flora::Stage stage, flor
         }
     }
 
-    Draw(plant, stage, season, slot, chosen % kColumns, chosen / kColumns);
+    Draw(plant, stage, season, snowy, slot, chosen % kColumns, chosen / kColumns);
 
     slot.key   = key;
     slot.cell  = plant.id;
@@ -871,8 +970,8 @@ const Sprite *Sheet::Acquire(const flora::Plant &plant, flora::Stage stage, flor
 int SlotWidth() { return kSlotW; }
 int SlotHeight() { return kSlotH; }
 
-void Render(const flora::Plant &plant, flora::Stage stage, flora::Season season, std::vector<Color> &pixels,
-            int &width, int &height, Vector2 &anchor) {
+void Render(const flora::Plant &plant, flora::Stage stage, flora::Season season, bool snowy,
+            std::vector<Color> &pixels, int &width, int &height, Vector2 &anchor) {
     const flora::SpeciesDef &def = flora::Def(plant.species);
     const float pixel            = config::kFloraPixel;
 
@@ -914,20 +1013,20 @@ void Render(const flora::Plant &plant, flora::Stage stage, flora::Season season,
     LaySun(canvas);
 
     LayWood(skeleton, frame, bare, seed, canvas);
-    Paint(canvas, def.palette[flora::SeasonIndex(season)], seed, pixels);
+    Paint(canvas, def.palette[flora::SeasonIndex(season)], snowy, seed, pixels);
 
     width  = canvas.w;
     height = canvas.h;
     anchor = {frame.ToX(0.0f), frame.ToY(0.0f)};
 }
 
-void Sheet::Draw(const flora::Plant &plant, flora::Stage stage, flora::Season season, Slot &slot, int column,
-                 int row) {
+void Sheet::Draw(const flora::Plant &plant, flora::Stage stage, flora::Season season, bool snowy, Slot &slot,
+                 int column, int row) {
     int width  = 0;
     int height = 0;
     Vector2 anchor{};
 
-    Render(plant, stage, season, pixels_, width, height, anchor);
+    Render(plant, stage, season, snowy, pixels_, width, height, anchor);
 
     const Rectangle where = {static_cast<float>(column * kSlotW), static_cast<float>(row * kSlotH),
                              static_cast<float>(width), static_cast<float>(height)};

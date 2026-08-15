@@ -87,7 +87,14 @@ whole phases, never inside a `pool::For` body.
 | `--profile [frames] [still]` | the real loop, draw included. Full screen, flying |
 | `--frame x y [frames]` | the simulation phases only, headless, at a fixed place |
 | `--sun x y` | the solved light as numbers |
-| `--wind`, `--caves`, `--ore`, `--covers`, `--settle`, `--column`, `--tones` | generator reports |
+| `--wind`, `--caves`, `--ore`, `--covers`, `--woods`, `--settle`, `--column`, `--tones` | generator reports |
+
+`--woods x0 x1` is the companion to `--covers`: it walks the scatter's own cells
+and reports, per species, how many plants grow and what ground each one is
+standing on. It exists because a placement rule is very easy to author into a
+wood that is never there or a desert quietly full of oaks, and neither errors.
+The line to read is the sand column — it has to be zero for every species but the
+scrub.
 
 **Always measure full screen with the player moving.** `--profile` forces both on
 its own; pass `still` only when deliberately measuring the cached case. This is
@@ -110,21 +117,33 @@ Full screen, flying, on a 16-core desktop, after the work below:
 
 | zone | ms | note |
 |---|---|---|
-| light solve | 9.5 | 47% of the frame; already parallel |
-| `DrawScene` itself | 2.8 | sky, clouds, rain, stars, player |
-| `lights.Update` | 1.6 | texture upload |
-| `world.Update` | 1.0 | streaming and the grass band |
-| `StepWater` | 1.0 | |
+| light solve | 13.1 | 55% of the frame; already parallel |
+| `DrawScene` itself | 2.9 | sky, clouds, rain, stars, player |
+| `lights.Update` | 1.7 | texture upload |
+| `world.Update` | 1.5 | streaming and the grass band |
+| `StepWater` | 1.2 | |
 | `DrawHud` | 0.7 | |
+| `PaintChunks` | 0.6 | |
 | `DrawTerrain` | 0.6 | a blit |
-| **frame** | **20.4** | 49 fps, from 131 ms / 8 fps |
+| `DrawTufts` | 0.5 | |
+| `DrawMist` | 0.5 | overcast only; nothing on a clear day |
+| **frame** | **24.1** | 42 fps, from 131 ms / 8 fps |
 
-What is left is the light. Porting the cascades to fragment shaders is the next
-real step; the two things that make it awkward are that `spread` is a distance
-transform (on the GPU it becomes jump flooding, which is an *approximation* and
-would be the first thing to leave the byte-identical bar) and that
-`World::LightLevelAt` is read on the CPU by plant growth (`grove.cpp`) and the
-HUD, which would need a readback.
+The light was 9.5 ms and is now 13.0. The difference is one more cascade, and it
+was not bought for looks: at four, light was gathered over **510 world pixels**
+— cascade zero's interval is the six-pixel lattice step, and the stack reaches
+that times (4⁴−1)/3. A screen at the framing this game is built against is
+nineteen hundred across, so a lamp anywhere but the near quarter of the view
+contributed nothing at all to a player standing in front of it, and did so with
+a hard edge. Five reaches 2046 and covers a full screen corner to corner. Half
+of the extra is `march 4` at 2.0 ms; the rest is the merge under it.
+
+What is left is still the light. Porting the cascades to fragment shaders is the
+next real step; the two things that make it awkward are that `spread` is a
+distance transform (on the GPU it becomes jump flooding, which is an
+*approximation* and would be the first thing to leave the byte-identical bar) and
+that `World::LightLevelAt` is read on the CPU by plant growth (`grove.cpp`) and
+the HUD, which would need a readback.
 
 ---
 
@@ -250,7 +269,24 @@ vertex is always written even when unchanged, because the write is also what
 tells its chunk it is holding liquid and the flag was cleared at the top of the
 step.
 
-### 5.7 Split parallel work by cell, not by column
+### 5.7 A pickup is thirty-six squares, so pickups have to gather
+
+`Drops` merges settled pickups of one kind into single stacks every frame — see
+`Drops::Merge`. It is what the player expects of a pile of wood, and it is also
+the only thing standing between a felled wood and a frame spent drawing it: a
+pickup is a six-by-six picture, so up to thirty-six `DrawRectangleV` calls, and
+the pool holds two hundred and fifty six of them. Unmerged, a hillside dug out
+with a full bag is nine thousand quads a frame for a few dozen blocks of stone.
+
+Nothing in that pool expires. A block the player dug and could not carry is a
+block they earned, so there is no lifetime and a pool with no free slot pours the
+overflow into a stack of its own kind already lying there (`Drops::Spill`). The
+one state that can still lose something is two hundred and fifty six *full*
+stacks of other materials in one view, which is sixteen thousand items on the
+ground. If you add a caller, do not add one that can lose a stack more easily
+than that.
+
+### 5.8 Split parallel work by cell, not by column
 
 The light cascades all hold the same number of samples, but the coarsest lays
 them out over a quarter as many columns each way. Splitting by column left the
@@ -291,3 +327,101 @@ Recorded so they are not re-investigated:
 `--profile`, `--sodcheck` and `World::ForgetGrass()` were added to `main.cpp` and
 `world.h` in the style of the other report modes. `--sodcheck` exists only to
 test the grass band cache; if that cache ever goes, it goes with it.
+
+---
+
+## 8. A biome is five tables agreeing
+
+There is no biome table and there does not need to be one. What there is instead
+is one pair of climate fields — `terrain::ClimateSettings`, temperature and
+humidity, one feature every dozen screens — and five separate tables that each
+place their own thing against it with the same `ElementClimate` bell:
+
+| table | what it places |
+|---|---|
+| `kElements` covers | which of soil, sand and snow lies on the rock |
+| `flora::kSpecies` climate | how thick each species' wood is, and its treeline |
+| `sod::kCovers` | what colour the grass is, and how much of the ground it holds |
+| `weather::Settings::drought` | where the rain does not fall |
+| `weather::Settings::snow` | where it comes down frozen instead |
+| `flora::SpeciesGround` | which of the covers a species will root in |
+| `ElementSpawn::crest` | how high the ground must stand to hold a cover |
+
+Two of them are the exceptions the uniform weather cannot express on its own, and
+they are opposite kinds: the drought says a shower does not arrive at all, the
+snowfall says it arrives as something else. Both are rolled per drop against the
+column, so the edge of a cold region is a shower of rain and snow at once rather
+than a line across the sky — and both read the same temperature field that laid
+the cover on the ground, so a snowfield is always a place where it snows.
+
+Neither may use `ClimateRamp` with its edges reversed. It guards its span with
+`max(edge1 - edge0, 1e-3)`, so a descending pair divides by a thousandth and
+clamps to zero everywhere; that returned no snow in the entire world and nothing
+said why. Use `1 - SmoothStep(cold, warm, t)`.
+
+A desert is what happens where the rest agree, and the last row is the only
+one that is not a share. That distinction is load-bearing and it is what a
+"trees in the desert" bug is made of: a bell is a *tendency*, so an oak thins out
+as the country dries and thinning out still leaves oaks — and
+`flora::Settings::supportFloor`, which deliberately keeps some of a wood's
+thickness wherever the climate suits nobody, put a half-thickness wood on open
+sand. No tuning of any bell fixes that without emptying the rest of the map. The
+ground rule is a gate, it runs before the species roll and before the support
+floor, and it is checked twice: once at the cell centre because the species has
+to be known before the position is, and once under the trunk because the jitter
+can carry a plant half a cell.
+
+`SurfaceCoverAt(worldX, terrain)` in `element.h` is the one answer to "what is
+the ground made of here". It reads the generator's covers and not the world, so
+a hole somebody dug cannot rearrange a wood, cannot take the snow off a crown,
+and cannot make it rain on a desert. The hand is the one place that asks the
+world instead — a player who carried soil into a desert and laid a bed of it has
+made ground a tree will root in, and the noise underneath knows nothing about it.
+
+Check it with `--woods`, never by eye.
+
+---
+
+## 9. The mountains, and why snow needed a height
+
+`SurfaceSettings` grew a layer: `range` says where a range is, `ridge` is the
+crest itself as a folded field, and between them the ground reaches 573 px above
+the level where it used to reach 158. Three numbers in it are load-bearing and
+none of them is taste:
+
+- **`ridgeSharp` under one.** `1 - |signed|` is a triangle by construction, and an
+  exponent over one sharpens it: at 2.2 every summit came to a point one lattice
+  column wide, which is nowhere to stand and a climb that ends on a spike. Under
+  one the mid-range is lifted instead, so shoulders broaden and the summit gets a
+  top. It also halved the worst step between neighbouring columns.
+- **`shelfStep` under the jump.** The world's terrace is 24 px, which on a
+  mountain's slope is a ledge twenty pixels wide — a smooth ramp with a texture on
+  it. A 48 px shelf cut into the crest alone is a run of flat ground broad enough
+  to walk along and to build on, and 48 is still two thirds of the 72 the
+  character jumps.
+- **`ridgeAmplitude` under the cloud deck.** The deck hangs from y = -640 to
+  -320 and drops another hundred in a storm. A peak past its underside is
+  standing *inside* the cloud, which the rain answers correctly by having nowhere
+  left to fall from — and which reads as a summit that never gets any weather.
+
+`--surface` is the check: it reports the mean and worst step between neighbouring
+columns and the share of them that cross a texel. The whole generator reads the
+surface one column at a time, so a crest that climbs faster than the lattice can
+describe it is a cliff to the light, the grass and the trees alike. Before the
+crest was broadened it was 29.5 px worst and 4.3%; after, 16.0 px and 1.4%, which
+is where the world was without mountains at all.
+
+Snow moved from a climate bell to a bell **and** a height, and the fault it fixes
+is worth keeping written down. Altitude was supposed to need no term of its own:
+the climate cools by `temperatureLapse` per pixel of elevation, so a material
+wanting the tops only had to ask for cold. That is sound and it does not survive a
+world that also has cold *regions* — the temperature field runs its whole range at
+sea level, so the coldest lowland reads exactly like a summit and snow lay in flat
+country a long way from any mountain. No bell can separate the two, because to a
+bell they are the same number. `ElementSpawn::crest` can. The bell still decides
+whether a range is cold enough to hold snow at all; the crest decides that it is a
+mountain.
+
+Both figures were measured, not argued: `--covers` reports the surface's own range
+over a stretch of world, and with the ranges switched off it runs -14 to 310. The
+snow line sits at -60, which ordinary ground never reaches.

@@ -774,6 +774,15 @@ void DrawProbe(World &world, Grove &grove, Inventory &gathered, Rectangle strip,
 
     world.DrawLiquids(strip);
 
+    // What is falling, and then the fog, in the frame's own order.
+    //
+    // Both are pure functions of the clock and the weather and the probe can force
+    // both, so this is the only way to look at a storm — or at a shower coming down
+    // as snow, which needs cold country as well as a storm and is otherwise a thing
+    // that has to be waited for in two places at once.
+    world.DrawRain(strip);
+    world.DrawMist(strip);
+
     // And the light over all of it, which is the other half of every question
     // about how dark something came out: what a material's own tones do and what
     // the multiply does to them are two answers, and tuning either while looking
@@ -847,19 +856,27 @@ void ReportCovers(const terrain::Settings &settings, float fromX, float toX, flo
 
     int columns = 0;
 
+    float highest = kUnboundedDepth;
+    float lowest  = -kUnboundedDepth;
+
     for (float x = fromX; x <= toX; x += step, columns++) {
         const terrain::Climate climate = terrain::ClimateAt(x, settings);
+        const float surface            = terrain::Height(x, settings);
 
         coldest = std::min(coldest, climate.temperature);
         hottest = std::max(hottest, climate.temperature);
         driest  = std::min(driest, climate.humidity);
         wettest = std::max(wettest, climate.humidity);
 
+        // Y grows downward, so the highest ground is the smallest number.
+        highest = std::min(highest, surface);
+        lowest  = std::max(lowest, surface);
+
         for (std::size_t e = 0; e < kElementCount; e++) {
             const ElementSpawn &spawn = kElements[e].spawn;
             if (spawn.generator != Generator::Cover) continue;
 
-            const float thickness = CoverThickness(spawn, x, climate.temperature, climate.humidity);
+            const float thickness = CoverThickness(spawn, x, surface, climate.temperature, climate.humidity);
 
             // A cover thinner than one terrain pixel is not on the ground, it is
             // a rounding error, and counting it would report a desert nobody can
@@ -879,7 +896,13 @@ void ReportCovers(const terrain::Settings &settings, float fromX, float toX, flo
     }
 
     std::printf("%d columns over %.0f px, every %.0f\n", columns, toX - fromX, step);
-    std::printf("temperature %.2f..%.2f   humidity %.2f..%.2f\n\n", coldest, hottest, driest, wettest);
+    std::printf("temperature %.2f..%.2f   humidity %.2f..%.2f\n", coldest, hottest, driest, wettest);
+
+    // The ground's own range, because a cover with a crest is measured against it
+    // and a snow line written above the highest peak in the world is a material
+    // that never appears — with nothing anywhere to say why.
+    std::printf("surface y %.0f..%.0f   (level %.0f, so %.0f px of relief above it)\n\n", highest, lowest,
+                settings.surface.level, settings.surface.level - highest);
 
     for (std::size_t e = 0; e < kElementCount; e++) {
         if (kElements[e].spawn.generator != Generator::Cover) continue;
@@ -893,6 +916,92 @@ void ReportCovers(const terrain::Settings &settings, float fromX, float toX, flo
 
         std::printf("%-6s  %5.1f%% of columns   mean %4.1f px   deepest %4.1f px at x %.0f\n", kElements[e].name,
                     100.0 * t.columns / std::max(columns, 1), t.thickness / t.columns, t.deepest, t.where);
+    }
+}
+
+// What the scatter actually grows over a stretch of world, and what it grows it
+// on.
+//
+// The companion to ReportCovers, and it exists for exactly the fault ReportCovers
+// exists for: a placement rule written into a table is very easy to author into a
+// wood that is never there or a desert that is quietly full of oaks, and nothing
+// errors either way. The only symptom of the second is a screenshot, which nobody
+// takes of the one stretch of world where it is wrong.
+//
+// It walks the cells rather than the columns, because a cell is what the scatter
+// decides one plant per, and it reports the ground under each plant so that
+// "trees in the desert" is a number rather than an impression.
+void ReportWoods(const flora::Settings &flora, const terrain::Settings &terrain, float fromX, float toX) {
+    struct Tally {
+        int grown = 0;
+        int onSoil = 0;
+        int onSand = 0;
+        int onSnow = 0;
+        int onRock = 0;
+    };
+
+    std::array<Tally, flora::kSpeciesCount> tally{};
+
+    // The scatter wants a surface to stand its plants on. Taken from the shape of
+    // the land alone rather than from a world, since what is being measured is the
+    // placement rule and not what anybody has dug.
+    constexpr float kStep = 6.0f;
+
+    const int columns = static_cast<int>((toX - fromX) / kStep) + 3;
+
+    std::vector<float> top(static_cast<std::size_t>(columns));
+
+    for (int i = 0; i < columns; i++) {
+        top[static_cast<std::size_t>(i)] = terrain::Height(fromX + static_cast<float>(i) * kStep, terrain);
+    }
+
+    const flora::Ground ground = {
+        .top = top.data(), .sunk = nullptr, .count = columns, .originX = fromX, .spacing = kStep};
+
+    std::array<int, kElementCount + 1> cells{};
+
+    std::vector<flora::Plant> plants;
+
+    for (std::size_t l = 0; l < flora::kLayerCount; l++) {
+        const auto layer = static_cast<flora::Layer>(l);
+
+        flora::Scatter(layer, fromX, toX, flora, terrain, ground, plants);
+
+        for (const flora::Plant &plant : plants) {
+            Tally &into = tally[flora::SpeciesIndex(plant.species)];
+
+            into.grown++;
+
+            const std::optional<Element> cover = SurfaceCoverAt(plant.base.x, terrain);
+
+            if (!cover.has_value()) into.onRock++;
+            else if (*cover == Element::Soil) into.onSoil++;
+            else if (*cover == Element::Sand) into.onSand++;
+            else if (*cover == Element::Snow) into.onSnow++;
+        }
+    }
+
+    // And how much of the world is each kind of ground, so a species count can be
+    // read against the room there was for it.
+    int walked = 0;
+
+    for (float x = fromX; x <= toX; x += 40.0f, walked++) {
+        const std::optional<Element> cover = SurfaceCoverAt(x, terrain);
+
+        cells[cover.has_value() ? ElementIndex(*cover) : kElementCount]++;
+    }
+
+    std::printf("%.0f px of world   soil %.1f%%  sand %.1f%%  snow %.1f%%  bare %.1f%%\n\n", toX - fromX,
+                100.0 * cells[ElementIndex(Element::Soil)] / std::max(walked, 1),
+                100.0 * cells[ElementIndex(Element::Sand)] / std::max(walked, 1),
+                100.0 * cells[ElementIndex(Element::Snow)] / std::max(walked, 1),
+                100.0 * cells[kElementCount] / std::max(walked, 1));
+
+    for (std::size_t e = 0; e < flora::kSpeciesCount; e++) {
+        const Tally &t = tally[e];
+
+        std::printf("%-6s  %6d grown   on soil %6d   sand %6d   snow %6d   bare rock %6d\n", flora::kSpecies[e].name,
+                    t.grown, t.onSoil, t.onSand, t.onSnow, t.onRock);
     }
 }
 
@@ -1939,7 +2048,7 @@ void DrawScene(const World &world, const Grove &grove, const Inventory &inventor
         grove.DrawLeaves(world.Sky(), season, view, world.Sky().Time());
 
         // What the wood left on the ground, over the plants and under the character.
-        grove.Fallen().Draw(world.Sky().Time());
+        grove.Fallen().Draw();
     }
 
     // Under the character and over the ground, which is where dust off a foot
@@ -1956,6 +2065,19 @@ void DrawScene(const World &world, const Grove &grove, const Inventory &inventor
     // Asked of the world and not of the sky: a drop stops at the first thing under
     // it, and what is under it is the world's to know.
     world.DrawRain(view);
+
+    // And the fog over all of it, which is the last thing drawn inside the light.
+    //
+    // Over the rain as well as over the ground, because that is where it is: a
+    // shower falling into a fog bank is seen through the fog, and drawing the two
+    // the other way round puts every drop in front of the air it is falling
+    // through. Inside the light for the same reason the rain is — fog in an unlit
+    // place must not be the one bright thing on screen.
+    {
+        PROFILE_ZONE("DrawMist");
+
+        world.DrawMist(view);
+    }
 
     EndMode2D();
 
@@ -2121,6 +2243,10 @@ int main(int argc, char **argv) {
     // See ReportCovers.
     const bool counting = argc >= 5 && TextIsEqual(argv[1], "--covers");
 
+    // `--woods x0 x1` walks the scatter's cells and reports what grows where. See
+    // ReportWoods.
+    const bool cruising = argc >= 4 && TextIsEqual(argv[1], "--woods");
+
     // `--tones` reports how each material's paint divides between form and
     // texture. See ReportTones.
     const bool weighing = argc >= 2 && TextIsEqual(argv[1], "--tones");
@@ -2159,8 +2285,8 @@ int main(int argc, char **argv) {
 
     // Resizable, with a floor under it: below the minimum the hotbar is wider than
     // the frame and the head-up display runs off the side of it.
-    SetConfigFlags((probing || counting || weighing || reading || digging || assaying || settling || timing || gauging
-                    || checking)
+    SetConfigFlags((probing || counting || cruising || weighing || reading || digging || assaying || settling || timing
+                    || gauging || checking)
                        ? FLAG_WINDOW_HIDDEN
                        : FLAG_WINDOW_RESIZABLE);
 
@@ -2190,7 +2316,13 @@ int main(int argc, char **argv) {
     // pixels or in features per terrain::kFeatureSpan pixels, so the settings can
     // be read against the size of the character: it is 26 pixels tall, 12 wide,
     // and jumps 72.
-    const terrain::Settings settings =
+    //
+    // Not const, and only for one reason: `Calibrate` writes the measured cutoffs
+    // back into it further down. Nothing else here may be touched after this
+    // point — the whole generator is a pure function of these numbers, and a
+    // setting that changed while the world was running would mean two halves of the
+    // same map generated from two different worlds.
+    terrain::Settings settings =
         {
             .surface =
                 {
@@ -2208,6 +2340,77 @@ int main(int argc, char **argv) {
                     // steepest stretches at forty.
                     .hills         = {.frequency = 2.6f, .octaves = 3, .seed = 4402},
                     .hillAmplitude = 70.0f,
+
+                    // Where the ranges stand. One feature every twenty thousand
+                    // pixels or so, which is ten screens: a range has to be
+                    // something walked towards for a long while and then walked
+                    // into, or it is scenery that happens to be tall.
+                    .range         = {.frequency = 0.05f, .octaves = 2, .seed = 4406},
+                    .rangeCoverage = 0.14f,
+                    .rangeEdge     = 0.09f,
+
+                    // And the crests inside one. Sixteen times the range's own
+                    // frequency, so a range is several summits with valleys between
+                    // them rather than one enormous cone — a feature every twelve
+                    // hundred pixels, which is three or four peaks across a range.
+                    //
+                    // The frequency is half of what decides whether a mountain can
+                    // be climbed, the amplitude being the other half: the crest
+                    // rises over half a feature, so at this pair a flank averages a
+                    // slope of 0.7 and the terrace turns that into a twenty-four
+                    // pixel riser every thirty-four of run. Against a jump of
+                    // seventy-two that is a staircase. At twice this it was a slope
+                    // of 1.4 and a riser every seventeen, which is a wall with
+                    // notches in it.
+                    .ridge = {.frequency = 0.8f, .octaves = 3, .seed = 4407},
+
+                    // Four hundred pixels at the crest, on top of the hundred or two
+                    // the relief and the hills already give. A peak therefore stands
+                    // some five hundred above the plains, which against a character
+                    // of twenty-six is nineteen of it and very nearly the whole of a
+                    // full-screen view from the valley floor.
+                    //
+                    // Bounded from above by the sky rather than by taste. The cloud
+                    // deck hangs between y = -640 and y = -320, and a peak that
+                    // climbed past the underside of it would be standing *inside*
+                    // the cloud — which the rain already answers correctly, by
+                    // having nowhere left to fall from, but which reads as a summit
+                    // that mysteriously never gets any weather. At this figure the
+                    // tops sit just under the deck and only the rare one pokes into
+                    // it during a storm, when the base drops a hundred pixels.
+                    //
+                    // The terrace is what makes the climb possible at all — the
+                    // whole slope is snapped into ledges a quarter of a jump apart,
+                    // so a mountainside is a staircase rather than a wall.
+                    .ridgeAmplitude = 470.0f,
+
+                    // Under one, which broadens the crest instead of sharpening it.
+                    //
+                    // This was 2.2 and it drew a range of shark's teeth: every
+                    // summit came to a point one lattice column wide, so there was
+                    // nowhere up there to stand and the climb ended on a spike. A
+                    // mountain has to be somewhere to *go*, and that means shelves
+                    // on the way up and a top to arrive at — both of which live in
+                    // the mid-range of the fold, which is precisely what an exponent
+                    // under one keeps and one over it throws away.
+                    //
+                    // The three octaves of the ridge field then do the rest: with
+                    // the crest flattened, their bumps land as ledges and shoulders
+                    // across the summit rather than as ripples down a point.
+                    .ridgeSharp = 0.72f,
+
+                    // And the shelves cut across the face. Forty-eight pixels is
+                    // two of the world's own ledges and two thirds of the jump, so
+                    // a riser is climbed rather than scaled, and it is coarse enough
+                    // that a shelf is a run of flat ground wide enough to build on
+                    // and to meet something on.
+                    //
+                    // Snapped most of the way rather than all of it. At one the face
+                    // is a flight of identical stairs, which is legible and dead; at
+                    // this the shelves are plainly there and no two of them are the
+                    // same width, because what is under them is still a mountain.
+                    .shelfStep = 48.0f,
+                    .shelf     = 0.66f,
 
                     // Texture underfoot, kept small. This is the term that turns a
                     // walkable slope into a staircase of one-pixel steps.
@@ -2366,13 +2569,25 @@ int main(int argc, char **argv) {
                     .step  = 12.0f,
                 },
 
-            // Nothing about the shape of the world reads these yet. The sky does, and
-            // a biome table will. One feature spans four or five screens, so a climate
-            // is somewhere arrived in rather than something that changes underfoot.
+            // The two axes every biome in the world is chosen on: which cover lies
+            // on the rock, which trees grow in it, what the grass under them is,
+            // and how much it rains.
+            //
+            // One feature spans a dozen screens. It was four or five, and four or
+            // five is not a region — it is a patch: a desert could be crossed in
+            // under a minute of running, and the belt of steppe that is supposed to
+            // approach it was a few hundred pixels wide. The fields are folded
+            // Perlin and the frequency is only a scale, so nothing about *what*
+            // values occur changes here — the same deserts and snowfields are still
+            // reached, they are simply travelled into rather than stumbled over.
+            //
+            // Humidity stays the faster of the two so that a temperature band still
+            // holds more than one kind of country: at equal frequencies the pair
+            // move together and the world comes out as one axis with two names.
             .climate =
                 {
-                    .temperature = {.frequency = 0.22f, .octaves = 2, .seed = 4420},
-                    .humidity    = {.frequency = 0.30f, .octaves = 2, .seed = 4421},
+                    .temperature = {.frequency = 0.08f, .octaves = 2, .seed = 4420},
+                    .humidity    = {.frequency = 0.11f, .octaves = 2, .seed = 4421},
 
                     // Over the hundred and twenty pixels of elevation this relief
                     // reaches, high ground gains a fifth of the humidity range and
@@ -2700,6 +2915,18 @@ int main(int argc, char **argv) {
         .rainSpan    = 1400.0f,
     };
 
+    // Measured before anything reads the settings, and not only before the world is
+    // built.
+    //
+    // World's constructor calibrates its own copy, which is right and is not
+    // enough: every report below is handed this one, and an uncalibrated copy is a
+    // different world. The mountains are what made that visible — the range cutoff
+    // defaults to a value no sample clears, so `--covers` reported a world with no
+    // ranges and no snow in it while the game had both. Calibration is a
+    // measurement and idempotent, so running it twice costs a moment at startup and
+    // nothing else.
+    terrain::Calibrate(settings);
+
     World world(settings, config::kResolution);
     world.SetWeather(sky);
 
@@ -2764,6 +2991,17 @@ int main(int argc, char **argv) {
     if (counting) {
         ReportCovers(settings, static_cast<float>(std::atof(argv[2])), static_cast<float>(std::atof(argv[3])),
                      static_cast<float>(std::atof(argv[4])));
+
+        CloseWindow();
+        return 0;
+    }
+
+    if (cruising) {
+        // The grove's own settings, calibrated: the coverage figures are measured
+        // cutoffs and a scatter run against uncalibrated ones is a scatter of a
+        // different world.
+        ReportWoods(grove.Settings(), settings, static_cast<float>(std::atof(argv[2])),
+                    static_cast<float>(std::atof(argv[3])));
 
         CloseWindow();
         return 0;

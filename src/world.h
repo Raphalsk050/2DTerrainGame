@@ -366,6 +366,12 @@ public:
     void DrawRain(Rectangle view) const;
     void DrawStars(Rectangle view) const;
 
+    // The fog lying in the low ground under a closed sky. Asked of the world for
+    // the reason the rain is: the bank stops at the first solid thing under it, and
+    // what is under it is the world's to know — a roof and a hillside both stand in
+    // the fog, and only one of them is in the generator.
+    void DrawMist(Rectangle view) const;
+
     // Field a liquid is drawn from, derived from its mass and clamped against
     // the solids around it. Exposed so the clamp can be checked directly.
     Grid LiquidRenderField(int cx, int cy, Element element) const;
@@ -692,7 +698,7 @@ private:
     // a sod is anything at all standing on it.
     float GroundValueAt(Vector2 world) const;
 
-    // Works out the grass over a span of columns and points sodRamp_/sodCover_ at
+    // Works out the grass over a span of columns and points sodLook_/sodCover_ at
     // it. Called once a frame, before anything reads either.
     void ReadSod(Rectangle view);
 
@@ -776,7 +782,7 @@ private:
     // Filled by ReadSod once a frame. Both the band the terrain draws and the
     // tufts standing on it read from this, which is what keeps the two from
     // disagreeing about where the grass is.
-    std::vector<soil::Ramp> sodRamp_;
+    std::vector<sod::Look> sodLook_;
     std::vector<float> sodCover_;
     std::vector<float> sodTop_;
     std::vector<float> sodPush_;
