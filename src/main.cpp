@@ -7,6 +7,7 @@
 #include "light_layer.h"
 #include "liquid_layer.h"
 #include "player.h"
+#include "profile.h"
 #include "console.h"
 #include "scuff.h"
 #include "sod.h"
@@ -726,6 +727,11 @@ void DrawProbe(World &world, Grove &grove, Inventory &gathered, Rectangle strip,
     for (float t = 0.0f; t < seconds; t += 1.0f / 60.0f) world.StepWeather(1.0f / 60.0f);
 
     world.Update(strip);
+
+    // The ground's own pictures, before the probe opens a target of its own —
+    // and deliberately, so that what this draws is the cached path the game
+    // takes rather than the fallback beside it.
+    world.PaintChunks(strip);
 
     RenderTexture2D canvas = LoadRenderTexture(static_cast<int>(strip.width), static_cast<int>(strip.height));
 
@@ -1818,7 +1824,16 @@ void ReportFrame(World &world, Grove &grove, Inventory &gathered, Vector2 at, in
                                     {"StepWeather", 0, 0},
                                     {"StepLight", 0, 0}}};
 
+    profile::Begin();
+
     for (int f = 0; f < frames; f++) {
+        // The first frame generates the chunks the rest of them read, so it is
+        // measured separately above and thrown away here. Everything the report
+        // is about is the steady state.
+        if (f == 1) profile::Reset();
+
+        profile::Frame();
+
         double marks[5]{};
 
         double t0 = GetTime();
@@ -1863,6 +1878,8 @@ void ReportFrame(World &world, Grove &grove, Inventory &gathered, Vector2 at, in
 
     std::printf("%-14s %10s %10.2f   (%.0f fps)\n\n", "steady frame", "", total, (total > 0.0) ? 1000.0 / total : 0.0);
     std::printf("chunks resident %d, pinned %d\n", world.ResidentChunks(), world.PinnedChunks());
+
+    profile::Report("phases");
 }
 
 // The world, from the sky down to the brush cursor over it.
@@ -1888,7 +1905,11 @@ void DrawScene(const World &world, const Grove &grove, const Inventory &inventor
     // band is out of view and this returns having done nothing.
     world.Sky().DrawClouds(view, world.Spacing());
 
-    world.DrawTerrain(view);
+    {
+        PROFILE_ZONE("DrawTerrain");
+
+        world.DrawTerrain(view);
+    }
 
     // The tufts on top of the band the terrain drew, and under everything that
     // stands in them: a trunk belongs in front of the grass around its own foot,
@@ -1896,7 +1917,11 @@ void DrawScene(const World &world, const Grove &grove, const Inventory &inventor
     //
     // On the weather clock, so the sway runs with the wind that drives it and
     // both speed up together under F7.
-    sod::DrawTufts(world.Grass(), view, world.Sky().Time(), world.Settings().seed);
+    {
+        PROFILE_ZONE("DrawTufts");
+
+        sod::DrawTufts(world.Grass(), view, world.Sky().Time(), world.Settings().seed);
+    }
 
     // The plants over the ground and behind the character, and on this side of
     // the light multiply: a tree is lit by the same daylight as the ground it
@@ -1905,13 +1930,17 @@ void DrawScene(const World &world, const Grove &grove, const Inventory &inventor
     // unless F9 is holding one — see weather::Sky::Turn.
     const auto season = static_cast<flora::Season>(world.Sky().Turn().index);
 
-    grove.Draw(world.Sky(), season, world.Sky().Time());
+    {
+        PROFILE_ZONE("grove.Draw");
 
-    grove.DrawFruit(world.Sky(), season, world.Sky().Time());
-    grove.DrawLeaves(world.Sky(), season, view, world.Sky().Time());
+        grove.Draw(world.Sky(), season, world.Sky().Time());
 
-    // What the wood left on the ground, over the plants and under the character.
-    grove.Fallen().Draw(world.Sky().Time());
+        grove.DrawFruit(world.Sky(), season, world.Sky().Time());
+        grove.DrawLeaves(world.Sky(), season, view, world.Sky().Time());
+
+        // What the wood left on the ground, over the plants and under the character.
+        grove.Fallen().Draw(world.Sky().Time());
+    }
 
     // Under the character and over the ground, which is where dust off a foot
     // belongs: it is in front of the hillside it came out of and behind the boot
@@ -1942,7 +1971,11 @@ void DrawScene(const World &world, const Grove &grove, const Inventory &inventor
     //
     // Skipping the multiply is all it takes to see the world unlit, since the
     // world underneath was already drawn at full brightness.
-    if (!debug.unlit) lights.Compose();
+    {
+        PROFILE_ZONE("lights.Compose");
+
+        if (!debug.unlit) lights.Compose();
+    }
 
     // The stars go on this side of that line, and they are the only part of the
     // world that does.
@@ -2115,15 +2148,30 @@ int main(int argc, char **argv) {
     // Reports a table and draws nothing, so it wants no window on screen either.
     const bool gauging = argc >= 2 && TextIsEqual(argv[1], "--wind");
 
+    // `--sodcheck [frames]` walks a view across the world and checks the band it
+    // remembers against one built from cold.
+    const bool checking = argc >= 2 && TextIsEqual(argv[1], "--sodcheck");
+
+    // `--profile [frames]` plays the game with nobody at the keys and reports
+    // where the frame went. This one wants a window on screen: the draw is half
+    // of what it is measuring.
+    const bool profiling = argc >= 2 && TextIsEqual(argv[1], "--profile");
+
     // Resizable, with a floor under it: below the minimum the hotbar is wider than
     // the frame and the head-up display runs off the side of it.
-    SetConfigFlags((probing || counting || weighing || reading || digging || assaying || settling || timing || gauging)
+    SetConfigFlags((probing || counting || weighing || reading || digging || assaying || settling || timing || gauging
+                    || checking)
                        ? FLAG_WINDOW_HIDDEN
                        : FLAG_WINDOW_RESIZABLE);
 
+    // Off while profiling, so a frame that finishes early is not slept away and
+    // the report says what the frame actually costs rather than what it was
+    // capped at.
+    const int targetFps = profiling ? 0 : config::kTargetFps;
+
     InitWindow(config::kScreenWidth, config::kScreenHeight, "marching squares");
     SetWindowMinSize(config::kMinScreenWidth, config::kMinScreenHeight);
-    SetTargetFPS(config::kTargetFps);
+    SetTargetFPS(targetFps);
 
     // Escape stops closing the window, so that it can close the inventory
     // instead.
@@ -2721,6 +2769,72 @@ int main(int argc, char **argv) {
         return 0;
     }
 
+    if (argc >= 2 && TextIsEqual(argv[1], "--sodcheck")) {
+        // Walks two identical worlds along the same path, one remembering its
+        // grass band between frames and one made to work the whole band out
+        // again, and reports any column they disagree about.
+        //
+        // Both worlds see exactly the same chunks come and go, which is what
+        // makes the comparison about the memory and nothing else: a column whose
+        // chunk is resident is answered by interpolating the field and one whose
+        // chunk is not is answered from the noise, so two worlds with different
+        // chunks resident differ for reasons that have nothing to do with this.
+        const int frames = (argc >= 3) ? std::atoi(argv[2]) : 400;
+
+        World plain(settings, config::kResolution);
+        plain.SetWeather(sky);
+
+        int checked = 0;
+        int wrong   = 0;
+        float worst = 0.0f;
+
+        for (int f = 0; f < frames; f++) {
+            // Deliberately not a whole number of columns, chunks or tufts, so the
+            // band lands out of step with every grid it is built on — and far
+            // enough each frame that the walk crosses chunk borders, which is
+            // what brings new ground into the band.
+            const Rectangle view = {static_cast<float>(f) * 53.0f - 500.0f, -300.0f, 1000.0f, 600.0f};
+
+            world.Update(view);
+
+            plain.ForgetGrass();
+            plain.Update(view);
+
+            const sod::Blades kept  = world.Grass();
+            const sod::Blades again = plain.Grass();
+
+            if (kept.count != again.count || kept.firstColumn != again.firstColumn) {
+                std::printf("frame %d: band differs (%d at %d against %d at %d)\n", f, kept.count, kept.firstColumn,
+                            again.count, again.firstColumn);
+                wrong++;
+                continue;
+            }
+
+            for (int i = 0; i < kept.count; i++) {
+                const float dTop   = std::fabs(kept.top[i] - again.top[i]);
+                const float dCover = std::fabs(kept.cover[i] - again.cover[i]);
+
+                checked++;
+
+                worst = std::max({worst, dTop, dCover});
+
+                if (dTop > 0.0f || dCover > 0.0f) {
+                    if (wrong < 10) {
+                        std::printf("frame %d column %d: top %.4f against %.4f, cover %.2f against %.2f\n", f,
+                                    kept.firstColumn + i, kept.top[i], again.top[i], kept.cover[i], again.cover[i]);
+                    }
+
+                    wrong++;
+                }
+            }
+        }
+
+        std::printf("\n%d columns checked over %d frames, %d differ, worst %.6f\n", checked, frames, wrong, worst);
+
+        CloseWindow();
+        return (wrong == 0) ? 0 : 1;
+    }
+
     if (timing) {
         Inventory timed{};
 
@@ -2916,7 +3030,48 @@ int main(int argc, char **argv) {
 
     chat.Say("press T to type a command — /help lists them", console::Tone::Note);
 
+    // `--profile [frames] [still]` plays the game as normal, with nobody at the
+    // keys, and reports where the frame went before it closes. The only way to
+    // see the draw beside the simulation, which the headless reports cannot show.
+    const int profileFrames = profiling ? ((argc >= 3) ? std::atoi(argv[2]) : 600) : 0;
+
+    // Full screen, always, because that is how the game is played and because
+    // nearly everything in the frame is priced by the area of the view: the light
+    // solves a region around it, the water steps one, and the ground is drawn
+    // over it. A measurement in a small window is a measurement of a different
+    // game.
+    if (profiling) {
+        const int monitor = GetCurrentMonitor();
+
+        SetWindowSize(GetMonitorWidth(monitor), GetMonitorHeight(monitor));
+
+        if (!IsWindowFullscreen()) ToggleFullscreen();
+    }
+
+    // And flying across the world rather than standing still, unless asked
+    // otherwise. Standing still is the one thing a player never does, and it is
+    // the case every cache in here is at its best: nothing streams, nothing is
+    // invalidated, and the frame reads far better than it plays.
+    const bool flying = profiling && !(argc >= 4 && TextIsEqual(argv[3], "still"));
+
+    // The first frames are chunk generation and shader compilation, which is not
+    // what a steady frame costs.
+    constexpr int kWarmup = 60;
+
+    int played = 0;
+
+    if (profiling) profile::Begin();
+
     while (!WindowShouldClose()) {
+        if (profiling) {
+            played++;
+
+            if (played > profileFrames + kWarmup) break;
+            if (played == kWarmup) profile::Reset();
+
+            profile::Frame();
+        }
+
         const float dt = GetFrameTime();
 
         // The wall clock rather than the weather's, so a line stays readable for as
@@ -3004,6 +3159,8 @@ int main(int argc, char **argv) {
         // and a drop left falling behind an open inventory is a drop that has
         // timed out and gone by the time it is looked at again.
         if (!packOpen) {
+            PROFILE_ZONE("grove.Update");
+
             // Grown over the visible band rather than the simulated one. A plant is
             // drawn and nothing else — it holds no liquid and steps no automaton — so
             // there is nothing about one off screen that has to have settled by the
@@ -3085,10 +3242,19 @@ int main(int argc, char **argv) {
             // A neutral input while typing rather than no update at all: the
             // character has to keep falling and keep being pushed out of walls, it
             // simply must not answer to the keys that are spelling a command.
+            // Flown across the world under its own power while profiling, since
+            // standing still is the one thing a player never does and the one
+            // case every cache in here is at its best. See `--profile`.
             const PlayerInput moves =
-                typing ? PlayerInput{}
-                       : ReadPlayerInput(camera, !packOpen && !holdOff && editor.Left() == Editor::Hand::Chop
-                                                     && IsMouseButtonDown(MOUSE_BUTTON_LEFT));
+                flying ? PlayerInput{.moveX      = 1.0f,
+                                     .jumpHeld   = false,
+                                     .flyToggled = (played == kWarmup / 2),
+                                     .sprintHeld = true}
+                : typing ? PlayerInput{}
+                         : ReadPlayerInput(camera, !packOpen && !holdOff && editor.Left() == Editor::Hand::Chop
+                                                       && IsMouseButtonDown(MOUSE_BUTTON_LEFT));
+
+            PROFILE_ZONE("player");
 
             player.Update(moves, world, dt);
 
@@ -3150,21 +3316,43 @@ int main(int argc, char **argv) {
             // read during the solve. Advancing it afterwards would light every frame by
             // the sky of the frame before it, which nothing would look wrong about and
             // which would be wrong.
-            world.StepWeather(dt * (debug.fastWeather ? debug_view::kFastWeather : 1.0f));
+            {
+                PROFILE_ZONE("StepWeather");
+
+                world.StepWeather(dt * (debug.fastWeather ? debug_view::kFastWeather : 1.0f));
+            }
 
             // Offered on the same terms as the lantern above, and for the same
             // reason: a canopy that has to be re-offered to keep shading needs
             // nothing told to it when the tree is felled.
-            grove.Shade(world, world.Sky().Time());
+            {
+                PROFILE_ZONE("grove.Shade");
+
+                grove.Shade(world, world.Sky().Time());
+            }
 
             // Solved after the world has finished moving, so the light matches the
             // frame it is about to be drawn over rather than the one before it.
             world.StepLight(active);
-            lights.Update(world.Light());
+
+            {
+                PROFILE_ZONE("lights.Update");
+
+                lights.Update(world.Light());
+            }
         }
 
+        // The ground, rasterised into a picture per chunk. Out here with the two
+        // below because it opens a texture of its own, which cannot be done
+        // inside a frame.
+        world.PaintChunks(ViewBounds(camera));
+
         // Captured before the frame opens, since it renders to its own target.
-        liquids.Capture(world, ViewBounds(camera), camera);
+        {
+            PROFILE_ZONE("liquids.Capture");
+
+            liquids.Capture(world, ViewBounds(camera), camera);
+        }
 
         // And the world itself, when it is about to be put behind a panel. Same
         // constraint, one step further: a texture mode cannot be opened inside a
@@ -3178,23 +3366,41 @@ int main(int argc, char **argv) {
 
         BeginDrawing();
 
-        if (packOpen) backdrop.Compose(config::kPanelDim);
-        else DrawScene(world, grove, inventory, player, trail, editor, liquids, lights, camera, debug, !packOpen);
+        {
+            PROFILE_ZONE("DrawScene");
 
-        DrawHud(world, grove, player, editor, camera, debug, lantern, notice, noticeFor);
+            if (packOpen) backdrop.Compose(config::kPanelDim);
+            else DrawScene(world, grove, inventory, player, trail, editor, liquids, lights, camera, debug, !packOpen);
+        }
 
-        // The panel replaces the bar rather than sitting over it, since it draws
-        // those same nine slots as its own bottom row.
-        if (packOpen) inventory.Draw();
-        else hotbar::Draw(inventory);
+        {
+            PROFILE_ZONE("DrawHud");
 
-        // Over everything, panel and bar included: an answer that arrived behind the
-        // inventory is an answer nobody read.
-        chat.Draw(dt);
+            DrawHud(world, grove, player, editor, camera, debug, lantern, notice, noticeFor);
 
-        EndDrawing();
+            // The panel replaces the bar rather than sitting over it, since it draws
+            // those same nine slots as its own bottom row.
+            if (packOpen) inventory.Draw();
+            else hotbar::Draw(inventory);
+
+            // Over everything, panel and bar included: an answer that arrived behind the
+            // inventory is an answer nobody read.
+            chat.Draw(dt);
+        }
+
+        {
+            // The frame handed over and waited on. With a target frame rate set
+            // this is also where the slack goes, so it reads as the whole of
+            // whatever the rest of the frame did not use.
+            PROFILE_ZONE("EndDrawing");
+
+            EndDrawing();
+        }
     }
 
+    if (profiling) profile::Report("frame");
+
+    world.UnloadPainted();
     grove.Unload();
     lights.Unload();
     liquids.Unload();

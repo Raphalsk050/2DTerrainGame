@@ -1,46 +1,28 @@
 #include "light.h"
 
+#include "pool.h"
+#include "profile.h"
+
 #include <algorithm>
 #include <cmath>
-#include <thread>
 
 namespace light {
 namespace {
 
-// Runs `body` over [0, count) across the machine's cores.
+const char *const kMarchZones[] = {"march 0", "march 1", "march 2", "march 3", "march 4", "march 5"};
+const char *const kMergeZones[] = {"merge 0", "merge 1", "merge 2", "merge 3", "merge 4", "merge 5"};
+
+// Runs `body` over [0, count) across the machine's cores. See pool.h.
 //
-// The march is the one part of the solve worth splitting. Every ray is
-// independent of every other, there are tens of thousands of them, and each
-// writes only to its own sample. The merge reads across probes and costs a
-// fraction as much, so it stays where it is.
+// The count is a number of probes rather than of columns, and that distinction
+// matters at the top of the stack: the coarsest cascade has as many samples as
+// the finest but lays them out over a quarter as many columns each way, so a
+// split by column left it with fewer columns than there were workers and it ran
+// on one core. It is also the cascade whose rays are longest — it was the single
+// most expensive pass in the frame, and it was the one pass not being shared.
 template <typename Body>
 void Parallel(int count, Body body) {
-    const unsigned cores = std::thread::hardware_concurrency();
-    const int workers    = static_cast<int>(std::min(std::max(cores, 1u), 16u));
-
-    // Splitting a handful of columns costs more in threads than it saves in
-    // work, and the top cascades have very few.
-    if (workers <= 1 || count < workers * 2) {
-        for (int i = 0; i < count; i++) body(i);
-        return;
-    }
-
-    std::vector<std::thread> pool;
-    pool.reserve(workers - 1);
-
-    // Interleaved rather than split into blocks. A ray that leaves the region
-    // dies within a few steps, and those rays are all gathered along one edge
-    // of it, so a block split would hand one worker every expensive ray and
-    // leave the rest idle.
-    for (int w = 1; w < workers; w++) {
-        pool.emplace_back([&body, count, workers, w] {
-            for (int i = w; i < count; i += workers) body(i);
-        });
-    }
-
-    for (int i = 0; i < count; i += workers) body(i);
-
-    for (std::thread &worker : pool) worker.join();
+    pool::For(count, body);
 }
 
 // A ray with less than this left is treated as stopped. Carrying it on costs
@@ -102,6 +84,8 @@ float Field::IntervalStart(int level) const {
 }
 
 void Field::BuildPyramid(const Medium &medium) {
+    PROFILE_ZONE("pyramid");
+
     pyramid_.cols    = medium.cols;
     pyramid_.rows    = medium.rows;
     pyramid_.spacing = medium.spacing;
@@ -138,7 +122,7 @@ void Field::BuildPyramid(const Medium &medium) {
         const std::vector<float> &fineExtinction = pyramid_.extinction[level - 1];
         const std::vector<Radiance> &fineEmission = pyramid_.emission[level - 1];
 
-        for (int i = 0; i < cols; i++) {
+        Parallel(cols, [&](int i) {
             for (int j = 0; j < rows; j++) {
                 float stopped = 0.0f;
                 float average = 0.0f;
@@ -184,7 +168,7 @@ void Field::BuildPyramid(const Medium &medium) {
                 extinction[i * rows + j] = stopped * settings_.coarseOcclusion + average * share * (1.0f - settings_.coarseOcclusion);
                 emission[i * rows + j]   = given * share;
             }
-        }
+        });
     }
 }
 
@@ -287,6 +271,8 @@ bool Field::ReachesSky(Vector2 from, Vector2 to) const {
 }
 
 void Field::March(int level) {
+    PROFILE_ZONE_AT(kMarchZones, level, 6);
+
     Cascade &cascade = cascades_[level];
 
     const float from = IntervalStart(level);
@@ -307,64 +293,97 @@ void Field::March(int level) {
 
     const bool top = (level + 1 == static_cast<int>(cascades_.size()));
 
-    Parallel(cascade.cols, [&](int i) {
-        for (int j = 0; j < cascade.rows; j++) {
-            // Each cascade has its own probe spacing, so the position cannot
-            // come from the base grid's accessor.
-            const Vector2 probe = {origin_.x + (static_cast<float>(i) + 0.5f) * cascade.spacing,
-                                   origin_.y + (static_cast<float>(j) + 0.5f) * cascade.spacing};
+    // The march reads one pyramid level and one region for its whole run, so
+    // everything about them is worked out once here rather than inside the step.
+    //
+    // It used to be a call per sample to Inside, EmissionAt and ExtinctionAt,
+    // each of which recomputed the level's dimensions and divided a world
+    // coordinate by the cell spacing — four divisions and four floors for a step
+    // whose actual work is one multiply and one add.
+    const std::vector<float> &extinction = pyramid_.extinction[mip];
+    const std::vector<Radiance> &emission = pyramid_.emission[mip];
 
-            for (int d = 0; d < cascade.directions; d++) {
-                const float angle = (static_cast<float>(d) + 0.5f) * turn;
-                const Vector2 heading = {std::cos(angle), std::sin(angle)};
+    const int mipRows = std::max(1, (pyramid_.rows + (1 << mip) - 1) >> mip);
 
-                Radiance gathered;
-                float transmittance = 1.0f;
+    const float inverse = 1.0f / pyramid_.spacing;
+    const float half    = pyramid_.spacing * 0.5f;
 
-                // Where the ray would have got to, whether or not the region
-                // reached that far.
-                //
-                // It has to be the end of the interval and never the point
-                // where the ray left the region. That edge is a screen's width
-                // from the camera and moves with it, so a sky credited there
-                // changes every time the player takes a step, and the whole
-                // world flickers in time with the walking.
+    const float minX = pyramid_.origin.x - half;
+    const float minY = pyramid_.origin.y - half;
+    const float maxX = minX + static_cast<float>(pyramid_.cols) * pyramid_.spacing;
+    const float maxY = minY + static_cast<float>(pyramid_.rows) * pyramid_.spacing;
+
+    // Every interval is a whole number of steps by construction — a cascade's
+    // interval is four times the one below it and its step twice — so counting
+    // them is exact and spares the loop an accumulator that drifts.
+    const int steps = std::max(1, static_cast<int>((to - from) / step + 0.5f));
+
+    Parallel(cascade.cols * cascade.rows, [&](int n) {
+        const int i = n / cascade.rows;
+        const int j = n - i * cascade.rows;
+
+        // Each cascade has its own probe spacing, so the position cannot
+        // come from the base grid's accessor.
+        const Vector2 probe = {origin_.x + (static_cast<float>(i) + 0.5f) * cascade.spacing,
+                               origin_.y + (static_cast<float>(j) + 0.5f) * cascade.spacing};
+
+        for (int d = 0; d < cascade.directions; d++) {
+            const float angle = (static_cast<float>(d) + 0.5f) * turn;
+            const Vector2 heading = {std::cos(angle), std::sin(angle)};
+
+            Radiance gathered;
+            float transmittance = 1.0f;
+
+            for (int s = 0; s < steps; s++) {
+                const float t = from + static_cast<float>(s) * step;
+
+                const float x = probe.x + heading.x * t;
+                const float y = probe.y + heading.y * t;
+
+                // The region is a rectangle, so a ray that leaves it never
+                // comes back. Everything beyond it is empty and unlit, and
+                // stopping here is what keeps the far cascades cheap: most
+                // of their rays are pointed out of the region and end
+                // within a few steps.
+                if (x < minX || y < minY || x >= maxX || y >= maxY) break;
+
+                // Inside the region the finest index is non-negative, so the
+                // rounding is a truncation and the coarse index it shifts down
+                // to is in range without a second bound to test.
+                const int fi = static_cast<int>((x - pyramid_.origin.x) * inverse + 0.5f);
+                const int fj = static_cast<int>((y - pyramid_.origin.y) * inverse + 0.5f);
+
+                const int cell = (fi >> mip) * mipRows + (fj >> mip);
+
+                gathered = gathered + emission[cell] * (transmittance * perStep);
+
+                transmittance *= 1.0f - extinction[cell];
+
+                if (transmittance <= kMinTransmittance) {
+                    transmittance = 0.0f;
+                    break;
+                }
+            }
+
+            // Only the topmost cascade sees the sky. It is the one whose
+            // rays are still travelling when the stack runs out; adding it
+            // lower down would count the same sky once per cascade.
+            //
+            // Credited at the end of the interval and never at the point where
+            // the ray left the region. That edge is a screen's width from the
+            // camera and moves with it, so a sky credited there changes every
+            // time the player takes a step, and the whole world flickers in time
+            // with the walking.
+            if (top && transmittance > 0.0f) {
                 const Vector2 end = {probe.x + heading.x * to, probe.y + heading.y * to};
 
-                for (float t = from; t < to; t += step) {
-                    const Vector2 at = {probe.x + heading.x * t, probe.y + heading.y * t};
-
-                    // The region is a rectangle, so a ray that leaves it never
-                    // comes back. Everything beyond it is empty and unlit, and
-                    // stopping here is what keeps the far cascades cheap: most
-                    // of their rays are pointed out of the region and end
-                    // within a few steps.
-                    if (!Inside(at)) break;
-
-                    gathered = gathered + EmissionAt(mip, at) * (transmittance * perStep);
-
-                    transmittance *= 1.0f - ExtinctionAt(mip, at);
-
-                    if (transmittance <= kMinTransmittance) {
-                        transmittance = 0.0f;
-                        break;
-                    }
-                }
-
-                // Only the topmost cascade sees the sky. It is the one whose
-                // rays are still travelling when the stack runs out; adding it
-                // lower down would count the same sky once per cascade.
-                if (top && transmittance > 0.0f) {
-                    const Vector2 end = {probe.x + heading.x * to, probe.y + heading.y * to};
-
-                    gathered = gathered + SkyAt(end) * transmittance;
-                }
-
-                const int index = cascade.Index(i, j, d);
-
-                cascade.radiance[index]      = gathered;
-                cascade.transmittance[index] = transmittance;
+                gathered = gathered + SkyAt(end) * transmittance;
             }
+
+            const int index = cascade.Index(i, j, d);
+
+            cascade.radiance[index]      = gathered;
+            cascade.transmittance[index] = transmittance;
         }
     });
 
@@ -372,6 +391,8 @@ void Field::March(int level) {
 }
 
 void Field::Merge(int level) {
+    PROFILE_ZONE_AT(kMergeZones, level, 6);
+
     Cascade &lower       = cascades_[level];
     const Cascade &upper = cascades_[level + 1];
 
@@ -385,51 +406,61 @@ void Field::Merge(int level) {
     // reads only from the cascade above, which is finished, so the columns are
     // independent. The merge turned out to cost as much as the march does:
     // there are as many samples in it, and each one reads sixteen.
-    Parallel(lower.cols, [&](int i) {
-        for (int j = 0; j < lower.rows; j++) {
-            // Where this probe falls among the upper cascade's probes, which
-            // are twice as far apart. Interpolating rather than taking the
-            // nearest is what stops the coarse grid from showing through as
-            // blocks in the light.
-            const float u = ((static_cast<float>(i) + 0.5f) * lower.spacing) / upper.spacing - 0.5f;
-            const float v = ((static_cast<float>(j) + 0.5f) * lower.spacing) / upper.spacing - 0.5f;
+    // Split by probe rather than by column, for the reason Parallel gives: the
+    // upper cascades have few columns and were falling back to one core.
+    Parallel(lower.cols * lower.rows, [&](int n) {
+        const int i = n / lower.rows;
+        const int j = n - i * lower.rows;
 
-            const Bilinear at = Weights(u, v);
+        // Where this probe falls among the upper cascade's probes, which
+        // are twice as far apart. Interpolating rather than taking the
+        // nearest is what stops the coarse grid from showing through as
+        // blocks in the light.
+        const float u = ((static_cast<float>(i) + 0.5f) * lower.spacing) / upper.spacing - 0.5f;
+        const float v = ((static_cast<float>(j) + 0.5f) * lower.spacing) / upper.spacing - 0.5f;
 
-            const int i0 = Clamp(at.i0, upper.cols);
-            const int i1 = Clamp(at.i0 + 1, upper.cols);
-            const int j0 = Clamp(at.j0, upper.rows);
-            const int j1 = Clamp(at.j0 + 1, upper.rows);
+        const Bilinear at = Weights(u, v);
 
-            const float w00 = (1.0f - at.fx) * (1.0f - at.fy);
-            const float w10 = at.fx * (1.0f - at.fy);
-            const float w01 = (1.0f - at.fx) * at.fy;
-            const float w11 = at.fx * at.fy;
+        const int i0 = Clamp(at.i0, upper.cols);
+        const int i1 = Clamp(at.i0 + 1, upper.cols);
+        const int j0 = Clamp(at.j0, upper.rows);
+        const int j1 = Clamp(at.j0 + 1, upper.rows);
 
-            for (int d = 0; d < lower.directions; d++) {
-                Radiance beyond;
+        const float w00 = (1.0f - at.fx) * (1.0f - at.fy);
+        const float w10 = at.fx * (1.0f - at.fy);
+        const float w01 = (1.0f - at.fx) * at.fy;
+        const float w11 = at.fx * at.fy;
 
-                for (int m = 0; m < fan; m++) {
-                    const int up = d * fan + m;
+        // The four runs of upper directions this probe reads, which are
+        // contiguous in each of the four neighbours. Hoisted so the inner loop
+        // walks them instead of recomputing an index per sample.
+        const Radiance *const up00 = &upper.radiance[upper.Index(i0, j0, 0)];
+        const Radiance *const up10 = &upper.radiance[upper.Index(i1, j0, 0)];
+        const Radiance *const up01 = &upper.radiance[upper.Index(i0, j1, 0)];
+        const Radiance *const up11 = &upper.radiance[upper.Index(i1, j1, 0)];
 
-                    beyond = beyond + upper.radiance[upper.Index(i0, j0, up)] * w00 +
-                             upper.radiance[upper.Index(i1, j0, up)] * w10 +
-                             upper.radiance[upper.Index(i0, j1, up)] * w01 +
-                             upper.radiance[upper.Index(i1, j1, up)] * w11;
-                }
+        for (int d = 0; d < lower.directions; d++) {
+            Radiance beyond;
 
-                const int index = lower.Index(i, j, d);
+            for (int m = 0; m < fan; m++) {
+                const int up = d * fan + m;
 
-                // Weighted by what the near interval let through. Light from
-                // further away reaches the probe only through whatever did not
-                // stop it on the way.
-                lower.radiance[index] = lower.radiance[index] + beyond * (mix * lower.transmittance[index]);
+                beyond = beyond + up00[up] * w00 + up10[up] * w10 + up01[up] * w01 + up11[up] * w11;
             }
+
+            const int index = lower.Index(i, j, d);
+
+            // Weighted by what the near interval let through. Light from
+            // further away reaches the probe only through whatever did not
+            // stop it on the way.
+            lower.radiance[index] = lower.radiance[index] + beyond * (mix * lower.transmittance[index]);
         }
     });
 }
 
 void Field::Spread() {
+    PROFILE_ZONE("spread");
+
     const float reach = settings_.surfaceReach;
     if (reach <= 0.0f) return;
 
@@ -439,7 +470,7 @@ void Field::Spread() {
     previous_.assign(count, Radiance{});
 
     // Open space is its own answer, and the source everything solid draws from.
-    for (int i = 0; i < cols_; i++) {
+    Parallel(cols_, [&](int i) {
         for (int j = 0; j < rows_; j++) {
             const int cell = i * rows_ + j;
             if (solid_[cell] > 0.0f) continue;
@@ -447,7 +478,7 @@ void Field::Spread() {
             distance_[cell] = 0.0f;
             previous_[cell] = probes_[cell];
         }
-    }
+    });
 
     // The daylight, before anything else, and straight down.
     //
@@ -460,7 +491,7 @@ void Field::Spread() {
     sunlit_.assign(count, Radiance{});
     sunDepth_.assign(count, kUnreachable);
 
-    for (int i = 0; i < cols_; i++) {
+    Parallel(cols_, [&](int i) {
         Radiance above{};
         float depth = kUnreachable;
 
@@ -486,14 +517,14 @@ void Field::Spread() {
             sunDepth_[cell] = depth;
             sunlit_[cell]   = above;
         }
-    }
+    });
 
     // Then the same daylight averaged sideways, before anything is carried down.
     // See Settings::sunBlend for the hole this fills in.
     if (settings_.sunBlend > 0) {
         previous_ = sunlit_;
 
-        for (int i = 0; i < cols_; i++) {
+        Parallel(cols_, [&](int i) {
             for (int j = 0; j < rows_; j++) {
                 const int cell = i * rows_ + j;
                 if (sunDepth_[cell] >= kUnreachable) continue;
@@ -519,7 +550,7 @@ void Field::Spread() {
 
                 if (counted > 0.0f) previous_[cell] = total * (1.0f / counted);
             }
-        }
+        });
 
         sunlit_ = previous_;
     }
@@ -589,7 +620,7 @@ void Field::Spread() {
     // Then the light of whatever was nearest, dimmed by how far it had to come.
     // Never more than the space it faces was itself given, which is what keeps a
     // wall from outshining the cave it stands in.
-    for (int i = 0; i < cols_; i++) {
+    Parallel(cols_, [&](int i) {
         for (int j = 0; j < rows_; j++) {
             const int cell = i * rows_ + j;
             if (solid_[cell] <= 0.0f) continue;
@@ -636,7 +667,7 @@ void Field::Spread() {
 
             probes_[cell] = value;
         }
-    }
+    });
 
     // One averaging pass to take the seams out.
     //
@@ -649,7 +680,7 @@ void Field::Spread() {
     // a wall back up towards the cave beside it and undo the rule above.
     previous_ = probes_;
 
-    for (int i = 0; i < cols_; i++) {
+    Parallel(cols_, [&](int i) {
         for (int j = 0; j < rows_; j++) {
             const int cell = i * rows_ + j;
             if (solid_[cell] <= 0.0f) continue;
@@ -674,10 +705,12 @@ void Field::Spread() {
 
             if (counted > 0.0f) probes_[cell] = total * (1.0f / counted);
         }
-    }
+    });
 }
 
 void Field::Gather() {
+    PROFILE_ZONE("gather");
+
     const Cascade &base = cascades_[0];
 
     cols_ = base.cols;
@@ -692,7 +725,7 @@ void Field::Gather() {
     // its answer.
     const int cover = std::max(1, settings_.probeCells);
 
-    for (int i = 0; i < cols_; i++) {
+    Parallel(cols_, [&](int i) {
         for (int j = 0; j < rows_; j++) {
             float filled = 0.0f;
             int counted  = 0;
@@ -711,7 +744,7 @@ void Field::Gather() {
 
             if (counted > 0) solid_[i * rows_ + j] = filled / static_cast<float>(counted);
         }
-    }
+    });
 
     // Averaged over directions rather than summed: what a surface or a rule
     // asks for is how much light is here, not how much came down each of four
@@ -719,7 +752,7 @@ void Field::Gather() {
     // that changes between cascades.
     const float share = 1.0f / static_cast<float>(base.directions);
 
-    for (int i = 0; i < cols_; i++) {
+    Parallel(cols_, [&](int i) {
         for (int j = 0; j < rows_; j++) {
             Radiance total;
 
@@ -729,7 +762,7 @@ void Field::Gather() {
 
             probes_[i * rows_ + j] = total * share;
         }
-    }
+    });
 }
 
 void Field::Solve(const Medium &medium, const Settings &settings) {
@@ -771,8 +804,15 @@ void Field::Solve(const Medium &medium, const Settings &settings) {
 
         const auto samples = static_cast<std::size_t>(cascade.cols) * cascade.rows * cascade.directions;
 
-        cascade.radiance.assign(samples, Radiance{});
-        cascade.transmittance.assign(samples, 0.0f);
+        {
+            PROFILE_ZONE("cascade size");
+
+            // Sized rather than cleared. The march writes every sample of both
+            // buffers before anything reads one, so zeroing them first was a
+            // couple of megabytes of memset a frame for a value nothing sees.
+            cascade.radiance.resize(samples);
+            cascade.transmittance.resize(samples);
+        }
 
         March(level);
 

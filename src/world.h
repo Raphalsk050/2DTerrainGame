@@ -58,6 +58,25 @@ public:
     // regenerates from the noise alone.
     void Reset();
 
+    // Rasterises the ground of every chunk the view needs and has not got.
+    //
+    // Opens a render target of its own, so it has to run outside a frame — a
+    // texture mode cannot be entered inside one. Call it before BeginDrawing;
+    // DrawTerrain then draws what this prepared.
+    void PaintChunks(Rectangle view);
+
+    // Releases the textures. Called before the window closes, since they are GPU
+    // resources and the context goes with it.
+    void UnloadPainted();
+
+    // Drops what the grass band remembers about every column, so the next Update
+    // works the whole of it out again.
+    //
+    // Exists so that the remembered band can be checked against a recomputation
+    // of it — see `--sodcheck`. Nothing in the game needs it: what invalidates a
+    // column is a change to the ground there, and the world does that itself.
+    void ForgetGrass() { sodColumns_.clear(); }
+
     // Rock queries in world space, answered by the vertex nearest to the
     // position. Positions in chunks that are not resident fall back to the
     // noise function at that same vertex, so collision stays correct beyond
@@ -396,6 +415,37 @@ private:
         std::vector<Grid> fields; // One per Element.
         bool edited      = false; // Hand-painted, so no longer derivable.
         bool holdsLiquid = false; // Flooded, so no longer derivable either.
+
+        // A silhouette the chunk has already been asked for.
+        //
+        // The draw paints each material as the union of itself and everything
+        // that outranks it, so it asks for ten of these per chunk — each a fresh
+        // grid of a thousand samples, each sample the maximum over ten fields.
+        // That was the whole of it being built again every frame for a shape
+        // that follows from the fields alone, and the fields change only where
+        // somebody digs.
+        struct Silhouette {
+            int minPrecedence = 0;
+            bool groundOnly   = false;
+
+            // The cells that have anything in them at all, as a half-open range
+            // of grid indices. Most of these are empty over most chunks — the ore
+            // ranks describe nothing at all in a chunk of open hillside — and the
+            // draw was walking every cell of every one of them to find that out.
+            int firstCol = 0;
+            int lastCol  = -1;
+            int firstRow = 0;
+            int lastRow  = -1;
+
+            bool Empty() const { return lastCol < firstCol || lastRow < firstRow; }
+
+            Grid field;
+        };
+
+        // Dropped whole whenever a material that occupies its vertex is written
+        // into the chunk, which is the only thing any of these depend on. Liquid
+        // is written every frame and is not one of those.
+        mutable std::vector<Silhouette> silhouettes;
     };
 
     // The state a hand-edited vertex was left in.
@@ -435,7 +485,59 @@ private:
     Vector2 SnapToLattice(Vector2 world) const;
 
     const Chunk *Find(int cx, int cy) const;
+
+    // The same, for the writers. Shares the remembered answer below, which is
+    // what the water's write-back needs: it walks the same lattice the read did
+    // and was going back to the map for every vertex of it.
+    Chunk *Find(int cx, int cy) { return const_cast<Chunk *>(static_cast<const World *>(this)->Find(cx, cy)); }
+
     Chunk &Emplace(int cx, int cy);
+
+    // Generating one, which is a pure function of where it is and of what has
+    // been edited into it — so several can be built at once. Nothing here touches
+    // the world; Settle is what puts the result into it.
+    Chunk Build(int cx, int cy) const;
+    Chunk &Settle(int cx, int cy, Chunk &&chunk);
+
+    // A lattice position resolved to the chunk holding it, once.
+    //
+    // Every field of a chunk shares its origin and its spacing, so the local
+    // index is the same for all of them: the snap, the chunk division and the
+    // lookup behind them need doing once per position rather than once per
+    // material. The two passes that read every material at every vertex of a
+    // whole region — the light's medium and the water's read-back — were paying
+    // for all three ten times over at each vertex, and between them that was more
+    // than a third of the frame.
+    struct Vertex {
+        const Chunk *chunk = nullptr;
+        Vector2 at{};      // The position, snapped to the lattice.
+        int i         = 0;
+        int j         = 0;
+        bool resident = false; // Whether (i, j) falls inside the chunk's fields.
+    };
+
+    Vertex Resolve(Vector2 world) const;
+
+    // One material at an already-resolved position, answered from the noise where
+    // no resident chunk holds it — exactly as ValueAt does.
+    float ValueAt(const Vertex &vertex, Element element) const;
+
+    // How many times a chunk has been released.
+    //
+    // Find remembers the chunk it last answered with — every read of the world
+    // goes through it, and the callers that matter walk a lattice, staying inside
+    // one chunk for as many vertices as a chunk is wide. The map was being asked
+    // the same question tens of times in a row, and a hash lookup that lands in a
+    // cold bucket is most of what a lattice read costs.
+    //
+    // What it remembers is a pointer, which an insert cannot move —
+    // unordered_map keeps its elements where they are across a rehash — but which
+    // an erase can. This counts the erases, so an answer from before one is not
+    // mistaken for a live chunk. It is a counter rather than a flag because the
+    // memory is per thread and there is nowhere central to clear.
+    long long chunkAge_ = 0;
+
+    void ForgetRecent() { chunkAge_++; }
 
     // Writes a lattice position in every chunk that holds a copy of it, which
     // is up to four at a chunk corner.
@@ -539,8 +641,16 @@ private:
     // and can be mined back out, but it is a fixture standing in the ground
     // rather than a part of it, and drawing it into the rock's outline gives it
     // a rock-coloured halo.
-    Grid OccupancyField(const Chunk &chunk, int minPrecedence = std::numeric_limits<int>::min(),
-                        bool groundOnly = false) const;
+    //
+    // Returns a reference into the chunk's own memory of it, which stands until
+    // something writes a material into that chunk. Nothing holds one across a
+    // write, and nothing should.
+    const Grid &OccupancyField(const Chunk &chunk, int minPrecedence = std::numeric_limits<int>::min(),
+                               bool groundOnly = false) const;
+
+    // The same with the bounds of what is actually in it, which is what the draw
+    // wants: most ranks describe nothing at all in a given chunk.
+    const Chunk::Silhouette &Occupancy(const Chunk &chunk, int minPrecedence, bool groundOnly) const;
 
     // Cutoff each generated material's noise has to clear, measured from the
     // noise itself so that `probability` in the element table means what it says.
@@ -585,6 +695,37 @@ private:
     // Works out the grass over a span of columns and points sodRamp_/sodCover_ at
     // it. Called once a frame, before anything reads either.
     void ReadSod(Rectangle view);
+
+    // What ReadSod worked out about one column of the plant grid, and whether it
+    // has been worked out at all.
+    struct SodColumn {
+        float top          = 0.0f;
+        float cover        = 0.0f;
+        terrain::Climate climate{};
+        bool known         = false;
+    };
+
+    // The band's surface, kept between frames.
+    //
+    // Finding it was the single most expensive thing in the frame: every column
+    // walks the lattice down from the skyline asking each of the ten materials a
+    // body stands on at every step, the band is wider than the view, and all of
+    // it was being walked again sixty times a second.
+    //
+    // It is also the part of the world least likely to have moved — ground
+    // changes only where somebody digs — so it is remembered per absolute column.
+    // A frame walks the columns that have scrolled into the band and the ones a
+    // change invalidated, and nothing else. Standing still costs nothing at all.
+    std::vector<SodColumn> sodColumns_;
+
+    // Scratch for shifting the above onto a new band, kept so the shift does not
+    // allocate every frame.
+    std::vector<SodColumn> sodShifted_;
+
+    int sodColumnsFirst_ = 0;
+
+    // Drops what is remembered about every column over a span of world x.
+    void ForgetSod(float fromX, float toX);
 
     // Takes the grass back off the columns whose earth was turned over lately, and
     // lets it back on at the speed the front crosses them.
@@ -682,7 +823,81 @@ private:
 
     std::unordered_map<std::int64_t, Chunk> chunks_;
 
+    // The chunks one Update found missing, and what was built for them. Kept as
+    // members so that streaming does not allocate a vector of grids every frame.
+    struct Coming {
+        int cx = 0;
+        int cy = 0;
+    };
+
+    std::vector<Coming> pending_;
+    std::vector<Chunk> built_;
+
+    // A chunk's ground, rasterised once into a texture of its own.
+    //
+    // The ground does not change unless somebody digs, and rasterising it was by
+    // far the largest thing in the frame: every square of it sampled three times
+    // over and painted with two octaves of noise, once for each material standing
+    // in that chunk, sixty times a second, to draw the same picture every time.
+    //
+    // Held at one texel per world unit, and that is what makes the blit exactly
+    // the rasterisation it replaces rather than a resampling of it: at that scale
+    // a screen pixel takes the texel whose square it lands in, which is the same
+    // square the rectangle would have covered it with. The five-unit squares the
+    // ground is drawn in are blocks of texels inside this — see config::kPixelSize.
+    struct Painted {
+        RenderTexture2D texture{};
+
+        int cx = 0;
+        int cy = 0;
+
+        bool holds    = false; // Whether it stands for a chunk at all.
+        long long age = 0;     // When it was last drawn from, for eviction.
+    };
+
+    // A square of ground overruns its chunk by up to one square: the squares are
+    // five units and a chunk is a hundred and ninety-two, so they do not divide,
+    // and the square straddling a border is drawn by whichever chunk its middle
+    // falls in. This is what gives it somewhere to land. Neighbours therefore
+    // overlap here, and draw over each other without harm — the squares are
+    // disjoint, so where one has something the other is clear.
+    static constexpr int kPaintedMargin = 8;
+
+    // How many chunk textures to keep. A full screen needs some eighty; the rest
+    // is room for what is streaming in, so that walking does not evict a chunk
+    // that is about to be wanted again.
+    static constexpr int kPaintedSlots = 192;
+
+    std::vector<Painted> painted_;
+    std::unordered_map<std::int64_t, int> paintedOf_;
+
+    // The chunks of grass one frame draws, and the fields derived for them.
+    // Members so that a frame does not allocate a grid per chunk.
+    mutable std::vector<const Chunk *> sodFields_;
+    mutable std::vector<Grid> sodGrids_;
+
+    long long paintedAge_ = 0;
+
+    // Rasterises one chunk into a slot.
+    void PaintChunk(Painted &slot, int cx, int cy);
+
+    // Forgets the picture of a chunk whose ground has changed.
+    void DropPainted(int cx, int cy);
+
+    // The slot holding a chunk, or nothing.
+    const Painted *PaintedFor(int cx, int cy) const;
+
     water::Settings waterSettings_;
+
+    // What the liquid held before the step, so that the write-back can tell which
+    // vertices the step actually moved.
+    //
+    // The band is a screen and a half across and nearly all of it is dry rock and
+    // open air. Writing every vertex of it regardless meant a lattice walk and a
+    // chunk lookup for a hundred thousand vertices a step, to store the same zero
+    // that was already there — and the step runs several times in a slow frame,
+    // which is exactly when it can least afford to.
+    std::vector<float> settled_;
 
     // Kept between steps so that a 9000-cell region is not reallocated sixty
     // times a second.
@@ -737,6 +952,21 @@ private:
     // One entry per lattice column, filled the first time that column is asked
     // about. Cleared with the world, since regenerating changes the ground.
     mutable std::unordered_map<int, float> skyline_;
+
+    // Whether Skyline may add to that record.
+    //
+    // Cleared while the grass band is walked across the cores. The record is a
+    // hash map, and one thread inserting into it while the others are reading is
+    // a race — so the columns the walk will ask about are put in first, in order,
+    // and the walk itself only reads.
+    bool skylineWritable_ = true;
+
+    // The scan itself, without the record. Pure, so it is safe from any thread.
+    float ScanSkyline(int column) const;
+
+    // Fills the record for a run of columns, so that a walk across the cores
+    // finds every answer already there.
+    void WarmSkyline(int firstColumn, int lastColumn);
 
     // The ground under one frame's rain. Kept between frames only so that drawing
     // does not allocate; nothing in it survives the call that fills it.

@@ -117,8 +117,26 @@ enum class Square { Empty, Fill, Edge };
 // called once per square across the whole of the visible world and an indirect
 // call each time would be paid for a hundred thousand times a frame to buy
 // nothing.
+// The cells of a block that are worth walking, as an inclusive range of indices.
+// A caller that already knows where the block has anything in it says so, and a
+// block that is entirely empty is not walked at all. Left at its default the
+// whole block is walked, which is what a caller that does not know has to do.
+struct Cells {
+    int firstCol = 0;
+    int lastCol  = -1;
+    int firstRow = 0;
+    int lastRow  = -1;
+
+    bool Empty() const { return lastCol < firstCol || lastRow < firstRow; }
+};
+
+// `clip` bounds the cells that are walked at all. A block is a whole chunk and
+// the view cuts across it, so most of what a block describes is off screen and
+// was being sampled and submitted anyway — five field reads and a rectangle per
+// square, for squares nobody could see. Left empty, the whole block is drawn.
 template <typename Painter>
-void DrawPainted(const Grid &grid, float threshold, Painter paint, Color outline, float pixel) {
+void DrawPainted(const Grid &grid, float threshold, Painter paint, Color outline, float pixel,
+                 Rectangle clip = {0.0f, 0.0f, 0.0f, 0.0f}, Cells cells = {}) {
     if (pixel <= 0.0f) return;
 
     // A painter that answers the same colour everywhere lets a cell the contour
@@ -129,8 +147,24 @@ void DrawPainted(const Grid &grid, float threshold, Painter paint, Color outline
     const float step    = static_cast<float>(grid.Spacing());
     const bool outlined = outline.a > 0;
 
-    for (int i = 0; i < grid.Cols() - 1; i++) {
-        for (int j = 0; j < grid.Rows() - 1; j++) {
+    int firstCol = std::max(0, cells.firstCol);
+    int lastCol  = (cells.lastCol >= cells.firstCol) ? std::min(grid.Cols() - 2, cells.lastCol) : grid.Cols() - 2;
+    int firstRow = std::max(0, cells.firstRow);
+    int lastRow  = (cells.lastRow >= cells.firstRow) ? std::min(grid.Rows() - 2, cells.lastRow) : grid.Rows() - 2;
+
+    if (clip.width > 0.0f && clip.height > 0.0f) {
+        const Vector2 origin = grid.Origin();
+
+        // A cell either side of the clip, because a square on the boundary reads
+        // its neighbours to find its own normal and its outline.
+        firstCol = std::max(firstCol, static_cast<int>(std::floor((clip.x - origin.x) / step)) - 1);
+        lastCol  = std::min(lastCol, static_cast<int>(std::ceil((clip.x + clip.width - origin.x) / step)) + 1);
+        firstRow = std::max(firstRow, static_cast<int>(std::floor((clip.y - origin.y) / step)) - 1);
+        lastRow  = std::min(lastRow, static_cast<int>(std::ceil((clip.y + clip.height - origin.y) / step)) + 1);
+    }
+
+    for (int i = firstCol; i <= lastCol; i++) {
+        for (int j = firstRow; j <= lastRow; j++) {
             const float a = grid.ValueAt(i, j);
             const float b = grid.ValueAt(i + 1, j);
             const float c = grid.ValueAt(i, j + 1);
@@ -175,21 +209,43 @@ void DrawPainted(const Grid &grid, float threshold, Painter paint, Color outline
                 Color runColour    = BLANK;
                 int from           = m0;
 
+                // The neighbours to the left and to the right of a square are the
+                // squares either side of it, and a square's own sample is exactly
+                // the number its neighbours want. So the row is walked carrying
+                // them rather than sampling the same point three times over.
+                //
+                // A filled square costs three field reads instead of five, and
+                // this loop runs for every square of the visible world once per
+                // material.
+                float behind = 0.0f;
+                float here   = 0.0f;
+
+                bool haveHere   = false; // `here` already holds this square's sample.
+                bool haveBehind = false; // `behind` holds the one to its left.
+
                 for (int m = m0; m <= m1 + 1; m++) {
                     const float x = (static_cast<float>(m) + 0.5f) * pixel;
 
                     detail::Square square = detail::Square::Empty;
                     Color colour          = BLANK;
 
-                    if (m <= m1 && x >= at.x && x < at.x + step) {
-                        const float here = SampleAt(grid, {x, y}) - threshold;
+                    const bool covered = m <= m1 && x >= at.x && x < at.x + step;
+
+                    if (covered) {
+                        if (!haveHere) here = SampleAt(grid, {x, y}) - threshold;
+
+                        haveHere = false;
 
                         if (here > 0.0f) {
                             // The four neighbours, which serve twice: they are
                             // the outline test, and they are the central
                             // difference the depth and the normal come from.
-                            const float left  = SampleAt(grid, {x - pixel, y}) - threshold;
-                            const float right = SampleAt(grid, {x + pixel, y}) - threshold;
+                            //
+                            // The one to the right is taken at the position that
+                            // square will sample itself at, so carrying it over
+                            // hands it the very number it would have read.
+                            const float right = SampleAt(grid, {(static_cast<float>(m) + 1.5f) * pixel, y}) - threshold;
+                            const float left  = haveBehind ? behind : (SampleAt(grid, {x - pixel, y}) - threshold);
                             const float above = SampleAt(grid, {x, y - pixel}) - threshold;
                             const float below = SampleAt(grid, {x, y + pixel}) - threshold;
 
@@ -218,7 +274,24 @@ void DrawPainted(const Grid &grid, float threshold, Painter paint, Color outline
 
                             square = exposed ? detail::Square::Edge : detail::Square::Fill;
                             colour = exposed ? outline : paint(texel);
+
+                            // The sample to the right belongs to the next square.
+                            behind   = here;
+                            here     = right;
+                            haveHere = true;
+                        } else {
+                            // Nothing was read to the right of an empty square,
+                            // so the next one takes its own — but its neighbour
+                            // to the left is this square, which is known.
+                            behind = here;
                         }
+
+                        haveBehind = true;
+                    } else {
+                        // Outside the cell, so the run of squares this row is
+                        // carrying has been broken.
+                        haveBehind = false;
+                        haveHere   = false;
                     }
 
                     const bool same = (square == run) && (square == detail::Square::Empty || ColorIsEqual(colour, runColour));

@@ -2,6 +2,8 @@
 
 #include "config.h"
 #include "marching_squares.h"
+#include "pool.h"
+#include "profile.h"
 
 #include <algorithm>
 #include <cmath>
@@ -433,11 +435,37 @@ void World::LatticeRange(Rectangle region, int &outI0, int &outJ0, int &outI1, i
 }
 
 const World::Chunk *World::Find(int cx, int cy) const {
+    // Held per thread, because the passes that walk the lattice are split across
+    // the machine's cores and one shared answer between them would be a race.
+    //
+    // A miss is never remembered: a chunk that is not resident now may be
+    // emplaced a moment later, and a remembered absence would have to be
+    // invalidated by every insert. See World::chunkAge_ for what invalidates a
+    // remembered hit.
+    struct Recent {
+        const World *world = nullptr;
+        long long age      = -1;
+        int cx             = 0;
+        int cy             = 0;
+        const Chunk *chunk = nullptr;
+    };
+
+    static thread_local Recent recent;
+
+    if (recent.chunk != nullptr && recent.world == this && recent.age == chunkAge_ && recent.cx == cx
+        && recent.cy == cy) {
+        return recent.chunk;
+    }
+
     const auto it = chunks_.find(Key(cx, cy));
-    return (it != chunks_.end()) ? &it->second : nullptr;
+    if (it == chunks_.end()) return nullptr;
+
+    recent = {.world = this, .age = chunkAge_, .cx = cx, .cy = cy, .chunk = &it->second};
+
+    return recent.chunk;
 }
 
-World::Chunk &World::Emplace(int cx, int cy) {
+World::Chunk World::Build(int cx, int cy) const {
     const Vector2 origin = {cx * ChunkSpan(), cy * ChunkSpan()};
 
     Chunk chunk;
@@ -520,6 +548,27 @@ World::Chunk &World::Emplace(int cx, int cy) {
     // into the contest that produced it, and that is exactly what a live edit
     // does — so a chunk rebuilt from these is the chunk that was thrown away.
     ApplyEdits(chunk, cx, cy);
+
+    return chunk;
+}
+
+World::Chunk &World::Emplace(int cx, int cy) {
+    Chunk chunk = Build(cx, cy);
+
+    return Settle(cx, cy, std::move(chunk));
+}
+
+World::Chunk &World::Settle(int cx, int cy, Chunk &&chunk) {
+    // A column answered before its chunk was resident was answered from the noise
+    // alone, and a built chunk replays whatever was edited into it, so the band's
+    // memory of these columns is dropped as they come into play.
+    const float left = static_cast<float>(cx) * ChunkSpan();
+
+    ForgetSod(left - static_cast<float>(spacing_), left + ChunkSpan() + static_cast<float>(spacing_));
+
+    // A chunk that has just been built has never been drawn, and one being
+    // rebuilt is not the one whose picture was taken.
+    DropPainted(cx, cy);
 
     return chunks_.emplace(Key(cx, cy), std::move(chunk)).first->second;
 }
@@ -620,6 +669,8 @@ void World::ApplyEdits(Chunk &chunk, int cx, int cy) const {
 }
 
 void World::Update(Rectangle view) {
+    PROFILE_ZONE("world.Update");
+
     // Widened by the margin the light will snap its own region out to.
     //
     // A cell the light asks about outside a resident chunk is answered from the
@@ -640,9 +691,38 @@ void World::Update(Rectangle view) {
     int maxCy = 0;
     ChunkRange(covered, minCx, minCy, maxCx, maxCy);
 
-    for (int cx = minCx; cx <= maxCx; cx++) {
-        for (int cy = minCy; cy <= maxCy; cy++) {
-            if (Find(cx, cy) == nullptr) Emplace(cx, cy);
+    {
+        PROFILE_ZONE("chunks");
+
+        // Built across the cores and settled here.
+        //
+        // Walking into new country brings a whole column of chunks in at once,
+        // and generating one is the most expensive single thing the world does —
+        // eight octaves of surface per vertex, then every material laid down and
+        // contested against every other. They do not depend on each other, so the
+        // only part that has to happen in order is putting them into the map.
+        pending_.clear();
+
+        for (int cx = minCx; cx <= maxCx; cx++) {
+            for (int cy = minCy; cy <= maxCy; cy++) {
+                if (Find(cx, cy) == nullptr) pending_.push_back({cx, cy});
+            }
+        }
+
+        if (!pending_.empty()) {
+            built_.clear();
+            built_.resize(pending_.size());
+
+            // One chunk per block and no floor under the count: a chunk costs a
+            // millisecond or two to generate, so two of them are already worth
+            // splitting and there is nothing to be gained by taking them in runs.
+            pool::For(
+                static_cast<int>(pending_.size()),
+                [&](int k) { built_[static_cast<std::size_t>(k)] = Build(pending_[k].cx, pending_[k].cy); }, 2, 1);
+
+            for (std::size_t k = 0; k < pending_.size(); k++) {
+                Settle(pending_[k].cx, pending_[k].cy, std::move(built_[k]));
+            }
         }
     }
 
@@ -650,6 +730,10 @@ void World::Update(Rectangle view) {
     // draw, because the tufts standing on it are drawn by somebody else and the
     // two have to be told the same thing.
     ReadSod(view);
+
+    // Anything released below may be the chunk the recent-chunk pointer refers
+    // to, and there is no cheap way to tell which, so it is dropped either way.
+    ForgetRecent();
 
     for (auto it = chunks_.begin(); it != chunks_.end();) {
         int cx = 0;
@@ -662,13 +746,30 @@ void World::Update(Rectangle view) {
         const bool pinned = it->second.edited || it->second.holdsLiquid;
         const int margin  = pinned ? kDropMargin : kKeepMargin;
 
-        it = (distance > margin) ? chunks_.erase(it) : std::next(it);
+        if (distance > margin) {
+            DropPainted(cx, cy);
+
+            it = chunks_.erase(it);
+            continue;
+        }
+
+        it = std::next(it);
     }
 }
 
 void World::Reset() {
+    ForgetRecent();
+
     chunks_.clear();
     skyline_.clear();
+
+    // Regenerating moves the ground, so nothing the band remembers about it
+    // survives, and neither does any picture taken of it.
+    sodColumns_.clear();
+
+    for (Painted &slot : painted_) slot.holds = false;
+
+    paintedOf_.clear();
 
     // The edits too, or the world would come back with everything ever built in
     // it still standing. Regenerating means from the noise alone.
@@ -744,6 +845,35 @@ float World::ValueAt(Element element, Vector2 world) const {
     return field.ValueAt(i, j);
 }
 
+World::Vertex World::Resolve(Vector2 world) const {
+    Vertex vertex;
+
+    vertex.at = SnapToLattice(world);
+
+    int cx = 0;
+    int cy = 0;
+    ToChunk(vertex.at, cx, cy);
+
+    vertex.chunk = Find(cx, cy);
+    if (vertex.chunk == nullptr) return vertex;
+
+    // Every field of a chunk is laid out the same, so the first one answers for
+    // all of them.
+    const Grid &field = vertex.chunk->fields[0];
+
+    field.ToLocal(vertex.at, vertex.i, vertex.j);
+
+    vertex.resident = field.InBounds(vertex.i, vertex.j);
+
+    return vertex;
+}
+
+float World::ValueAt(const Vertex &vertex, Element element) const {
+    if (!vertex.resident) return SpawnValue(element, vertex.at);
+
+    return vertex.chunk->fields[ElementIndex(element)].ValueAt(vertex.i, vertex.j);
+}
+
 void World::WriteVertex(Element element, Vector2 vertex, float value) {
     // A lattice position on a chunk border exists in more than one chunk. Every
     // copy is updated, otherwise a later read could pick the stale one and the
@@ -752,21 +882,49 @@ void World::WriteVertex(Element element, Vector2 vertex, float value) {
     int cy = 0;
     ToChunk(vertex, cx, cy);
 
+    const float span = ChunkSpan();
+    const float step = static_cast<float>(spacing_);
+
+    // A change to something a body stands on moves the surface the grass is
+    // grown along, so what the band remembered about those columns is dropped.
+    // A neighbour either side, because the surface is read by interpolating
+    // between vertices and so a vertex has a say in the columns beside it.
+    //
+    // Liquid is not one of these. It moves every frame and nothing stands on it,
+    // and invalidating on it would throw the whole band away whenever it rained.
+    if (Def(element).rules.blocksBodies) ForgetSod(vertex.x - step, vertex.x + step);
+
     for (int dx = -1; dx <= 0; dx++) {
         for (int dy = -1; dy <= 0; dy++) {
-            const auto it = chunks_.find(Key(cx + dx, cy + dy));
-            if (it == chunks_.end()) continue;
+            // Which local vertex this would be in that chunk, worked out the way
+            // Grid::ToLocal does. Only a vertex on a seam falls inside more than
+            // one chunk, so this settles three of the four neighbours without
+            // asking the map about them — and the map was being asked four times
+            // per vertex written, for every vertex of the water pass.
+            const int i = static_cast<int>(std::lround((vertex.x - static_cast<float>(cx + dx) * span) / step));
+            const int j = static_cast<int>(std::lround((vertex.y - static_cast<float>(cy + dy) * span) / step));
 
-            Chunk &chunk = it->second;
+            if (i < 0 || i >= kChunkVertices || j < 0 || j >= kChunkVertices) continue;
+
+            Chunk *held = Find(cx + dx, cy + dy);
+            if (held == nullptr) continue;
+
+            Chunk &chunk = *held;
             Grid &field  = chunk.fields[ElementIndex(element)];
 
-            int i = 0;
-            int j = 0;
-            field.ToLocal(vertex, i, j);
-
-            if (!field.InBounds(i, j)) continue;
-
             field.SetValue(i, j, value);
+
+            // Every silhouette this chunk remembers is a maximum over the fields
+            // of materials that occupy their vertex, so writing one invalidates
+            // them all. A liquid occupies nothing and leaves them standing, which
+            // is what keeps them from being thrown away every frame it rains.
+            if (Def(element).rules.occupies) {
+                chunk.silhouettes.clear();
+
+                // And the picture made from them, which is the same fact one step
+                // further on.
+                DropPainted(cx + dx, cy + dy);
+            }
 
             if (Def(element).rules.flows && value > water::kDryMass) chunk.holdsLiquid = true;
         }
@@ -1102,6 +1260,8 @@ World::Stroke World::Excavate(Vector2 world, float radius) {
 }
 
 void World::StepWater(Rectangle active) {
+    PROFILE_ZONE("StepWater");
+
     int i0 = 0;
     int j0 = 0;
     int i1 = 0;
@@ -1113,6 +1273,8 @@ void World::StepWater(Rectangle active) {
     if (cols <= 0 || rows <= 0) return;
 
     if (scratch_.cols != cols || scratch_.rows != rows) scratch_.Resize(cols, rows);
+
+    settled_.assign(static_cast<std::size_t>(cols) * rows, 0.0f);
 
     const float step = static_cast<float>(spacing_);
 
@@ -1158,22 +1320,74 @@ void World::StepWater(Rectangle active) {
 
         const Element element = static_cast<Element>(e);
 
-        for (int i = 0; i < cols; i++) {
-            for (int j = 0; j < rows; j++) {
-                const Vector2 vertex = {(i0 + i) * step, (j0 + j) * step};
-                const int cell       = scratch_.Index(i, j);
+        {
+            PROFILE_ZONE("water read");
 
-                scratch_.mass[cell]    = ValueAt(element, vertex);
-                scratch_.blocked[cell] = BlocksLiquidAt(vertex) ? 1 : 0;
+            // The materials a liquid cannot pass through, gathered once rather
+            // than tested per vertex.
+            std::array<Element, kElementCount> walls{};
+            std::size_t count = 0;
+
+            for (std::size_t w = 0; w < kElementCount; w++) {
+                if (kElements[w].rules.blocksLiquid) walls[count++] = static_cast<Element>(w);
             }
+
+            // A column at a time across the cores, on the same terms as the
+            // light's medium: the world is only read, and each column writes only
+            // its own part of the scratch buffer.
+            pool::For(cols, [&](int i) {
+                for (int j = 0; j < rows; j++) {
+                    const Vector2 vertex = {(i0 + i) * step, (j0 + j) * step};
+                    const int cell       = scratch_.Index(i, j);
+
+                    // The chunk once for the liquid and for every wall that could
+                    // stop it, rather than once per material — see World::Vertex.
+                    const Vertex at = Resolve(vertex);
+
+                    const float mass = ValueAt(at, element);
+
+                    scratch_.mass[cell] = mass;
+                    settled_[cell]      = mass;
+
+                    bool blocked = false;
+
+                    for (std::size_t w = 0; w < count && !blocked; w++) {
+                        blocked = ValueAt(at, walls[w]) > Def(walls[w]).threshold;
+                    }
+
+                    scratch_.blocked[cell] = blocked ? 1 : 0;
+                }
+            });
         }
 
-        water::Step(scratch_, waterSettings_);
+        {
+            PROFILE_ZONE("water step");
 
-        for (int i = 0; i < cols; i++) {
-            for (int j = 0; j < rows; j++) {
-                const Vector2 vertex = {(i0 + i) * step, (j0 + j) * step};
-                WriteVertex(element, vertex, scratch_.mass[scratch_.Index(i, j)]);
+            water::Step(scratch_, waterSettings_);
+        }
+
+        {
+            PROFILE_ZONE("water write");
+
+            for (int i = 0; i < cols; i++) {
+                for (int j = 0; j < rows; j++) {
+                    const int cell   = scratch_.Index(i, j);
+                    const float mass = scratch_.mass[cell];
+
+                    // A dry vertex the step did not touch has nothing to store:
+                    // the value in the world is already this one. Skipping it is
+                    // what keeps the write-back the size of the water rather than
+                    // the size of the band — see World::settled_.
+                    //
+                    // A wet one is always written, unchanged or not, because the
+                    // write is also what tells its chunk it is holding liquid and
+                    // the flag was cleared at the top of this step.
+                    if (mass <= water::kDryMass && mass == settled_[cell]) continue;
+
+                    const Vector2 vertex = {(i0 + i) * step, (j0 + j) * step};
+
+                    WriteVertex(element, vertex, mass);
+                }
             }
         }
     }
@@ -1183,6 +1397,21 @@ float World::Skyline(int column) const {
     const auto found = skyline_.find(column);
     if (found != skyline_.end()) return found->second;
 
+    // Worked out and not remembered while the band is being walked across the
+    // cores, because the record is a hash map and one thread writing into it
+    // while the others read is a race. The walk warms it first — see
+    // World::WarmSkyline — so this is a path a parallel pass should never take,
+    // and computing rather than refusing keeps it correct if one ever does.
+    if (!skylineWritable_) return ScanSkyline(column);
+
+    const float ground = ScanSkyline(column);
+
+    skyline_.emplace(column, ground);
+
+    return ground;
+}
+
+float World::ScanSkyline(int column) const {
     const float step = static_cast<float>(spacing_);
     const float x    = column * step;
 
@@ -1214,9 +1443,14 @@ float World::Skyline(int column) const {
     const float bottom = ground + kSkylineScan;
     while (ground < bottom && !terrain::IsSolid({x, ground}, settings_, RockThreshold())) ground += step;
 
-    skyline_.emplace(column, ground);
-
     return ground;
+}
+
+void World::WarmSkyline(int firstColumn, int lastColumn) {
+    // Cheap for a column already in the record and the whole of the scan for one
+    // that is not, which is why it happens here in order rather than inside the
+    // walk that runs across the cores.
+    for (int column = firstColumn; column <= lastColumn; column++) Skyline(column);
 }
 
 bool World::SolidVertex(const Chunk &chunk, int i, int j) const {
@@ -1332,6 +1566,8 @@ void World::AddCover(float fromX, float toX, float share) {
 }
 
 void World::StepLight(Rectangle region) {
+    PROFILE_ZONE("StepLight");
+
     int i0 = 0;
     int j0 = 0;
     int i1 = 0;
@@ -1371,32 +1607,66 @@ void World::StepLight(Rectangle region) {
         medium_.Clear();
     }
 
-    for (int i = 0; i < cols; i++) {
-        for (int j = 0; j < rows; j++) {
-            const Vector2 vertex = {(i0 + i) * step, (j0 + j) * step};
+    {
+        PROFILE_ZONE("medium fill");
 
-            // Taken from whichever materials are actually present. Opacity is
-            // the strongest of them rather than their sum, since a cell filled
-            // twice over is still one cell of wall; light adds, since two
-            // things glowing in one place are brighter than either.
-            float stopped = 0.0f;
-            light::Radiance given;
+        // Which materials have anything to say to the light, and what they say,
+        // gathered once instead of tested at every one of thirty thousand
+        // vertices. The glow is a colour conversion the inner loop was redoing
+        // for every lit vertex.
+        struct Lit {
+            Element element;
+            float threshold;
+            float opacity;
+            light::Radiance glow;
+        };
 
-            for (std::size_t e = 0; e < kElementCount; e++) {
-                const ElementDef &def = kElements[e];
-                if (def.light.opacity <= 0.0f && def.light.strength <= 0.0f) continue;
+        std::array<Lit, kElementCount> lit{};
+        std::size_t count = 0;
 
-                if (ValueAt(static_cast<Element>(e), vertex) <= def.threshold) continue;
+        for (std::size_t e = 0; e < kElementCount; e++) {
+            const ElementDef &def = kElements[e];
+            if (def.light.opacity <= 0.0f && def.light.strength <= 0.0f) continue;
 
-                stopped = std::max(stopped, def.light.opacity);
-                given   = given + Glow(def.light.glow, def.light.strength);
-            }
-
-            const int cell = medium_.Index(i, j);
-
-            medium_.extinction[cell] = std::clamp(stopped, 0.0f, 1.0f);
-            medium_.emission[cell]   = given;
+            lit[count++] = {.element   = static_cast<Element>(e),
+                            .threshold = def.threshold,
+                            .opacity   = def.light.opacity,
+                            .glow      = Glow(def.light.glow, def.light.strength)};
         }
+
+        // A column at a time across the cores. Each one reads the world, which
+        // nothing is writing while this runs, and writes only its own column of
+        // the medium.
+        pool::For(cols, [&](int i) {
+            for (int j = 0; j < rows; j++) {
+                const Vector2 vertex = {(i0 + i) * step, (j0 + j) * step};
+
+                // The chunk once for the whole column of materials — see
+                // World::Vertex.
+                const Vertex at = Resolve(vertex);
+
+                // Taken from whichever materials are actually present. Opacity is
+                // the strongest of them rather than their sum, since a cell filled
+                // twice over is still one cell of wall; light adds, since two
+                // things glowing in one place are brighter than either.
+                float stopped = 0.0f;
+                light::Radiance given;
+
+                for (std::size_t k = 0; k < count; k++) {
+                    const Lit &def = lit[k];
+
+                    if (ValueAt(at, def.element) <= def.threshold) continue;
+
+                    stopped = std::max(stopped, def.opacity);
+                    given   = given + def.glow;
+                }
+
+                const int cell = medium_.Index(i, j);
+
+                medium_.extinction[cell] = std::clamp(stopped, 0.0f, 1.0f);
+                medium_.emission[cell]   = given;
+            }
+        });
     }
 
     // Where the ground starts in each column, looking down from the open sky, and
@@ -1414,7 +1684,17 @@ void World::StepLight(Rectangle region) {
     // part of the region open to the sky.
     const float ceiling = j0 * step;
 
-    for (int i = 0; i < cols; i++) {
+    // Every column the walk below asks about, put into the record first — the
+    // same discipline the grass band keeps, and for the same reason. See
+    // World::skylineWritable_.
+    WarmSkyline(i0, i0 + cols);
+
+    skylineWritable_ = false;
+
+    {
+    PROFILE_ZONE("columns");
+
+    pool::For(cols, [&](int i) {
         const float ground = Skyline(i0 + i);
 
         medium_.skyline[i] = ground;
@@ -1433,7 +1713,13 @@ void World::StepLight(Rectangle region) {
         // deep, and a column that has been filled back in with rock has no cover
         // at all and should darken from its own surface.
         medium_.sunDepth[i] = CoverDepth((i0 + i) * step, ground);
+    },
+    // Small blocks: a column of open sky costs one lookup and a column of deep
+    // cover walks the lattice, so the work is very unevenly spread.
+    64, 8);
     }
+
+    skylineWritable_ = true;
 
     for (const Spark &spark : sparks_) {
         // Spread over a small disc rather than pressed into one cell. A single
@@ -1500,7 +1786,11 @@ void World::StepLight(Rectangle region) {
         .coverFade  = kSkyFade,
     };
 
-    lightField_.Solve(medium_, lightSettings_);
+    {
+        PROFILE_ZONE("solve");
+
+        lightField_.Solve(medium_, lightSettings_);
+    }
 }
 
 bool World::BlocksLightAt(Vector2 world) const {
@@ -1542,10 +1832,26 @@ float World::TotalWater(Rectangle region) const {
     return static_cast<float>(total);
 }
 
-Grid World::OccupancyField(const Chunk &chunk, int minPrecedence, bool groundOnly) const {
+const World::Chunk::Silhouette &World::Occupancy(const Chunk &chunk, int minPrecedence, bool groundOnly) const {
+    // A linear scan, over a dozen entries at most: there is one per rank the draw
+    // asks about and one for the liquid clamp.
+    for (const Chunk::Silhouette &kept : chunk.silhouettes) {
+        if (kept.minPrecedence == minPrecedence && kept.groundOnly == groundOnly) return kept;
+    }
+
+    // Reserved up front so that a later entry cannot move an earlier one, since
+    // the caller is holding a reference to it.
+    if (chunk.silhouettes.capacity() == 0) chunk.silhouettes.reserve(kElementCount + 2);
+
     const Grid &any = chunk.fields[0];
 
     Grid margin(any.Origin(), any.Cols(), any.Rows(), spacing_);
+
+    // The vertices that came out filled, gathered as the field is built.
+    int firstVi = margin.Cols();
+    int lastVi  = -1;
+    int firstVj = margin.Rows();
+    int lastVj  = -1;
 
     for (int i = 0; i < margin.Cols(); i++) {
         for (int j = 0; j < margin.Rows(); j++) {
@@ -1561,13 +1867,39 @@ Grid World::OccupancyField(const Chunk &chunk, int minPrecedence, bool groundOnl
             }
 
             margin.SetValue(i, j, filled);
+
+            if (filled > 0.0f) {
+                firstVi = std::min(firstVi, i);
+                lastVi  = std::max(lastVi, i);
+                firstVj = std::min(firstVj, j);
+                lastVj  = std::max(lastVj, j);
+            }
         }
     }
 
-    return margin;
+    Chunk::Silhouette kept{.minPrecedence = minPrecedence, .groundOnly = groundOnly, .field = std::move(margin)};
+
+    // A cell is drawn when any of its four corners is filled, so a filled vertex
+    // puts the cell it starts and the one before it in play.
+    if (lastVi >= 0) {
+        kept.firstCol = std::max(firstVi - 1, 0);
+        kept.lastCol  = std::min(lastVi, kept.field.Cols() - 2);
+        kept.firstRow = std::max(firstVj - 1, 0);
+        kept.lastRow  = std::min(lastVj, kept.field.Rows() - 2);
+    }
+
+    chunk.silhouettes.push_back(std::move(kept));
+
+    return chunk.silhouettes.back();
+}
+
+const Grid &World::OccupancyField(const Chunk &chunk, int minPrecedence, bool groundOnly) const {
+    return Occupancy(chunk, minPrecedence, groundOnly).field;
 }
 
 void World::ReadSod(Rectangle view) {
+    PROFILE_ZONE("ReadSod");
+
     // Kept on the plant grid rather than on the lattice.
     //
     // The lattice is six pixels and a tuft is ten, so a profile at that spacing
@@ -1653,12 +1985,73 @@ void World::ReadSod(Rectangle view) {
     const weather::Sky::Season turn = sky_.Turn();
     const auto season               = static_cast<flora::Season>(turn.index % flora::kSeasonCount);
 
+    // What the last band worked out, carried onto this one. See sodColumns_.
+    {
+        PROFILE_ZONE("sod shift");
 
-    for (int i = 0; i < columns; i++) {
+        sodShifted_.assign(static_cast<std::size_t>(columns), SodColumn{});
+
+        const int shift = sodFirstColumn_ - sodColumnsFirst_;
+
+        for (int i = 0; i < columns; i++) {
+            const int was = i + shift;
+
+            if (was < 0 || was >= static_cast<int>(sodColumns_.size())) continue;
+
+            sodShifted_[static_cast<std::size_t>(i)] = sodColumns_[static_cast<std::size_t>(was)];
+        }
+
+        sodColumns_.swap(sodShifted_);
+        sodColumnsFirst_ = sodFirstColumn_;
+    }
+
+    // Every column the walk below will ask the skyline about, put into the record
+    // before it starts — see World::skylineWritable_.
+    {
+        PROFILE_ZONE("sod skyline");
+
+        const float lattice = static_cast<float>(spacing_);
+
+        const int first = static_cast<int>(std::lround(static_cast<float>(sodFirstColumn_) * step / lattice)) - 1;
+        const int last =
+            static_cast<int>(std::lround(static_cast<float>(sodFirstColumn_ + columns) * step / lattice)) + 1;
+
+        WarmSkyline(first, last);
+    }
+
+    skylineWritable_ = false;
+
+    {
+    PROFILE_ZONE("sod columns");
+
+    pool::For(columns, [&](int i) {
         const float x = static_cast<float>(sodFirstColumn_ + i) * step;
 
-        sodRamp_[static_cast<std::size_t>(i)] =
-            sod::RampAt(terrain::ClimateAt(x, settings_), season, turn.blend, sky_.HumidityAt(x));
+        SodColumn &column = sodColumns_[static_cast<std::size_t>(i)];
+
+        if (!column.known) {
+            float top   = 0.0f;
+            float cover = 0.0f;
+
+            if (SurfaceOf(x, top)) {
+                // Grass grows on soil and on nothing else, which is the whole of
+                // the rule: dig past the soil and the floor is rock and stays
+                // bare, and a desert or a snowfield grows nothing because its
+                // surface is not soil either. Nothing here has to know about sand
+                // or snow.
+                const Vector2 under = {x, top + static_cast<float>(spacing_) * 0.5f};
+
+                if (OccupantAt(under) == Element::Soil) cover = 1.0f;
+            }
+
+            // The climate with them, since it is a function of the column alone
+            // and the noise behind it costs more than the rest of this loop.
+            column = {.top = top, .cover = cover, .climate = terrain::ClimateAt(x, settings_), .known = true};
+        }
+
+        // Not cached with the rest: the season turns and the air dries out, so
+        // the same column ramps differently from one day to the next.
+        sodRamp_[static_cast<std::size_t>(i)] = sod::RampAt(column.climate, season, turn.blend, sky_.HumidityAt(x));
 
         // As a share of the hardest this world can blow, so a field is at rest on a
         // still day and near its limit in a storm. Per column rather than per view,
@@ -1666,22 +2059,16 @@ void World::ReadSod(Rectangle view) {
         // that it arrives somewhere before it arrives everywhere.
         sodPush_[static_cast<std::size_t>(i)] = sky_.PushAt(x);
 
-        float top   = 0.0f;
-        float cover = 0.0f;
-
-        if (SurfaceOf(x, top)) {
-            // Grass grows on soil and on nothing else, which is the whole of the
-            // rule: dig past the soil and the floor is rock and stays bare, and
-            // a desert or a snowfield grows nothing because its surface is not
-            // soil either. Nothing here has to know about sand or snow.
-            const Vector2 under = {x, top + static_cast<float>(spacing_) * 0.5f};
-
-            if (OccupantAt(under) == Element::Soil) cover = 1.0f;
-        }
-
-        sodTop_[static_cast<std::size_t>(i)]   = top;
-        sodCover_[static_cast<std::size_t>(i)] = cover;
+        sodTop_[static_cast<std::size_t>(i)]   = column.top;
+        sodCover_[static_cast<std::size_t>(i)] = column.cover;
+    },
+    // Small blocks, because the cost of this band is wildly uneven: nearly every
+    // column is already known and free, and the handful that have just scrolled
+    // in cost a lattice walk each — and those are all together at one end.
+    64, 4);
     }
+
+    skylineWritable_ = true;
 
     ReadSown();
 
@@ -1712,7 +2099,23 @@ void World::ReadSod(Rectangle view) {
     }
 }
 
+void World::ForgetSod(float fromX, float toX) {
+    if (sodColumns_.empty()) return;
+
+    const float step = config::kFloraPixel;
+
+    const int from = static_cast<int>(std::floor(fromX / step)) - sodColumnsFirst_;
+    const int to   = static_cast<int>(std::ceil(toX / step)) - sodColumnsFirst_;
+
+    const int first = std::max(from, 0);
+    const int last  = std::min(to, static_cast<int>(sodColumns_.size()) - 1);
+
+    for (int i = first; i <= last; i++) sodColumns_[static_cast<std::size_t>(i)].known = false;
+}
+
 void World::ReadSown() {
+    PROFILE_ZONE("ReadSown");
+
     const auto span = sodSown_.size();
     if (span == 0) return;
 
@@ -2014,7 +2417,7 @@ Grid World::SodField(const Chunk &chunk) const {
     // Read from the union rather than from the soil alone because what buries a
     // sod is anything at all standing on it — snow the world laid down, or rock
     // the player did.
-    const Grid filled = OccupancyField(chunk);
+    const Grid &filled = OccupancyField(chunk);
 
     Grid sod(soil.Origin(), soil.Cols(), soil.Rows(), spacing_);
 
@@ -2165,6 +2568,178 @@ Grid World::LiquidRenderField(int cx, int cy, Element element) const {
     return field;
 }
 
+const World::Painted *World::PaintedFor(int cx, int cy) const {
+    const auto found = paintedOf_.find(Key(cx, cy));
+    if (found == paintedOf_.end()) return nullptr;
+
+    const Painted &slot = painted_[static_cast<std::size_t>(found->second)];
+
+    return (slot.holds && slot.cx == cx && slot.cy == cy) ? &slot : nullptr;
+}
+
+void World::DropPainted(int cx, int cy) {
+    const auto found = paintedOf_.find(Key(cx, cy));
+    if (found == paintedOf_.end()) return;
+
+    // The slot is kept and only disowned, since a texture is a GPU resource and
+    // making another costs far more than drawing into this one again.
+    painted_[static_cast<std::size_t>(found->second)].holds = false;
+
+    paintedOf_.erase(found);
+}
+
+void World::UnloadPainted() {
+    for (Painted &slot : painted_) {
+        if (slot.texture.id != 0) UnloadRenderTexture(slot.texture);
+    }
+
+    painted_.clear();
+    paintedOf_.clear();
+}
+
+void World::PaintChunk(Painted &slot, int cx, int cy) {
+    const float span = ChunkSpan();
+
+    // Drawn through a camera that puts the chunk's own corner, less the margin,
+    // at the texture's origin. One texel per world unit, so nothing is scaled and
+    // the squares land on whole texels exactly as they land on whole pixels.
+    Camera2D frame{};
+    frame.offset = {0.0f, 0.0f};
+    frame.target = {static_cast<float>(cx) * span - kPaintedMargin, static_cast<float>(cy) * span - kPaintedMargin};
+    frame.zoom   = 1.0f;
+
+    // The whole chunk and its margin, so nothing is clipped away that a
+    // neighbouring view would have wanted.
+    const Rectangle covered = {frame.target.x, frame.target.y, span + 2.0f * kPaintedMargin,
+                               span + 2.0f * kPaintedMargin};
+
+    BeginTextureMode(slot.texture);
+
+    // Clear rather than blank: what is not ground has to let the sky through when
+    // this is composited, and every colour the ground is drawn in is opaque, so
+    // the alpha in here is exactly "there is ground at this texel".
+    ClearBackground(BLANK);
+
+    BeginMode2D(frame);
+
+    const Chunk *chunk = Find(cx, cy);
+
+    if (chunk != nullptr) {
+        // Painted from the back, each material drawn as itself together with
+        // everything that outranks it — the order DrawTerrain used to walk across
+        // every chunk at once. Chunks tile without overlapping, so drawing one
+        // whole at a time puts down the same picture.
+        for (const Element element : exclusionOrder_) {
+            const ElementDef &def = Def(element);
+
+            if (!def.rules.blocksBodies) {
+                const std::size_t index = ElementIndex(element);
+
+                marching_squares::DrawPainted(chunk->fields[index], def.threshold, paint_[index],
+                                              Outline(def.contour), config::kPixelSize, covered);
+                continue;
+            }
+
+            const Chunk::Silhouette &silhouette = Occupancy(*chunk, def.rules.precedence, true);
+            if (silhouette.Empty()) continue;
+
+            marching_squares::DrawPainted(silhouette.field, 0.0f, paint_[ElementIndex(element)],
+                                          Outline(def.contour), config::kPixelSize, covered,
+                                          {.firstCol = silhouette.firstCol,
+                                           .lastCol  = silhouette.lastCol,
+                                           .firstRow = silhouette.firstRow,
+                                           .lastRow  = silhouette.lastRow});
+        }
+    }
+
+    EndMode2D();
+    EndTextureMode();
+
+    slot.cx    = cx;
+    slot.cy    = cy;
+    slot.holds = true;
+}
+
+void World::PaintChunks(Rectangle view) {
+    PROFILE_ZONE("PaintChunks");
+
+    if (!config::kPixelArt) return;
+
+    int minCx = 0;
+    int minCy = 0;
+    int maxCx = 0;
+    int maxCy = 0;
+    ChunkRange(view, minCx, minCy, maxCx, maxCy);
+
+    paintedAge_++;
+
+    // Anything already painted is claimed first, so that the eviction below never
+    // takes a slot this same view is about to draw from.
+    for (int cx = minCx; cx <= maxCx; cx++) {
+        for (int cy = minCy; cy <= maxCy; cy++) {
+            const auto found = paintedOf_.find(Key(cx, cy));
+            if (found == paintedOf_.end()) continue;
+
+            painted_[static_cast<std::size_t>(found->second)].age = paintedAge_;
+        }
+    }
+
+    const int side = static_cast<int>(ChunkSpan()) + 2 * kPaintedMargin;
+
+    for (int cx = minCx; cx <= maxCx; cx++) {
+        for (int cy = minCy; cy <= maxCy; cy++) {
+            if (PaintedFor(cx, cy) != nullptr) continue;
+            if (Find(cx, cy) == nullptr) continue;
+
+            int chosen = -1;
+
+            // A slot nothing is using, or a new one while there is room for it.
+            for (std::size_t s = 0; s < painted_.size() && chosen < 0; s++) {
+                if (!painted_[s].holds) chosen = static_cast<int>(s);
+            }
+
+            if (chosen < 0 && static_cast<int>(painted_.size()) < kPaintedSlots) {
+                Painted slot;
+                slot.texture = LoadRenderTexture(side, side);
+
+                // Point sampling, because the whole equivalence rests on a screen
+                // pixel taking one texel rather than a blend of four.
+                SetTextureFilter(slot.texture.texture, TEXTURE_FILTER_POINT);
+
+                painted_.push_back(slot);
+                chosen = static_cast<int>(painted_.size()) - 1;
+            }
+
+            // Otherwise the one least recently drawn from, which the claim above
+            // has kept out of the current view.
+            if (chosen < 0) {
+                long long oldest = paintedAge_;
+
+                for (std::size_t s = 0; s < painted_.size(); s++) {
+                    if (painted_[s].age >= oldest) continue;
+
+                    oldest = painted_[s].age;
+                    chosen = static_cast<int>(s);
+                }
+            }
+
+            // Every slot is in this view. Nothing is evicted; the chunks that did
+            // not fit are drawn straight to the screen by DrawTerrain instead.
+            if (chosen < 0) continue;
+
+            Painted &slot = painted_[static_cast<std::size_t>(chosen)];
+
+            if (slot.holds) paintedOf_.erase(Key(slot.cx, slot.cy));
+
+            PaintChunk(slot, cx, cy);
+
+            slot.age = paintedAge_;
+
+            paintedOf_[Key(cx, cy)] = chosen;
+        }
+    }
+}
+
 void World::DrawTerrain(Rectangle view) const {
     int minCx = 0;
     int minCy = 0;
@@ -2184,6 +2759,37 @@ void World::DrawTerrain(Rectangle view) const {
     //
     // Only the drawing overlaps here. The fields stay exclusive, and what is
     // drawn underneath is covered by the material that displaced it.
+    // The ground itself, from the picture PaintChunks made of each chunk.
+    //
+    // A blit rather than a rasterisation, and the same one: the texture holds a
+    // texel per world unit, so a screen pixel takes the texel whose square it
+    // falls in — which is the square the rectangle would have covered it with.
+    // See World::Painted.
+    {
+        PROFILE_ZONE("blit ground");
+
+        const float span = ChunkSpan();
+        const float side = span + 2.0f * kPaintedMargin;
+
+        for (int cx = minCx; cx <= maxCx; cx++) {
+            for (int cy = minCy; cy <= maxCy; cy++) {
+                const Painted *slot = PaintedFor(cx, cy);
+                if (slot == nullptr) continue;
+
+                const Vector2 at = {static_cast<float>(cx) * span - kPaintedMargin,
+                                    static_cast<float>(cy) * span - kPaintedMargin};
+
+                // A render target comes out upside down, hence the negative
+                // height on the source.
+                DrawTextureRec(slot->texture.texture, {0.0f, 0.0f, side, -side}, at, WHITE);
+            }
+        }
+    }
+
+    // And whatever had no picture made of it — a chunk that arrived after
+    // PaintChunks ran, or one that found no slot free — drawn the long way, so
+    // that the cache is a saving and never a condition for the ground being
+    // there at all.
     for (const Element element : exclusionOrder_) {
         const ElementDef &def = Def(element);
 
@@ -2203,12 +2809,14 @@ void World::DrawTerrain(Rectangle view) const {
 
             for (int cx = minCx; cx <= maxCx; cx++) {
                 for (int cy = minCy; cy <= maxCy; cy++) {
+                    if (config::kPixelArt && PaintedFor(cx, cy) != nullptr) continue;
+
                     const Chunk *chunk = Find(cx, cy);
                     if (chunk == nullptr) continue;
 
                     if (config::kPixelArt) {
                         marching_squares::DrawPainted(chunk->fields[index], def.threshold, paint_[index],
-                                                      Outline(def.contour), config::kPixelSize);
+                                                      Outline(def.contour), config::kPixelSize, view);
                     } else {
                         marching_squares::DrawFilled(chunk->fields[index], def.threshold, Body(def));
                         if (config::kDrawContours) {
@@ -2223,14 +2831,34 @@ void World::DrawTerrain(Rectangle view) const {
 
         for (int cx = minCx; cx <= maxCx; cx++) {
             for (int cy = minCy; cy <= maxCy; cy++) {
+                if (config::kPixelArt && PaintedFor(cx, cy) != nullptr) continue;
+
                 const Chunk *chunk = Find(cx, cy);
                 if (chunk == nullptr) continue;
 
-                const Grid field = OccupancyField(*chunk, def.rules.precedence, true);
+                const Chunk::Silhouette &silhouette = [&]() -> const Chunk::Silhouette & {
+                    PROFILE_ZONE("occupancy");
+
+                    return Occupancy(*chunk, def.rules.precedence, true);
+                }();
+
+                // Nothing of this rank or above stands in this chunk, which is
+                // the usual answer: a hillside holds no ore and a seam of ore
+                // holds no snow. Walking the chunk to find that out was ten
+                // thousand samples for a material that draws nothing.
+                if (silhouette.Empty()) continue;
+
+                const Grid &field = silhouette.field;
 
                 if (config::kPixelArt) {
+                    PROFILE_ZONE("paint ground");
+
                     marching_squares::DrawPainted(field, 0.0f, paint_[ElementIndex(element)], Outline(def.contour),
-                                                  config::kPixelSize);
+                                                  config::kPixelSize, view,
+                                                  {.firstCol = silhouette.firstCol,
+                                                   .lastCol  = silhouette.lastCol,
+                                                   .firstRow = silhouette.firstRow,
+                                                   .lastRow  = silhouette.lastRow});
                 } else {
                     marching_squares::DrawFilled(field, 0.0f, Body(def));
                     if (config::kDrawContours) marching_squares::DrawContour(field, 0.0f, def.contour);
@@ -2252,12 +2880,42 @@ void World::DrawTerrain(Rectangle view) const {
                                .spacing     = config::kFloraPixel,
                                .seed        = settings_.seed + kSodSeed};
 
-        for (int cx = minCx; cx <= maxCx; cx++) {
-            for (int cy = minCy; cy <= maxCy; cy++) {
-                const Chunk *chunk = Find(cx, cy);
-                if (chunk == nullptr) continue;
+        // Built across the cores first and drawn after, because the field a chunk
+        // of grass is drawn from is derived — the soil read against the ground's
+        // whole silhouette — and deriving it costs more than drawing it. The draw
+        // itself cannot be shared: it is raylib, and raylib is one thread.
+        {
+            PROFILE_ZONE("sod field");
 
-                marching_squares::DrawPainted(SodField(*chunk), 0.0f, grass, BLANK, config::kPixelSize);
+            sodFields_.clear();
+
+            for (int cx = minCx; cx <= maxCx; cx++) {
+                for (int cy = minCy; cy <= maxCy; cy++) {
+                    const Chunk *chunk = Find(cx, cy);
+                    if (chunk == nullptr) continue;
+
+                    sodFields_.push_back(chunk);
+                }
+            }
+
+            sodGrids_.clear();
+            sodGrids_.reserve(sodFields_.size());
+
+            for (std::size_t k = 0; k < sodFields_.size(); k++) {
+                sodGrids_.push_back(Grid({0.0f, 0.0f}, 1, 1, spacing_));
+            }
+
+            pool::For(
+                static_cast<int>(sodFields_.size()),
+                [&](int k) { sodGrids_[static_cast<std::size_t>(k)] = SodField(*sodFields_[static_cast<std::size_t>(k)]); },
+                2, 1);
+        }
+
+        {
+            PROFILE_ZONE("paint sod");
+
+            for (const Grid &field : sodGrids_) {
+                marching_squares::DrawPainted(field, 0.0f, grass, BLANK, config::kPixelSize, view);
             }
         }
     }
@@ -2275,7 +2933,7 @@ void World::DrawTerrain(Rectangle view) const {
 
                 if (config::kPixelArt) {
                     marching_squares::DrawPainted(chunk->fields[e], def.threshold, paint_[e], Outline(def.contour),
-                                                  config::kPixelSize);
+                                                  config::kPixelSize, view);
                 } else {
                     marching_squares::DrawFilled(chunk->fields[e], def.threshold, Body(def));
                     if (config::kDrawContours) marching_squares::DrawContour(chunk->fields[e], def.threshold, def.contour);

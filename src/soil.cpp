@@ -170,8 +170,8 @@ Shade Shading(const Paint &paint, const marching_squares::Texel &texel) {
 
     if (paint.strata > 0.0f) {
         const float bedding = terrain::Sample(texel.at, {.frequency = kStrataFrequency,
-                                                         .aspect   = kStrataAspect,
                                                          .octaves  = 2,
+                                                         .aspect   = kStrataAspect,
                                                          .seed     = kStrataSeed + paint.seed});
 
         shade.strata = (bedding - 0.5f) * 2.0f * paint.strata * kStep;
