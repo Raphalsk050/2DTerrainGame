@@ -996,6 +996,25 @@ public:
     // Negative hands the sky back to its own sequence, which is the state it
     // starts in and the one the world is actually played in.
     void ForceMood(int index) { forcedMood_ = (index >= 0) ? (index % kMoodCount) : -1; }
+
+    // Holds the ground wind at one speed, signed, in pixels per second.
+    //
+    // Held rather than nudged, and the sign is part of what is held: a forced wind
+    // that still turned with Bearing would reverse under whoever set it, which is
+    // the one thing somebody pinning a wind down is trying to stop. The gust still
+    // plays over it, because a wind with no gust in it is a fan rather than weather.
+    //
+    // A pair rather than a sentinel, unlike the mood and the season either side of
+    // it — those are indices and cannot be negative, where a wind can, so -1 would
+    // be a perfectly good westerly and not a way of saying "no".
+    void ForceWind(float speed) {
+        heldWind_ = speed;
+        windHeld_ = true;
+    }
+
+    void ReleaseWind() { windHeld_ = false; }
+
+    bool WindHeld() const { return windHeld_; }
     int ForcedMood() const { return forcedMood_; }
 
     // Steps through the moods and then back to the sky's own weather, which is one
@@ -1173,6 +1192,10 @@ private:
 
     // Which season is being held, or negative for whatever the clock says.
     int forcedSeason_ = -1;
+
+    // See ForceWind.
+    float heldWind_ = 0.0f;
+    bool windHeld_  = false;
     int forcedMood_   = -1;
 
     // Derived from the clock by Advance. Held rather than recomputed because every

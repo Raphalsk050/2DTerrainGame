@@ -819,7 +819,15 @@ float Sky::Bearing() const {
     return Veer(turn, backing.knee);
 }
 
-float Sky::Mean() const { return now_.wind * Bearing(); }
+float Sky::Mean() const {
+    // Held where somebody has pinned it — see ForceWind. Everything downstream reads
+    // the wind through this one function, so pinning it here pins the grass, the
+    // crowns, the leaves, the rain and the deck aloft together, and there is nowhere
+    // for one of them to go on using the weather's own figure.
+    if (windHeld_) return heldWind_;
+
+    return now_.wind * Bearing();
+}
 
 float Sky::WindAt(float worldX) const { return WindAt(worldX, time_); }
 

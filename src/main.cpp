@@ -168,7 +168,7 @@ constexpr Command kCommands[] = {
     {"time", "/time", "run the clock on to the next quarter"},
     {"give", "/give <item> [count]", "put something in the pack"},
     {"tp", "/tp <x> <y>", "move the character"},
-    {"wind", "/wind", "what the air is doing here"},
+    {"wind", "/wind [px/s|auto]", "read the air here, or pin it at a speed"},
     {"clear", "/clear", "empty this log"},
 };
 
@@ -188,6 +188,9 @@ std::vector<std::string> Choices(const std::string &verb, const World &world) {
 
         // Not a row of the table, but a thing the command takes: hand the sky back
         // to its own timer.
+        out.emplace_back("auto");
+    } else if (verb == "wind") {
+        out.emplace_back("a speed in px/s, negative to blow left");
         out.emplace_back("auto");
     } else if (verb == "season") {
         for (const char *name : kSeasonNames) out.emplace_back(name);
@@ -215,6 +218,22 @@ std::string Joined(const std::vector<std::string> &words) {
     }
 
     return out;
+}
+
+// The wind in words, against the hardest this world can blow.
+//
+// A share is the honest number and a useless answer: nobody knows whether 0.44 is a
+// lot. The bands are the Beaufort idea reduced to what this world actually has —
+// six steps across a range whose top is a fixed, measured figure, so the words mean
+// the same thing on every afternoon rather than drifting with the weather.
+const char *Strength(float share) {
+    if (share < 0.08f) return "dead calm";
+    if (share < 0.20f) return "barely a breath";
+    if (share < 0.38f) return "a light breeze";
+    if (share < 0.58f) return "a fresh wind";
+    if (share < 0.80f) return "blowing hard";
+
+    return "a full gale";
 }
 
 // What one command takes, said the same way whether it was asked for or arrived at
@@ -336,11 +355,101 @@ void RunCommand(const std::string &line, World &world, Grove &grove, Inventory &
     }
 
     if (verb == "wind") {
+        if (!arg(1).empty()) {
+            if (arg(1) == "auto") {
+                world.ReleaseWind();
+                chat.Say("wind back on the weather's own figure", console::Tone::Done);
+                return;
+            }
+
+            // Parsed rather than matched, so a refusal has to be spelt out here:
+            // everything else this command takes is a word, and `Named` has nothing
+            // to compare a number against.
+            const std::string &raw = words[1];
+
+            const bool number = raw.find_first_not_of("+-0123456789.") == std::string::npos
+                                && raw.find_first_of("0123456789") != std::string::npos;
+
+            if (!number) {
+                chat.Say(arg(1) + " is not a speed", console::Tone::Failed);
+                SayUsage(verb, world, chat);
+                return;
+            }
+
+            const auto speed = static_cast<float>(std::atof(raw.c_str()));
+
+            world.SetWind(speed);
+
+            // Said back as a share as well as a figure, because the figure alone
+            // does not say whether it is a lot — which is the whole reason the
+            // reading below is worded the way it is.
+            chat.Say(TextFormat("wind pinned at %.0f px/s %s — %s", std::fabs(speed),
+                                (speed < 0.0f) ? "to the left" : "to the right",
+                                Strength(std::fabs(speed) / std::max(world.Sky().Gale(), 1e-3f))),
+                     console::Tone::Done);
+
+            if (std::fabs(speed) > world.Sky().Gale()) {
+                chat.Say(TextFormat("  that is past this world's own gale of %.0f — everything rooted will sit at "
+                                    "full lean",
+                                    world.Sky().Gale()),
+                         console::Tone::Note);
+            }
+
+            return;
+        }
+
         const Vector2 at = player.Centre();
 
-        chat.Say(TextFormat("wind %+.0f px/s here, %.0f mean, push %+.2f of a gale of %.0f", world.Sky().WindAt(at.x),
-                            world.Sky().Now().wind, world.Sky().PushAt(at.x), world.Sky().Gale()),
+        const float here  = world.Sky().WindAt(at.x);
+        const float sky   = world.Sky().Mean();
+        const float share = std::fabs(world.Sky().PushAt(at.x));
+
+        // Three lines and three questions, which is what this command was failing to
+        // separate: it used to put every figure on one line in the units the module
+        // happens to think in, and a player reading "push +0.94 of a gale of 84" has
+        // been handed the implementation rather than an answer.
+        //
+        // Which way, how hard, and whether *here* is the same as everywhere — a gust
+        // is a wave crossing the world, so the last of those is a real question and
+        // the one number that explains why the tree beside you is bent further than
+        // the one across the valley.
+        const char *way = (std::fabs(here) < 1.0f)   ? "turning, going nowhere"
+                          : (here > 0.0f)            ? "blowing to the right"
+                                                     : "blowing to the left";
+
+        chat.Say(TextFormat("wind: %s at %.0f px/s — %s", way, std::fabs(here), Strength(share)),
                  console::Tone::Note);
+
+        // Comparing the column against the sky's own mean is what tells a gust from
+        // a lull. A tenth either way is the noise floor of the gust field, so
+        // anything inside that is reported as neither.
+        const float over = std::fabs(here) - std::fabs(sky);
+
+        // A tenth of the mean is the noise floor of the gust field, with a pixel a
+        // second under it as an absolute floor: the mean passes through zero every
+        // time the wind comes round, and a share of nothing calls every rounding
+        // error a gust.
+        const float notice = std::max(std::fabs(sky) * 0.10f, 1.0f);
+
+        const char *gusting = (over > notice)    ? "a gust is passing here"
+                              : (over < -notice) ? "this spot is in a lull"
+                                                 : "steady here";
+
+        chat.Say(TextFormat("  %s — %.0f here against %.0f across the whole sky", gusting, std::fabs(here),
+                            std::fabs(sky)),
+                 console::Tone::Note);
+
+        chat.Say(TextFormat("  %.0f%% of a full gale, which here is %.0f px/s. the weather is %s, worth %.0f on its own",
+                            share * 100.0f, world.Sky().Gale(), world.Sky().Now().name, world.Sky().Now().wind),
+                 console::Tone::Note);
+
+        // Worth saying outright. A pinned wind that goes on ignoring the weather is
+        // indistinguishable from a broken one, and the player who pinned it may have
+        // done so an hour ago.
+        if (world.Sky().WindHeld()) {
+            chat.Say("  pinned by hand — /wind auto hands it back to the weather", console::Tone::Note);
+        }
+
         return;
     }
 

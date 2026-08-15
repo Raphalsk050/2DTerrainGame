@@ -241,6 +241,11 @@ public:
     // Holds one, by index, or hands the sky back its own sequence below zero.
     void ForceWeather(int mood) { sky_.ForceMood(mood); }
 
+    // Pins the ground wind, or hands it back to the weather. Signed: the sign is
+    // which way it blows.
+    void SetWind(float speed) { sky_.ForceWind(speed); }
+    void ReleaseWind() { sky_.ReleaseWind(); }
+
     // How hard it is raining over a world position, in [0,1].
     //
     // Exposed because rain is a game rule as much as a picture: crops that need it,
