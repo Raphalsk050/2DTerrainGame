@@ -6,7 +6,6 @@
 #include "fixture.h"
 #include "grove.h"
 #include "hotbar.h"
-#include "light_layer.h"
 #include "liquid_layer.h"
 #include "player.h"
 #include "profile.h"
@@ -31,6 +30,10 @@
 #include <vector>
 
 namespace {
+
+// Defined down beside DrawScene, where it is used in earnest. Declared here because
+// the probe report composes the light too, and it comes first in the file.
+void ComposeLight(const light::Field &field);
 
 constexpr const char *kSeasonNames[] = {"spring", "summer", "autumn", "winter"};
 
@@ -818,9 +821,7 @@ void DrawProbe(World &world, Grove &grove, Inventory &gathered, Rectangle strip,
         if (lit == 2) {
             debug_view::DrawLight(world, strip);
         } else {
-            LightLayer probeLight;
-            probeLight.Update(world.Light());
-            probeLight.Compose();
+            ComposeLight(world.Light());
         }
     }
 
@@ -1351,25 +1352,45 @@ void ReportColumn(const World &world, const terrain::Settings &settings, float w
 void ReportSun(const World &world, Rectangle region) {
     const light::Field &field = world.Light();
 
-    std::printf("%6s %6s %8s %8s %8s\n", "col", "row", "solid", "depth", "sunlit");
+    // How far the daylight reaches down each column, which is the one thing about
+    // the sun that is still a number rather than a picture.
+    //
+    // It used to report the two terms of a sweep -- how deep the sun was carried and
+    // what it was carried at -- because those were separate inventions and either
+    // could be the one that was wrong. There is no sweep now and no sun term: light
+    // gets down a column by being transported down it, so what is left to ask is how
+    // far it got, and the answer is one column of the field read downwards.
+    constexpr float kDim = 0.05f;
+
+    std::printf("%8s %8s %8s %8s\n", "x", "top", "depth", "at depth");
 
     for (int i = 0; i < field.Cols(); i++) {
-        int first = -1;
+        const Vector2 head = field.ProbePosition(i, 0);
+        if (head.x < region.x || head.x > region.x + region.width) continue;
+
+        const float top = light::Expose(light::Luminance(field.ProbeAt(i, 0)), field.Exposure());
+
+        int fell = -1;
 
         for (int j = 0; j < field.Rows(); j++) {
-            if (field.SolidAt(i, j) > 0.0f) {
-                first = j;
+            const float level =
+                light::Expose(light::Luminance(field.ProbeAt(i, j)), field.Exposure());
+
+            if (level < kDim) {
+                fell = j;
                 break;
             }
         }
 
-        if (first < 0) continue;
+        if (fell < 0) {
+            std::printf("%8.0f %8.3f %8s %8s\n", head.x, top, "-", "-");
+            continue;
+        }
 
-        const Vector2 at = field.ProbePosition(i, first);
-        if (at.x < region.x || at.x > region.x + region.width) continue;
+        const Vector2 at = field.ProbePosition(i, fell);
 
-        std::printf("%6.0f %6.0f %8.2f %8.1f %8.3f\n", at.x, at.y, field.SolidAt(i, first),
-                    field.SunDepthAt(i, first), light::Luminance(field.SunlitAt(i, first)));
+        std::printf("%8.0f %8.3f %8.0f %8.3f\n", head.x, top, at.y - head.y,
+                    light::Expose(light::Luminance(field.ProbeAt(i, fell)), field.Exposure()));
     }
 }
 
@@ -2222,9 +2243,32 @@ void ReportFrame(World &world, Grove &grove, Inventory &gathered, Vector2 at, in
 // inventory open the world goes through a blur and the display does not, and a
 // blur needs the world rendered into a target of its own. Neither half opens the
 // frame, so the caller decides whether that target is the screen.
+// The solved light, multiplied over the frame.
+//
+// There is no texture to keep and no pixel loop to run: the solver exposes the field
+// on the GPU as the last thing it does, so this is one blit. What the old layer did
+// here -- walk a grid of probes, expose each channel, dither, and upload -- was a
+// millisecond and a half of the frame and is simply gone.
+void ComposeLight(const light::Field &field) {
+    const Texture2D texture = field.Screen();
+    if (texture.id == 0) return;
+
+    const Rectangle source = {0.0f, 0.0f, static_cast<float>(field.Cols()),
+                              static_cast<float>(field.Rows())};
+
+    // A cell sits at the centre of its own texel, so the picture covers the grid's
+    // whole extent rather than the span between the first and last cell.
+    const Rectangle target = {field.Origin().x, field.Origin().y,
+                              field.Cols() * field.Spacing(), field.Rows() * field.Spacing()};
+
+    BeginBlendMode(BLEND_MULTIPLIED);
+    DrawTexturePro(texture, source, target, {0.0f, 0.0f}, 0.0f, WHITE);
+    EndBlendMode();
+}
+
 void DrawScene(const World &world, const Grove &grove, const fixture::Fixtures &fixtures, const Inventory &inventory,
                const Player &player, const scuff::Trail &trail,
-               const Editor &editor, const LiquidLayer &liquids, const LightLayer &lights, const Camera2D &camera,
+               const Editor &editor, const LiquidLayer &liquids, const light::Field &lights, const Camera2D &camera,
                const debug_view::Toggles &debug, bool aiming) {
     const Rectangle view = ViewBounds(camera);
 
@@ -2326,7 +2370,7 @@ void DrawScene(const World &world, const Grove &grove, const fixture::Fixtures &
     {
         PROFILE_ZONE("lights.Compose");
 
-        if (!debug.unlit) lights.Compose();
+        if (!debug.unlit) ComposeLight(lights);
     }
 
     // The stars go on this side of that line, and they are the only part of the
@@ -3796,7 +3840,6 @@ int main(int argc, char **argv) {
 
     LiquidLayer liquids;
 
-    LightLayer lights;
 
     Backdrop backdrop;
     backdrop.Create();
@@ -4181,11 +4224,6 @@ int main(int argc, char **argv) {
             // frame it is about to be drawn over rather than the one before it.
             world.StepLight(active);
 
-            {
-                PROFILE_ZONE("lights.Update");
-
-                lights.Update(world.Light());
-            }
         }
 
         // The ground, rasterised into a picture per chunk. Out here with the two
@@ -4206,7 +4244,7 @@ int main(int argc, char **argv) {
         // only the blurred result is drawn once the frame is open.
         if (packOpen) {
             backdrop.Capture();
-            DrawScene(world, grove, fixtures, inventory, player, trail, editor, liquids, lights, camera, debug, !packOpen);
+            DrawScene(world, grove, fixtures, inventory, player, trail, editor, liquids, world.Light(), camera, debug, !packOpen);
             backdrop.Finish();
         }
 
@@ -4216,7 +4254,7 @@ int main(int argc, char **argv) {
             PROFILE_ZONE("DrawScene");
 
             if (packOpen) backdrop.Compose(config::kPanelDim);
-            else DrawScene(world, grove, fixtures, inventory, player, trail, editor, liquids, lights, camera, debug, !packOpen);
+            else DrawScene(world, grove, fixtures, inventory, player, trail, editor, liquids, world.Light(), camera, debug, !packOpen);
         }
 
         {
@@ -4248,7 +4286,6 @@ int main(int argc, char **argv) {
 
     world.UnloadPainted();
     grove.Unload();
-    lights.Unload();
     liquids.Unload();
     backdrop.Unload();
     CloseWindow();

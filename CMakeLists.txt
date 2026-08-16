@@ -73,7 +73,6 @@ add_executable(${PROJECT_NAME}
     src/inventory.cpp
     src/backdrop.cpp
     src/light.cpp
-    src/light_layer.cpp
     src/picture.cpp
     src/liquid_layer.cpp
     src/player.cpp
@@ -111,7 +110,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE raylib_cpp raylib)
 # make its answers depend on the generator.
 add_executable(LightScenes EXCLUDE_FROM_ALL
     tools/light_scenes.cpp
-    src/radiance.cpp
+    src/light.cpp
 )
 
 target_include_directories(LightScenes PRIVATE

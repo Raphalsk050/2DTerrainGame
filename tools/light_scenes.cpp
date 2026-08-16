@@ -24,7 +24,7 @@
 // shaders and wants an OpenGL 4.3 context, so a window is opened and immediately
 // ignored.
 
-#include "radiance.h"
+#include "light.h"
 
 #include "raylib.h"
 
@@ -40,8 +40,8 @@ constexpr int kSide = 512;   // half is 256, a power of two
 
 constexpr float kOpaque = 32.0f;   // e^-32 is nothing: a wall
 
-using radiance::Medium;
-using radiance::Radiance;
+using light::Medium;
+using light::Radiance;
 
 struct Material {
     float sigma = 0.0f;
@@ -348,7 +348,7 @@ struct Roughness {
     double level  = 0.0;   // mean brightness in the window, to read the others against
 };
 
-Roughness Measure(const radiance::Field &field, const Medium &medium, int x0, int y0, int x1,
+Roughness Measure(const light::Field &field, const Medium &medium, int x0, int y0, int x1,
                   int y1) {
     Roughness out;
     int counted = 0;
@@ -357,7 +357,7 @@ Roughness Measure(const radiance::Field &field, const Medium &medium, int x0, in
         const Vector2 at = {medium.origin.x + (i + 0.5f) * medium.spacing,
                             medium.origin.y + (j + 0.5f) * medium.spacing};
 
-        return static_cast<double>(radiance::Luminance(field.At(at)));
+        return static_cast<double>(light::Luminance(field.At(at)));
     };
 
     for (int j = y0 + 1; j < y1 - 1; j++) {
@@ -400,14 +400,14 @@ Image Compose(const Image &material, const Image &light) {
 //
 // Worth running before anything is looked at, because a picture cannot tell you the
 // difference between "a bit dark" and "a factor of 2 pi dark", and one of these can.
-bool Closure(radiance::Field &field) {
+bool Closure(light::Field &field) {
     Medium medium;
 
     medium.Resize(kSide, kSide);
     medium.spacing = 1.0f;
     medium.origin  = {0.0f, 0.0f};
 
-    radiance::Settings settings;
+    light::Settings settings;
     settings.exposure = 1.0f;
     settings.bounce   = false;
 
@@ -417,7 +417,7 @@ bool Closure(radiance::Field &field) {
         const Vector2 at = {medium.cols * medium.spacing * 0.5f,
                             medium.rows * medium.spacing * 0.5f};
 
-        return static_cast<double>(radiance::Luminance(field.At(at)));
+        return static_cast<double>(light::Luminance(field.At(at)));
     };
 
     // Twice each time, because At() reads the readback of the previous solve.
@@ -510,7 +510,7 @@ int main(int argc, char **argv) {
     InitWindow(320, 200, "light scenes");
 
     {
-        radiance::Field checks;
+        light::Field checks;
 
         std::printf("closed form\n");
 
@@ -530,7 +530,7 @@ int main(int argc, char **argv) {
         std::printf("\n");
     }
 
-    radiance::Field field;
+    light::Field field;
 
     std::vector<Image> sheet;
 
@@ -543,7 +543,7 @@ int main(int argc, char **argv) {
         medium.spacing = 1.0f;
         medium.origin  = {0.0f, 0.0f};
 
-        radiance::Settings settings;
+        light::Settings settings;
         settings.exposure = scene.exposure;
         settings.bounce   = true;
 
@@ -655,7 +655,7 @@ int main(int argc, char **argv) {
 
         BuildHardShadow(medium);
 
-        radiance::Settings settings;
+        light::Settings settings;
         settings.exposure     = 0.9f;
         settings.bounce       = true;
         settings.sky.radiance = {0.05f, 0.06f, 0.08f};

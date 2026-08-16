@@ -13,7 +13,7 @@
 // each for a reason given where it happens: the direction count in kPrelude, the
 // boundary cascade in kBoundary, and the sky in kMergeDown.
 
-namespace radiance {
+namespace light {
 
 // ---------------------------------------------------------------------------
 // Shared by every kernel: the grid, the rotation, and the way a probe cell turns
@@ -853,4 +853,4 @@ void main() {
 }
 )GLSL";
 
-} // namespace radiance
+} // namespace light

@@ -713,8 +713,11 @@ void World::Update(Rectangle view) {
     // A few hundred of them along the edge of the region cost more than the
     // whole solve, and nothing about it looked wrong, which is the worst kind
     // of slow.
-    const float reserve = static_cast<float>(spacing_ * lightSettings_.probeCells)
-                        * static_cast<float>(1 << std::max(0, lightSettings_.cascades - 1));
+    // The light rounds its region up to a power of two in probes, so it can reach
+    // most of a region past the view before it grows again. Chunks are kept resident
+    // over that whole span rather than over the view, and the figure is generous on
+    // purpose: it is cheaper to hold a chunk than to answer one cell from the noise.
+    const float reserve = static_cast<float>(spacing_) * 64.0f;
 
     const Rectangle covered = {view.x - reserve, view.y - reserve, view.width + 2.0f * reserve,
                                view.height + 2.0f * reserve};
@@ -1732,27 +1735,33 @@ void World::StepLight(Rectangle region) {
     int j1 = 0;
     LatticeRange(region, i0, j0, i1, j1);
 
-    // Every cascade lays its probes out from the corner of the region, so the
-    // corner has to land on the same world positions from one solve to the
-    // next, and it has to do so for the coarsest of them as well as the finest.
+    // The probe grid is half the medium each way and the cascades halve its columns
+    // once per level, so both halves have to be powers of two -- and both, not just
+    // one, because the two quarter-turn quadrants swap which axis is being halved.
+    const auto roundUp = [](int value) {
+        int side = 2;
+        while (side < value) side *= 2;
+
+        return side;
+    };
+
+    const int probeCols = roundUp(std::max(1, (i1 - i0 + 1) / 2));
+    const int probeRows = roundUp(std::max(1, (j1 - j0 + 1) / 2));
+
+    const int cols = probeCols * 2;
+    const int rows = probeRows * 2;
+
+    // Snapped so the grid does not slide under the world as the camera walks.
     //
-    // That is the whole of it: the top cascade's probes stand eight cells
-    // apart, and a corner snapped only to single cells slides them across the
-    // world one cell at a time. Most of the light in a scene comes from those
-    // few coarse probes, so the entire world flickers in step with the walking.
-    // Snapping to the coarsest spacing pins every grid at once, since each
-    // finer one divides it.
-    const int stride = std::max(1, lightSettings_.probeCells) << std::max(0, lightSettings_.cascades - 1);
+    // It cannot be snapped to the coarsest cascade the way the old solver was: that
+    // cascade is now the whole region across, and jumping by a screen at a time is
+    // worse than crawling. A modest stride pins what actually shows, which is the two
+    // interleaved probe grids -- they stand one cell apart, so an origin landing on an
+    // odd cell swaps them and every row of the field changes at once.
+    constexpr int kSnap = 32;
 
-    i0 = FloorDiv(i0, stride) * stride;
-    j0 = FloorDiv(j0, stride) * stride;
-
-    // Rounded up to whole strides as well, so that the number of probes in each
-    // cascade is fixed too. A region whose width wandered by one cell would
-    // change how many coarse probes fit across it, and move them all again.
-    const int cols = ((i1 - i0 + stride) / stride) * stride;
-    const int rows = ((j1 - j0 + stride) / stride) * stride;
-    if (cols <= 0 || rows <= 0) return;
+    i0 = FloorDiv(i0, kSnap) * kSnap;
+    j0 = FloorDiv(j0, kSnap) * kSnap;
 
     const float step = static_cast<float>(spacing_);
 
@@ -1768,14 +1777,21 @@ void World::StepLight(Rectangle region) {
     {
         PROFILE_ZONE("medium fill");
 
-        // Which materials have anything to say to the light, and what they say,
-        // gathered once instead of tested at every one of thirty thousand
-        // vertices. The glow is a colour conversion the inner loop was redoing
-        // for every lit vertex.
+        // What each material says to the light, gathered once instead of tested at
+        // every one of a hundred thousand cells.
+        //
+        // Three figures now where there were two, and the third is what makes this
+        // global illumination: `albedo` is what the material reflects, and the solver
+        // feeds the last frame's light back through it. It is taken from the
+        // material's own mid tone rather than authored, because a material reflects
+        // roughly what it looks like -- that is what looking like it means -- and a
+        // field of its own across the whole table would be a hundred rows restating
+        // the colour that is already sitting next to them.
         struct Lit {
             Element element;
             float threshold;
-            float opacity;
+            float sigma;
+            light::Radiance albedo;
             light::Radiance glow;
         };
 
@@ -1786,28 +1802,34 @@ void World::StepLight(Rectangle region) {
             const ElementDef &def = kElements[e];
             if (def.light.opacity <= 0.0f && def.light.strength <= 0.0f) continue;
 
+            // Opacity is the share one whole cell of travel stops; the solver wants
+            // the coefficient behind it, because it integrates over whatever fraction
+            // of a cell a ray actually crosses rather than assuming a whole one.
+            // Fully opaque is capped rather than infinite: e^-32 is already nothing,
+            // and an infinity would poison the closed form the tracer is built on.
+            const float share = std::clamp(def.light.opacity, 0.0f, 1.0f);
+            const float sigma = (share >= 0.999f) ? 32.0f : -std::log(1.0f - share);
+
+            const Color tone = def.paint.tone[kElementTones / 2];
+
             lit[count++] = {.element   = static_cast<Element>(e),
                             .threshold = def.threshold,
-                            .opacity   = def.light.opacity,
+                            .sigma     = sigma,
+                            .albedo    = {tone.r / 255.0f, tone.g / 255.0f, tone.b / 255.0f},
                             .glow      = Glow(def.light.glow, def.light.strength)};
         }
 
         // A column at a time across the cores. Each one reads the world, which
-        // nothing is writing while this runs, and writes only its own column of
-        // the medium.
+        // nothing is writing while this runs, and writes only its own column.
         pool::For(cols, [&](int i) {
             for (int j = 0; j < rows; j++) {
                 const Vector2 vertex = {(i0 + i) * step, (j0 + j) * step};
 
-                // The chunk once for the whole column of materials — see
-                // World::Vertex.
+                // The chunk once for the whole column of materials — see World::Vertex.
                 const Vertex at = Resolve(vertex);
 
-                // Taken from whichever materials are actually present. Opacity is
-                // the strongest of them rather than their sum, since a cell filled
-                // twice over is still one cell of wall; light adds, since two
-                // things glowing in one place are brighter than either.
                 float stopped = 0.0f;
+                light::Radiance reflects;
                 light::Radiance given;
 
                 for (std::size_t k = 0; k < count; k++) {
@@ -1815,76 +1837,37 @@ void World::StepLight(Rectangle region) {
 
                     if (ValueAt(at, def.element) <= def.threshold) continue;
 
-                    stopped = std::max(stopped, def.opacity);
-                    given   = given + def.glow;
+                    // The densest wins, and it brings its own colour with it. A cell
+                    // filled twice over is still one cell of wall, and what that wall
+                    // reflects is what it is made of rather than the mean of whatever
+                    // happens to be there. Light adds, because two things glowing in
+                    // one place are brighter than either.
+                    if (def.sigma > stopped) {
+                        stopped  = def.sigma;
+                        reflects = def.albedo;
+                    }
+
+                    given = given + def.glow;
                 }
 
                 const int cell = medium_.Index(i, j);
 
-                medium_.extinction[cell] = std::clamp(stopped, 0.0f, 1.0f);
-                medium_.emission[cell]   = given;
+                medium_.sigma[cell]    = stopped;
+                medium_.albedo[cell]   = reflects;
+                medium_.emission[cell] = given;
             }
         });
     }
 
-    // Where the ground starts in each column, looking down from the open sky, and
-    // how much of that sky the cloud over it is holding back.
-    //
-    // The two are filled together because they are the same kind of fact and the
-    // solver reads them the same way. The skyline is remembered once per column
-    // since the ground does not move; the shade is not, since the whole point of
-    // weather is that it does.
-    medium_.skyline.assign(cols, 0.0f);
-    medium_.cover.assign(cols, 0.0f);
-    medium_.sunDepth.assign(cols, 0.0f);
-
-    // Where the region's top edge sits. A column whose ground is above it has no
-    // part of the region open to the sky.
-    const float ceiling = j0 * step;
-
-    // Every column the walk below asks about, put into the record first — the
-    // same discipline the grass band keeps, and for the same reason. See
-    // World::skylineWritable_.
-    WarmSkyline(i0, i0 + cols);
-
-    skylineWritable_ = false;
-
-    {
-    PROFILE_ZONE("columns");
-
-    pool::For(cols, [&](int i) {
-        const float ground = Skyline(i0 + i);
-
-        medium_.skyline[i] = ground;
-
-        // Cloud shade is only ever read at the end of a ray that reached the sky, so
-        // a column with no sky in it never reads its own. Finding it anyway is the
-        // entire cost of the weather while the player is underground, which is most
-        // of the time.
-        medium_.cover[i] = (ceiling < ground) ? sky_.ShadeAt((i0 + i) * step) : 0.0f;
-
-        // And how deep the cover over the rock goes here, which is how deep the
-        // daylight should reach before it starts to fail.
-        //
-        // Walked rather than asked of the generator. What matters is the layer
-        // that is actually there — the soil a player has dug half away is half as
-        // deep, and a column that has been filled back in with rock has no cover
-        // at all and should darken from its own surface.
-        medium_.sunDepth[i] = CoverDepth((i0 + i) * step, ground);
-    },
-    // Small blocks: a column of open sky costs one lookup and a column of deep
-    // cover walks the lattice, so the work is very unevenly spread.
-    64, 8);
-    }
-
-    skylineWritable_ = true;
-
+    // Whatever is shining without being made of anything: a lantern, a torch in the
+    // hand, a thrown light.
     for (const Spark &spark : sparks_) {
-        // Spread over a small disc rather than pressed into one cell. A single
-        // cell is narrower than the step the nearest cascade takes, so most
-        // rays would pass beside it, and a light that moved would blink as it
-        // crossed from one cell to the next.
-        const float radius = std::max(spark.radius, step);
+        // Spread over a disc, and a wide one. The solver aliases sources smaller than
+        // about eight cells across -- the paper's one real limitation, from ray
+        // segments sitting at fixed positions -- and a light narrower than that also
+        // blinks as it is walked past, for the same reason. Eight cells is the floor
+        // rather than the figure, so a caller asking for a wider glow still gets one.
+        const float radius = std::max(spark.radius, step * 8.0f);
         const int reach    = static_cast<int>(std::ceil(radius / step));
 
         const int ci = static_cast<int>(std::round((spark.at.x - medium_.origin.x) / step));
@@ -1904,45 +1887,43 @@ void World::StepLight(Rectangle region) {
                 const float distance = std::sqrt(dx * dx + dy * dy);
                 if (distance >= radius) continue;
 
-                const float share = 1.0f - distance / radius;
-                const int cell    = medium_.Index(i, j);
+                const float fall = 1.0f - distance / radius;
+                const int cell   = medium_.Index(i, j);
 
-                medium_.emission[cell] = medium_.emission[cell] + spark.radiance * (share * share);
+                medium_.emission[cell] = medium_.emission[cell] + spark.radiance * (fall * fall);
             }
         }
     }
 
     sparks_.clear();
 
-    // And whatever is standing in the light without being made of anything.
+    // The cloud, as one figure for the sky rather than as a column of them.
     //
-    // Read into the per-column cover the clouds already use rather than stamped
-    // into the air as extinction — see World::AddCover for why the volume was
-    // wrong. Saturating rather than adding outright, so a wood under a storm does
-    // not hold back more sky than there is.
-    for (const Cover &cover : covers_) {
-        const int from = std::max(static_cast<int>(std::floor(cover.fromX / step)) - i0, 0);
-        const int to   = std::min(static_cast<int>(std::ceil(cover.toX / step)) - i0, medium_.cols - 1);
+    // The per-column arrangement is gone along with the skyline it rode on. Daylight
+    // is no longer credited to a ray by asking what stands over its column; it is
+    // transported, and something that shades one place and not the next has to be in
+    // the medium to do it. Read at the middle of the region, which is where the
+    // player is, so an overcast day is overcast and a clear one is clear.
+    //
+    // What this does not yet carry is a canopy's shade, which used to arrive through
+    // the same channel. That belongs in the medium as leaves rather than here, and is
+    // the next thing this wants.
+    {
+        const float middle = medium_.origin.x + cols * step * 0.5f;
 
-        for (int i = from; i <= to; i++) {
-            medium_.cover[i] = std::min(medium_.cover[i] + cover.share, 1.0f);
+        float shade = sky_.ShadeAt(middle);
+
+        for (const Cover &cover : covers_) {
+            if (middle >= cover.fromX && middle <= cover.toX) {
+                shade = std::min(shade + cover.share, 1.0f);
+            }
         }
+
+        lightSettings_.sky.radiance = skyLight_;
+        lightSettings_.sky.cover    = shade;
     }
 
     covers_.clear();
-
-    // The sky's horizon is the terrain's own, so a world generated with more
-    // ground above it darkens without the light having to be retuned.
-    lightSettings_.sky = {
-        .radiance = skyLight_,
-        .horizon  = settings_.surface.level,
-        .fade     = kSkyFade,
-
-        // Where the cloud's underside is, so the shadow starts below the cloud rather
-        // than running the whole height of the column.
-        .coverBelow = sky_.ShadeBelow(),
-        .coverFade  = kSkyFade,
-    };
 
     {
         PROFILE_ZONE("solve");
