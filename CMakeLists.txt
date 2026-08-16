@@ -16,6 +16,17 @@ set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(BUILD_GAMES    OFF CACHE BOOL "" FORCE)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# A luz e resolvida por compute shader, e compute shader e OpenGL 4.3.
+#
+# A raylib compila para 3.3 por padrao, e a 3.3 nao tem nem `rlLoadComputeShaderProgram`
+# nem SSBO: os simbolos existem no cabecalho mas o corpo inteiro esta atras de
+# `#if defined(GRAPHICS_API_OPENGL_43)` e vira uma chamada vazia que devolve zero.
+# O sintoma disso nao e um erro de link, e um shader que "carrega" com id 0 e um
+# buffer que le zeros - por isso o valor esta fixado aqui e nao deixado ao acaso.
+#
+# 4.3 e de 2012 e nao restringe nada na pratica; a maquina alvo aqui e uma RTX 3070.
+set(OPENGL_VERSION "4.3" CACHE STRING "" FORCE)
+
 FetchContent_Declare(
     raylib
     GIT_REPOSITORY https://github.com/raysan5/raylib.git
@@ -90,6 +101,26 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 target_compile_features(${PROJECT_NAME} PRIVATE cxx_std_26)
 
 target_link_libraries(${PROJECT_NAME} PRIVATE raylib_cpp raylib)
+
+# A bank of scenes for testing the light, built on its own so that running it does
+# not mean starting the game and walking somewhere. Not part of the default build:
+# `cmake --build build --target LightScenes`, or tools/lightscenes.bat.
+#
+# It links only the solver, deliberately. The whole value of it is that it exercises
+# the light against scenes whose answer is known, and pulling the world in would
+# make its answers depend on the generator.
+add_executable(LightScenes EXCLUDE_FROM_ALL
+    tools/light_scenes.cpp
+    src/radiance.cpp
+)
+
+target_include_directories(LightScenes PRIVATE
+    src
+    ${raylib_SOURCE_DIR}/src/external
+)
+
+target_compile_features(LightScenes PRIVATE cxx_std_26)
+target_link_libraries(LightScenes PRIVATE raylib)
 
 # Assets are loaded at runtime through paths relative to the executable, which
 # switches its working directory to its own location at startup.
