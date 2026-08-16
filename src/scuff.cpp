@@ -92,9 +92,14 @@ constexpr float Loose(Element element) {
     case Element::Soil: return 0.70f;
     case Element::Rock: return 0.22f;
 
-    // A torch underfoot is a torch, not a floor, and water is dealt with by the
-    // caller — a foot in it is a splash and this is dust.
-    case Element::Torch:
+    // Cobble is the rock it came out of, and gives up as little underfoot.
+    case Element::Cobblestone: return 0.22f;
+
+    // A plank floor is swept, and water is dealt with by the caller — a foot in
+    // it is a splash and this is dust. Both are silent here for the same reason:
+    // a puff of dust off a board would say the player had trodden in something,
+    // and the whole of a built floor is that they have not.
+    case Element::WoodPlank:
     case Element::Water: return 0.0f;
 
     default: return 0.28f;

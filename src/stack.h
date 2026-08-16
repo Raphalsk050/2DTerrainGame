@@ -27,10 +27,20 @@ enum class Holds : std::uint8_t {
 
 // One block, in world pixels.
 //
-// Sixteen, which is Minecraft's, and which the world was already written
-// against without ever saying so: the character is twelve wide and twenty-six
-// tall, a terrace riser is twenty-four, and a mature tree is five characters.
-inline constexpr float kBlockSide = 16.0f;
+// The build cell, and written as it rather than as a number of its own, because
+// a block and a cell being the same size is not a coincidence to be maintained
+// in two places — it is the one fact the whole exchange rests on. One click puts
+// down one cell and spends one block; digging that cell out returns exactly one.
+// Let the two drift apart and the player either pays a fraction they cannot see
+// or is paid one, and the second of those is a way of making blocks out of
+// nothing.
+//
+// It was sixteen — Minecraft's, and near enough to the sizes this world was
+// already written against: the character is twelve wide and twenty-six tall, a
+// terrace riser is twenty-four, and a mature tree is five characters. Eighteen
+// sits in the same company and has the one property sixteen lacked, which is
+// that the lattice divides it. See config::kBuildCell.
+inline constexpr float kBlockSide = static_cast<float>(config::kBuildCell);
 
 // What one block costs, in lattice vertices.
 //
@@ -40,11 +50,19 @@ inline constexpr float kBlockSide = 16.0f;
 // two, and it is simply an area: a block is as much material as fills the square
 // a block would have stood in.
 //
-// It comes out a little over seven, and the fraction is the point. A brush
-// stroke crosses part of a block far more often than a whole one, so the
-// remainder has to be carried from one stroke to the next rather than rounded
-// away — see Editor, which keeps it.
+// Nine, exactly, and the exactness is what a cell buys. It used to come out a
+// little over seven and the fraction had to be carried from one stroke to the
+// next rather than rounded away, or a player digging with a small brush was paid
+// nothing at all however long they dug. The brush is still a circle over a
+// lattice and still crosses part of a block far more often than a whole one, so
+// Editor::owed_ is still what makes that lossless — what no longer needs it is a
+// cell, which is nine vertices on the nose.
 inline constexpr float kVerticesPerBlock = (kBlockSide / config::kResolution) * (kBlockSide / config::kResolution);
+
+// The two ways of counting a cell have to agree: one block's worth of material
+// is exactly what fills one cell, or placing and digging are not inverse.
+static_assert(kVerticesPerBlock == static_cast<float>(config::kBuildCellArea),
+              "a build cell must cost exactly one block");
 
 struct Stack {
     Holds holds = Holds::Nothing;

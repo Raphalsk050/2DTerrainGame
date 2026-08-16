@@ -52,41 +52,105 @@ void Editor::Bank(const World::Yield &freed, Inventory &inventory, Drops &drops,
     }
 }
 
-const char *Editor::Lay(World &world, Inventory &inventory, Drops &drops, Vector2 target, Rectangle body, float away,
-                        float now) {
+const char *Editor::Spend(World &world, Inventory &inventory, Drops &drops, Rectangle body, float away, float now) {
     const Stack &held = inventory.Held();
 
+    if (held.Empty()) return "nothing in hand";
+
+    int x0 = 0;
+    int y0 = 0;
+    int x1 = 0;
+    int y1 = 0;
+    if (!Block(x0, y0, x1, y1)) return nullptr;
+
     const Element element = held.AsElement();
-    const std::size_t e   = ElementIndex(element);
 
-    // Everything the player has of it, counted in the unit the brush spends. The
-    // blocks in the slot plus whatever fraction of one was left over from digging
-    // it up, which is the same store read from the other end.
-    const float have = static_cast<float>(held.count) * kVerticesPerBlock + owed_[e];
-    const int budget = static_cast<int>(std::floor(have));
+    // The rule about *where*, asked of the cell under the cursor rather than of
+    // every cell in the block. A block of nine laid against a wall has eight cells
+    // touching nothing but each other, and asking each of them separately would
+    // make a wide brush refuse everything but its own edge — so the aim is what is
+    // judged, which is also what the player is looking at.
+    if (building_) {
+        if (!roomy_) return "no room — you are standing there";
+        if (!founded_) return "nothing here to fix it to";
+    }
 
-    if (budget <= 0) return nullptr;
+    World::Yield freed{};
 
-    const World::Stroke stroke = world.Place(element, target, radius_, budget, body);
+    const int budget = held.count;
 
-    // What is left is what was there minus what went into the ground, and the
-    // slot is then set to however many whole blocks that comes to. Recomputing
-    // the count rather than decrementing it is what keeps the fraction and the
-    // slot from ever disagreeing about the same material.
-    const float left = have - static_cast<float>(stroke.filled);
-    const int blocks = static_cast<int>(std::floor(left / kVerticesPerBlock));
+    int spent    = 0;
+    bool refused = false;
 
-    owed_[e] = left - static_cast<float>(blocks) * kVerticesPerBlock;
+    for (int cx = x0; cx <= x1 && spent < budget; cx++) {
+        for (int cy = y0; cy <= y1 && spent < budget; cy++) {
+            // Asked before rather than inferred after, because a cell that filled
+            // nothing filled nothing for two quite different reasons — the body is
+            // in it, or it already held the material — and only the first is worth
+            // saying out loud.
+            if (Def(element).rules.blocksBodies && !world.CellClear(cx, cy, body)) {
+                refused = true;
+                continue;
+            }
 
-    if (held.count > blocks) inventory.Take(inventory.Selected(), held.count - blocks);
+            const World::Stroke stroke = world.PlaceCell(element, cx, cy, body);
 
-    // Placing is a replacement, so a brush pressed into a seam of ore hands the
+            // Already this material. Not charged and not remarked on: this is the
+            // ordinary state of a held button whose cursor has not moved on yet.
+            if (stroke.filled <= 0) continue;
+
+            // One block per cell, whatever fraction of the cell was already full.
+            // The cell is the unit now, so there is no fraction to carry: what was
+            // already there was paid for when it was put there.
+            spent++;
+
+            for (std::size_t e = 0; e < kElementCount; e++) freed[e] += stroke.freed[e];
+        }
+    }
+
+    if (spent > 0) inventory.Take(inventory.Selected(), spent);
+
+    // Placing is a replacement, so a stroke pressed into a seam of ore hands the
     // ore back rather than destroying it.
-    Bank(stroke.freed, inventory, drops, target, away, now);
+    const Rectangle whole = World::CellBounds(x0, y0);
+
+    Bank(freed, inventory, drops, {whole.x + whole.width * 0.5f, whole.y + whole.height * 0.5f}, away, now);
+
+    if (spent == 0 && refused) return "no room — you are standing there";
 
     return nullptr;
 }
 
+bool Editor::Block(int &outX0, int &outY0, int &outX1, int &outY1) const {
+    if (!onCell_) return false;
+
+    // Centred on the cell under the cursor for an odd span, and hung from it for
+    // an even one — there is no cell at the middle of an even block to centre on,
+    // and picking the one up and to the left keeps the cursor inside the block at
+    // every size rather than on its edge at half of them.
+    outX0 = cellX_ - (span_ - 1) / 2;
+    outY0 = cellY_ - (span_ - 1) / 2;
+    outX1 = outX0 + span_ - 1;
+    outY1 = outY0 + span_ - 1;
+
+    return true;
+}
+
+bool Editor::Built(const World &world, int cx, int cy) {
+    // Asked at the middle of the cell rather than under the cursor. On the cursor
+    // the answer at a block's edge is whatever the contour rounded to, and the
+    // question here is about the cell as a whole.
+    const Rectangle at = World::CellBounds(cx, cy);
+
+    const std::optional<Element> what = world.OccupantAt({at.x + at.width * 0.5f, at.y + at.height * 0.5f});
+
+    return what.has_value() && Def(*what).laying == Laying::Cell;
+}
+
+bool Editor::Founded(const World &world, int cx, int cy) const {
+    return world.OverlapsSolid(World::CellBounds(cx - 1, cy)) || world.OverlapsSolid(World::CellBounds(cx + 1, cy))
+        || world.OverlapsSolid(World::CellBounds(cx, cy - 1)) || world.OverlapsSolid(World::CellBounds(cx, cy + 1));
+}
 
 namespace {
 
@@ -248,8 +312,8 @@ const char *Editor::Update(World &world, Inventory &inventory, Grove &grove, con
     const bool smaller = IsKeyPressed(KEY_MINUS) || IsKeyPressed(KEY_LEFT_BRACKET) || IsKeyPressed(KEY_KP_SUBTRACT);
     const bool larger  = IsKeyPressed(KEY_EQUAL) || IsKeyPressed(KEY_RIGHT_BRACKET) || IsKeyPressed(KEY_KP_ADD);
 
-    if (smaller) radius_ = std::max(radius_ - kRadiusStep, kMinRadius);
-    if (larger) radius_ = std::min(radius_ + kRadiusStep, kMaxRadius);
+    if (smaller) span_ = std::max(span_ - 1, kMinSpan);
+    if (larger) span_ = std::min(span_ + 1, kMaxSpan);
 
     // The latch comes off the moment the button does, wherever this frame returns
     // from. A mode that outlived its press would make the *next* click inherit the
@@ -265,6 +329,9 @@ const char *Editor::Update(World &world, Inventory &inventory, Grove &grove, con
         under_.reset();
         reachable_ = false;
         timber_    = false;
+        building_  = false;
+        buildable_ = false;
+        onCell_    = false;
         return nullptr;
     }
 
@@ -274,8 +341,35 @@ const char *Editor::Update(World &world, Inventory &inventory, Grove &grove, con
     const float dy = target.y - player.y;
 
     aim_       = target;
+    from_      = player;
     under_     = world.OccupantAt(target);
     reachable_ = (dx * dx + dy * dy) <= kReach * kReach;
+
+    // Which cell the hand is aimed at. Worked out every frame and whatever is in
+    // hand, because both hands want it now: the right one sets a piece into it and
+    // the left one takes a piece back out of it.
+    //
+    // Worked out here for the same reason the footing below is: the grid the player
+    // sees and the click that follows it have to be one answer.
+    World::ToCell(target, cellX_, cellY_);
+    onCell_ = true;
+
+    // `building_` does not ask whether the cursor is in reach. The grid is how the
+    // player finds out where the reach ends, so it has to be drawn out there too —
+    // greyed, and refusing, but drawn.
+    const Stack &hand = inventory.Held();
+
+    building_ = hand.holds == Holds::Material && hand.count > 0 && Def(hand.AsElement()).laying == Laying::Cell;
+
+    // The two ways a cell can refuse, kept apart because they are two different
+    // things for the player to do about it: one asks them to build from somewhere
+    // that holds, the other to get out of the way.
+    founded_ = building_ && Founded(world, cellX_, cellY_);
+    roomy_   = building_
+           && (!Def(hand.AsElement()).rules.blocksBodies || world.CellClear(cellX_, cellY_, body));
+
+    buildable_ = building_ && reachable_ && founded_ && roomy_;
+
 
     // Where the thing in hand would come to rest, if it is the kind of thing that
     // rests anywhere. Worked out here, once, and used by both the ghost that shows
@@ -342,13 +436,42 @@ const char *Editor::Update(World &world, Inventory &inventory, Grove &grove, con
     const float away = (target.x < player.x) ? -1.0f : 1.0f;
 
     if (digging) {
-        Bank(world.Excavate(target, radius_).freed, inventory, grove.Fallen(), target, away, now);
+        int x0 = 0;
+        int y0 = 0;
+        int x1 = 0;
+        int y1 = 0;
+        if (!Block(x0, y0, x1, y1)) return nullptr;
+
+        World::Yield freed{};
+
+        for (int cx = x0; cx <= x1; cx++) {
+            for (int cy = y0; cy <= y1; cy++) {
+                const World::Stroke out = world.ExcavateCell(cx, cy);
+
+                for (std::size_t e = 0; e < kElementCount; e++) freed[e] += out.freed[e];
+            }
+        }
+
+        const Rectangle at = World::CellBounds(x0, y0);
+
+        Bank(freed, inventory, grove.Fallen(), {at.x + at.width * 0.5f, at.y + at.height * 0.5f}, away, now);
+
         return nullptr;
     }
 
     const Stack &held = inventory.Held();
 
-    if (held.holds == Holds::Material) return Lay(world, inventory, grove.Fallen(), target, body, away, now);
+    // Ground and pieces go down the same way now that the brush is square: whole
+    // cells, one block of material each. What still separates them is the rule
+    // about where, which Spend asks about.
+    //
+    // Held rather than pressed. A brush stroke is a continuous thing, and so is
+    // dragging a wall out along a ledge, which is how walls are built in the game
+    // this is modelled on. What stops a held button draining the stack is not a
+    // press test but the cell itself: a cell that already holds the material gains
+    // nothing, is charged nothing, and a cursor resting on one spends nothing
+    // however long the button is down.
+    if (held.holds == Holds::Material) return Spend(world, inventory, grove.Fallen(), body, away, now);
 
     // Everything past here answers the press rather than the hold. A brush lays
     // material for as long as the button is down because a stroke is a continuous
@@ -424,6 +547,15 @@ void Editor::DrawCursor(const Inventory &inventory, const Grove &grove, flora::S
         return;
     }
 
+    // The grid replaces the ring outright, and has to: the ring's whole meaning is
+    // "this much comes away under the brush", and a hand that works one square at
+    // a time covers no such area. Drawing both would be two different claims about
+    // where the next click lands.
+    if (building_) {
+        DrawGrid(carried, zoom);
+        return;
+    }
+
     // A thing that goes into the world whole gets a ghost of itself standing
     // where it would stand, and no ring: the ring is about an area a brush
     // covers, and there is no area here — there is one spot, and the honest way
@@ -459,10 +591,10 @@ void Editor::DrawCursor(const Inventory &inventory, const Grove &grove, flora::S
         }
     }
 
-    // The ring carries what the hands can do here. Out of reach it goes grey and
-    // says neither of them can; in reach it takes the colour of whatever the
-    // right hand would put down, or the digging colour where there is nothing to
-    // put down and only the left hand is any use.
+    // The block carries what the hands can do here, exactly as the ring used to.
+    // Out of reach it goes grey and says neither of them can; in reach it takes
+    // the colour of whatever the right hand would put down, or the digging colour
+    // where there is nothing to put down and only the left hand is any use.
     //
     // Reading that off the cursor is what keeps two buttons workable without a
     // badge somewhere else saying which is which, since the eye is already here.
@@ -474,11 +606,94 @@ void Editor::DrawCursor(const Inventory &inventory, const Grove &grove, flora::S
         color = (held.holds == Holds::Material) ? StyleOf(held.AsElement()).contour : kDigColor;
     }
 
-    DrawCircleLinesV(target, radius_, color);
-    DrawCircleLinesV(target, radius_ - 1.0f, Fade(color, 0.5f));
+    int x0 = 0;
+    int y0 = 0;
+    int x1 = 0;
+    int y1 = 0;
+    if (!Block(x0, y0, x1, y1)) return;
 
-    // The ring says how much comes away and the spade says what the hand is; the
-    // two are different questions and the ring cannot answer the second, which is
-    // why the mark in the middle is a tool and no longer a cross.
-    DrawSpade(target, scale, thick, color);
+    const Rectangle from = World::CellBounds(x0, y0);
+    const Rectangle to   = World::CellBounds(x1, y1);
+
+    const Rectangle at = {from.x, from.y, to.x + to.width - from.x, to.y + to.height - from.y};
+
+    DrawRectangleLinesEx(at, 1.0f / zoom, color);
+
+    // The block says how much comes away and the spade says what the hand is; the
+    // two are different questions and the outline cannot answer the second, which
+    // is why the mark in the middle is a tool and not a cross.
+    DrawSpade({at.x + at.width * 0.5f, at.y + at.height * 0.5f}, scale, thick, color);
+}
+
+void Editor::DrawGrid(const Stack &held, float zoom) const {
+    const auto side = static_cast<float>(config::kBuildCell);
+
+    // Ruled as whole lines across the reach rather than as a rectangle per cell.
+    // The reach is six cells, so the square around it is thirteen by thirteen —
+    // a hundred and sixty-nine outlines, six hundred and seventy-six quads, every
+    // frame the hand holds a plank. Twenty-six lines draw the same grid. It is the
+    // same lesson the pickups taught: what costs here is submission, not pixels.
+    const int reach = static_cast<int>(std::ceil(kReach / side));
+
+    int cx = 0;
+    int cy = 0;
+    World::ToCell(from_, cx, cy);
+
+    // Off the cell's own bounds rather than off a multiple of the side, so the
+    // rule falls exactly where the edge of a piece will — see kCellOffset. Ruling
+    // the grid on one grid and building on another is the bug this whole routine
+    // is here to make impossible to have again.
+    const Rectangle first = World::CellBounds(cx - reach, cy - reach);
+    const Rectangle last  = World::CellBounds(cx + reach, cy + reach);
+
+    const float x0 = first.x;
+    const float y0 = first.y;
+    const float x1 = last.x + last.width;
+    const float y1 = last.y + last.height;
+
+    // Faint, and it has to be. This is drawn over the whole of the ground the
+    // player is looking at, every frame, for as long as they are building — at any
+    // weight that reads as a fence in front of the world rather than as a
+    // guide laid over it.
+    const Color rule = Fade(kFarColor, 0.22f);
+    const float hair = 1.0f / zoom;
+
+    for (int i = 0; i <= reach * 2 + 1; i++) {
+        const float x = x0 + static_cast<float>(i) * side;
+        DrawLineEx({x, y0}, {x, y1}, hair, rule);
+    }
+
+    for (int j = 0; j <= reach * 2 + 1; j++) {
+        const float y = y0 + static_cast<float>(j) * side;
+        DrawLineEx({x0, y}, {x1, y}, hair, rule);
+    }
+
+    int bx0 = 0;
+    int by0 = 0;
+    int bx1 = 0;
+    int by1 = 0;
+    if (!Block(bx0, by0, bx1, by1)) return;
+
+    // The block the click covers, in the material's own colour so the square reads
+    // as the thing that is about to be there — and outlined in the answer, green
+    // where it will go and red where it will not. The refusal arrives before the
+    // click rather than as a line of text after it.
+    const Rectangle from = World::CellBounds(bx0, by0);
+    const Rectangle to   = World::CellBounds(bx1, by1);
+
+    const Color says = buildable_ ? kPlantColor : (Reachable() ? kDigColor : kFarColor);
+
+    if (buildable_ && held.holds == Holds::Material) {
+        const Color fill = Fade(StyleOf(held.AsElement()).contour, 0.45f);
+
+        // Cell by cell rather than as one rectangle, so the grid stays legible
+        // under a wide brush and the block reads as the pieces it will become.
+        for (int cx = bx0; cx <= bx1; cx++) {
+            for (int cy = by0; cy <= by1; cy++) DrawRectangleRec(World::CellBounds(cx, cy), fill);
+        }
+    }
+
+    const Rectangle at = {from.x, from.y, to.x + to.width - from.x, to.y + to.height - from.y};
+
+    DrawRectangleLinesEx(at, 1.0f / zoom, says);
 }

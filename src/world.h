@@ -147,6 +147,40 @@ public:
     // caller decides what the yield is worth.
     Stroke Excavate(Vector2 world, float radius);
 
+    // The build grid: which cell a world position falls in, and where a cell is.
+    //
+    // The grid is the lattice counted in threes and is anchored at the world
+    // origin, not at the player or at a chunk. That is what makes it one grid
+    // rather than a grid per session: a wall built today lines up with a wall
+    // built tomorrow a thousand pixels away, and two cells never overlap by a
+    // vertex. See config::kBuildCell.
+    static void ToCell(Vector2 world, int &outCx, int &outCy);
+    static Rectangle CellBounds(int cx, int cy);
+
+    // Fills one cell of the build grid, or empties it.
+    //
+    // The square counterpart of Place and Excavate, and the same routine
+    // underneath — everything a stroke has to get right is the same for a cell as
+    // for a brush, and the list is long enough that a second copy of it would
+    // drift: what it charges for, what it hands back, what it tells the grass,
+    // and the body it refuses to bury.
+    //
+    // What differs is only the shape and the accounting. A cell is exactly
+    // config::kBuildCellArea vertices, which is exactly one block, so a click
+    // spends one and digging it out returns one — see kVerticesPerBlock. Nothing
+    // is charged where the cell already held the material, which reports back as a
+    // `filled` of zero.
+    Stroke PlaceCell(Element element, int cx, int cy, Rectangle keepClear = {});
+    Stroke ExcavateCell(int cx, int cy);
+
+    // Whether a cell is free of a region nothing solid may be laid in — the
+    // player's body, in practice.
+    //
+    // Public because the hand has to ask it a frame ahead of the click, so the
+    // square can go red before it is pressed rather than the press being
+    // swallowed. PlaceCell asks it again and is the one that enforces it.
+    bool CellClear(int cx, int cy, Rectangle keepClear) const;
+
     // Advances the liquid inside `active` by one step. The region is copied
     // into a flat buffer, simulated, and written back, which keeps the
     // automaton free of any chunk bookkeeping.
@@ -635,11 +669,38 @@ private:
     // through open sky changes nothing and must not be remembered as having.
     bool ClearVertex(Vector2 vertex, Yield &yield);
 
-    // Both edits a brush can make. Placing clears the vertex first, so it is
-    // the same edit as digging with a second half. `budget` bounds how many
-    // vertices the placed material may newly take, and is ignored when digging.
-    // `keepClear` is the region solids may not be laid in — see Place.
-    Stroke ApplyBrush(Vector2 world, float radius, std::optional<Element> place, int budget, Rectangle keepClear);
+    // The lattice vertices one stroke covers.
+    //
+    // Held as an index range rather than as a rectangle because the two shapes
+    // want it worked out differently and only one of them can be trusted to a
+    // bounding box. A cell has to own exactly its own three vertices across, and
+    // the range LatticeRange derives from a cell's rectangle includes the vertex
+    // on its far edge — which belongs to the cell next door. Two neighbouring
+    // cells would then share a column, and clearing one would take a slice out of
+    // the other.
+    struct Reach {
+        // Inclusive, in whole lattice vertices from the world origin.
+        int i0 = 0;
+        int j0 = 0;
+        int i1 = 0;
+        int j1 = 0;
+
+        // The brush's circle. A radius of zero or less means every vertex in the
+        // range, which is what a square cell asks for.
+        Vector2 centre{};
+        float radius = 0.0f;
+    };
+
+    // Both edits a stroke can make, over whichever shape it reaches. Placing
+    // clears the vertex first, so it is the same edit as digging with a second
+    // half. `budget` bounds how many vertices the placed material may newly take,
+    // and is ignored when digging. `keepClear` is the region solids may not be
+    // laid in — see Place.
+    Stroke ApplyStroke(const Reach &reach, std::optional<Element> place, int budget, Rectangle keepClear);
+
+    // The two shapes, each working out its own vertex range.
+    Reach BrushReach(Vector2 world, float radius) const;
+    Reach CellReach(int cx, int cy) const;
 
     // Whether the square a vertex owns meets a rectangle.
     //

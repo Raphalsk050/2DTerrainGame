@@ -682,7 +682,12 @@ void DrawBrushSize(const Editor &editor) {
     // stopped working.
     const Color color = editor.Reachable() ? Color{190, 198, 212, 255} : Color{120, 126, 138, 255};
 
-    const char *text = TextFormat("brush %.0f  (- / +)", editor.Radius());
+    // The brush has no part in building, so its size is not what this badge is
+    // for while a piece is in hand. It says which hand the player is holding
+    // instead — the grid out in the world already says where, and the size keys
+    // do nothing here.
+    const char *text = TextFormat("brush %dx%d  (- / +)%s", editor.Span(), editor.Span(),
+                                  editor.Building() ? "  |  building" : "");
     const int width  = MeasureText(text, 14);
 
     // Sat just clear of the bar, which reaches 76 pixels up from the bottom.
@@ -2371,8 +2376,8 @@ void DrawHud(const World &world, const Grove &grove, const Player &player, const
     DrawLabel("A/D: move  |  shift: run  |  space: jump  |  S: crouch  |  J: chop  |  mouse: aim  |  F: fly  |"
               "  pg up/dn or ctrl+wheel: zoom",
               10, 10, ink);
-    DrawLabel("left: dig  |  right: place what is held  |  1-9 or wheel: slot  |  tab: inventory  |"
-              "  - / +: brush size  |  R: regenerate",
+    DrawLabel("left: dig  |  right: place what is held  |  planks and cobble build on the grid  |"
+              "  1-9 or wheel: slot  |  tab: inventory  |  - / +: brush size  |  R: regenerate",
               10, 28, ink);
     DrawLabel(TextFormat("V: vertices  |  F3: chunks  |  F4: height grid  |  F5: light probes  |  F6: unlit %s  |"
                          "  F7: fast weather %s  |  F8: next quarter  |  F9: season %s  |  F10: sheet  |"
@@ -2510,6 +2515,10 @@ int main(int argc, char **argv) {
     // remembers against one built from cold.
     const bool checking = argc >= 2 && TextIsEqual(argv[1], "--sodcheck");
 
+    // `--build [cells]` sets a run of cells and digs it back out, checking that
+    // the exchange is exact. See the block itself for why it is worth a mode.
+    const bool building = argc >= 2 && TextIsEqual(argv[1], "--build");
+
     // `--profile [frames]` plays the game with nobody at the keys and reports
     // where the frame went. This one wants a window on screen: the draw is half
     // of what it is measuring.
@@ -2518,7 +2527,7 @@ int main(int argc, char **argv) {
     // Resizable, with a floor under it: below the minimum the hotbar is wider than
     // the frame and the head-up display runs off the side of it.
     SetConfigFlags((probing || counting || cruising || weighing || reading || digging || assaying || settling || timing
-                    || gauging || checking)
+                    || gauging || checking || building)
                        ? FLAG_WINDOW_HIDDEN
                        : FLAG_WINDOW_RESIZABLE);
 
@@ -3310,6 +3319,204 @@ int main(int argc, char **argv) {
 
         CloseWindow();
         return (wrong == 0) ? 0 : 1;
+    }
+
+    if (argc >= 2 && TextIsEqual(argv[1], "--build")) {
+        // Sets a run of cells into open sky, digs the same run back out, and
+        // checks that the world gave back exactly what it was given.
+        //
+        // It exists because the exchange is the one part of building that cannot
+        // be seen. A wall that is a pixel out is obvious the moment it is looked
+        // at; a wall that quietly pays back a block more than it cost is a way of
+        // making planks out of nothing, and it looks exactly like a wall. The rate
+        // is kVerticesPerBlock against config::kBuildCellArea, and those are two
+        // numbers in two files that have to stay equal — see the static_assert in
+        // stack.h, which catches them being unequal but not a cell that fails to
+        // fill.
+        //
+        // Sky rather than ground, and high above it: a cell set into a hillside
+        // hands back what it displaced as well, which is correct and is a
+        // different sum. Here the only material in play is the one being tested.
+        const int cells = (argc >= 3) ? std::atoi(argv[2]) : 24;
+
+        const Element what = Element::WoodPlank;
+        const std::size_t e = ElementIndex(what);
+
+        // Well clear of any terrain, so every cell starts empty.
+        const int cy = -40;
+
+        world.Update({0.0f, static_cast<float>(cy) * config::kBuildCell - 400.0f, cells * config::kBuildCell + 800.0f,
+                      1200.0f});
+
+        int laid   = 0;
+        int filled = 0;
+
+        for (int i = 0; i < cells; i++) {
+            const World::Stroke set = world.PlaceCell(what, i, cy);
+
+            if (set.filled > 0) laid++;
+
+            filled += set.filled;
+        }
+
+        int freed = 0;
+
+        for (int i = 0; i < cells; i++) {
+            freed += world.ExcavateCell(i, cy).freed[e];
+        }
+
+        const float cost = static_cast<float>(filled) / kVerticesPerBlock;
+        const float back = static_cast<float>(freed) / kVerticesPerBlock;
+
+        std::printf("cell %d px, %d vertices, %.0f per block\n", config::kBuildCell, config::kBuildCellArea,
+                    kVerticesPerBlock);
+        std::printf("%d cells asked for, %d took a piece\n", cells, laid);
+        std::printf("vertices: %d filled, %d freed\n", filled, freed);
+        std::printf("blocks:   %.3f spent, %.3f returned\n", cost, back);
+
+        // And that the square the player is shown is the square the piece lands
+        // in. This is the other half of building and it is the half that was
+        // wrong: the grid was ruled on multiples of the cell side and the block
+        // landed on the vertices, which sit half a lattice step inside that — so
+        // every piece appeared three pixels up and to the left of the outline that
+        // promised it. Nothing about the exchange above catches that.
+        //
+        // Checked as a round trip. Every point inside a cell's own bounds has to
+        // name that cell, and the vertices the cell writes have to lie within
+        // them.
+        bool square = true;
+
+        for (int i = 0; i < cells; i++) {
+            const Rectangle at = World::CellBounds(i, cy);
+
+            // Inset by a hair, since the far edge belongs to the cell beyond.
+            const float in = 0.05f;
+
+            const Vector2 corners[] = {{at.x + in, at.y + in},
+                                       {at.x + at.width - in, at.y + in},
+                                       {at.x + in, at.y + at.height - in},
+                                       {at.x + at.width - in, at.y + at.height - in},
+                                       {at.x + at.width * 0.5f, at.y + at.height * 0.5f}};
+
+            for (const Vector2 &corner : corners) {
+                int bx = 0;
+                int by = 0;
+                World::ToCell(corner, bx, by);
+
+                if (bx != i || by != cy) {
+                    if (square) {
+                        std::printf("WRONG: (%.2f, %.2f) is inside cell %d,%d but names %d,%d\n", corner.x, corner.y, i,
+                                    cy, bx, by);
+                    }
+
+                    square = false;
+                }
+            }
+
+            // The three vertices across, and the square each of them owns.
+            const float half = config::kResolution / 2.0f;
+
+            for (int v = 0; v < config::kBuildCellVertices; v++) {
+                const float x = static_cast<float>(i * config::kBuildCellVertices + v) * config::kResolution;
+
+                if (x - half < at.x - 0.001f || x + half > at.x + at.width + 0.001f) {
+                    if (square) std::printf("WRONG: vertex at %.2f is outside cell %d's bounds %.2f..%.2f\n", x, i, at.x,
+                                            at.x + at.width);
+
+                    square = false;
+                }
+            }
+        }
+
+        // And that every cell is *drawn* the same size.
+        //
+        // The field says a block is a block, and the rasteriser is what the player
+        // actually sees. It anchors its squares to the world in multiples of
+        // kPixelSize and gives each lattice cell the squares whose centres fall
+        // inside it — see marching_squares::DrawPainted. So a run of world that is
+        // not a whole number of squares comes out as a different number of them
+        // depending on where it falls, and two identical blocks are drawn
+        // different sizes. That is what a wall with bites out of it is.
+        //
+        // Counted exactly as DrawPainted counts it, so this is the drawing and not
+        // a model of it.
+        // Counting the squares is not enough, and this is the trap: a size can give
+        // every cell the same *number* of squares and still start each one in the
+        // wrong place. The run has to begin and end exactly on the cell's own
+        // edges, or the block is drawn beside the square it was promised — which is
+        // the same complaint as the preview being out, arriving by a different
+        // road.
+        //
+        // What that needs is for kPixelSize to divide the cell *and* the half-step
+        // it is offset by, so the only sizes that work at all are the divisors of
+        // kCellOffset.
+        const auto drawnSpan = [](float from, float span, float &outFrom, float &outTo) {
+            const float pixel = config::kPixelSize;
+
+            const int m0 = static_cast<int>(std::floor(from / pixel));
+            const int m1 = static_cast<int>(std::ceil((from + span) / pixel));
+
+            int count = 0;
+
+            for (int m = m0; m <= m1; m++) {
+                const float centre = (static_cast<float>(m) + 0.5f) * pixel;
+                if (centre < from || centre >= from + span) continue;
+
+                if (count == 0) outFrom = static_cast<float>(m) * pixel;
+
+                outTo = static_cast<float>(m + 1) * pixel;
+                count++;
+            }
+
+            return count;
+        };
+
+        int fewest  = 1 << 30;
+        int most    = 0;
+        float slip  = 0.0f;
+
+        for (int i = 0; i < cells; i++) {
+            const Rectangle at = World::CellBounds(i, cy);
+
+            float drawnFrom = 0.0f;
+            float drawnTo   = 0.0f;
+
+            const int across = drawnSpan(at.x, at.width, drawnFrom, drawnTo);
+
+            fewest = std::min(fewest, across);
+            most   = std::max(most, across);
+
+            slip = std::max({slip, std::fabs(drawnFrom - at.x), std::fabs(drawnTo - (at.x + at.width))});
+        }
+
+        const bool steady = (fewest == most) && slip < 0.001f;
+
+        std::printf("drawn:    %d..%d squares of %.0f px across a %d px cell, edges out by %.1f px\n", fewest, most,
+                    config::kPixelSize, config::kBuildCell, slip);
+
+        if (fewest != most) {
+            std::printf("WRONG: identical blocks are drawn %d and %d squares wide — %.0f does not divide %d\n", fewest,
+                        most, config::kPixelSize, config::kBuildCell);
+        } else if (slip >= 0.001f) {
+            std::printf("WRONG: blocks are drawn %.1f px off their own cell — %.0f does not divide the %.0f px"
+                        " half-step the grid is offset by\n",
+                        slip, config::kPixelSize, config::kResolution / 2.0f);
+        }
+
+        const bool whole = (filled == cells * config::kBuildCellArea);
+        const bool even  = (filled == freed);
+
+        if (!whole) std::printf("WRONG: a cell did not fill its own %d vertices\n", config::kBuildCellArea);
+        if (!even) std::printf("WRONG: digging returned %d vertices against %d laid\n", freed, filled);
+
+        if (whole && even && square && steady) {
+            std::printf("\nexact: %d cells cost %.0f blocks and gave back %.0f\n", laid, cost, back);
+            std::printf("aligned: every point in a cell names it, and its vertices sit inside it\n");
+            std::printf("drawn:   every cell rasterises to the same squares, on its own edges\n");
+        }
+
+        CloseWindow();
+        return (whole && even && square && steady) ? 0 : 1;
     }
 
     if (timing) {

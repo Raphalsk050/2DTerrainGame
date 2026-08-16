@@ -1107,8 +1107,7 @@ bool World::VertexMeets(Vector2 vertex, Rectangle rect) const {
     return true;
 }
 
-World::Stroke World::ApplyBrush(Vector2 world, float radius, std::optional<Element> place, int budget,
-                                Rectangle keepClear) {
+World::Stroke World::ApplyStroke(const Reach &reach, std::optional<Element> place, int budget, Rectangle keepClear) {
     Stroke edit{};
 
     // Whether the stroke changed any ground at all, which is what the grass has
@@ -1127,20 +1126,15 @@ World::Stroke World::ApplyBrush(Vector2 world, float radius, std::optional<Eleme
         return edit;
     };
 
-    const Rectangle brush = {world.x - radius, world.y - radius, radius * 2.0f, radius * 2.0f};
-
-    int i0 = 0;
-    int j0 = 0;
-    int i1 = 0;
-    int j1 = 0;
-    LatticeRange(brush, i0, j0, i1, j1);
-
     const float step = static_cast<float>(spacing_);
 
-    for (int i = i0; i <= i1; i++) {
-        for (int j = j0; j <= j1; j++) {
+    for (int i = reach.i0; i <= reach.i1; i++) {
+        for (int j = reach.j0; j <= reach.j1; j++) {
             const Vector2 vertex = {i * step, j * step};
-            if (!CheckCollisionPointCircle(vertex, world, radius)) continue;
+
+            // A cell takes the whole of its range and says so with no radius at
+            // all; a brush keeps to its circle inside the square that bounds it.
+            if (reach.radius > 0.0f && !CheckCollisionPointCircle(vertex, reach.centre, reach.radius)) continue;
 
             // A liquid is poured into a space, not pressed into one. It does
             // not clear what it lands on; it simply does not land there.
@@ -1255,13 +1249,73 @@ World::Stroke World::ApplyBrush(Vector2 world, float radius, std::optional<Eleme
     return finish();
 }
 
-World::Stroke World::Place(Element element, Vector2 world, float radius, int budget, Rectangle keepClear) {
-    return ApplyBrush(world, radius, element, budget, keepClear);
+World::Reach World::CellReach(int cx, int cy) const {
+    // Counted in vertices from the origin rather than derived from the cell's
+    // rectangle. A cell owns config::kBuildCellVertices of them across, and the
+    // one on its far edge belongs to the cell beyond — see Reach.
+    const int across = config::kBuildCellVertices;
+
+    return {.i0 = cx * across, .j0 = cy * across, .i1 = cx * across + across - 1, .j1 = cy * across + across - 1};
 }
 
-World::Stroke World::Excavate(Vector2 world, float radius) {
-    // Nothing to keep clear: digging can only ever make room.
-    return ApplyBrush(world, radius, std::nullopt, 0, {});
+// Half a lattice step, which is what the build grid is offset by.
+//
+// A cell *is* its three vertices, and a vertex owns the square centred on it —
+// the same square VertexMeets and OverlapsSolid test against, and the same one
+// the contour crosses half a step out from the last filled vertex. So the cell
+// holding vertices 3cx, 3cx+1 and 3cx+2, which stand at 18cx, 18cx+6 and 18cx+12,
+// covers 18cx-3 to 18cx+15 and not 18cx to 18cx+18.
+//
+// Getting this wrong is not subtle and it was wrong: the preview was drawn on the
+// second of those and the block landed on the first, so every piece appeared three
+// pixels up and to the left of the square it had been promised.
+inline constexpr float kCellOffset = config::kResolution / 2.0f;
+
+void World::ToCell(Vector2 world, int &outCx, int &outCy) {
+    outCx = FloorDiv(static_cast<int>(std::floor(world.x + kCellOffset)), config::kBuildCell);
+    outCy = FloorDiv(static_cast<int>(std::floor(world.y + kCellOffset)), config::kBuildCell);
+}
+
+Rectangle World::CellBounds(int cx, int cy) {
+    const auto side = static_cast<float>(config::kBuildCell);
+
+    return {cx * side - kCellOffset, cy * side - kCellOffset, side, side};
+}
+
+bool World::CellClear(int cx, int cy, Rectangle keepClear) const {
+    if (keepClear.width <= 0.0f || keepClear.height <= 0.0f) return true;
+
+    // The cell's bounds are exactly the union of the squares its vertices own —
+    // see kCellOffset — and VertexMeets tests one of those squares against a
+    // rectangle. So the body reaching any vertex of the cell is the body reaching
+    // the cell, asked once instead of nine times.
+    return !CheckCollisionRecs(CellBounds(cx, cy), keepClear);
+}
+
+World::Stroke World::PlaceCell(Element element, int cx, int cy, Rectangle keepClear) {
+    // All of the cell, or none of it.
+    //
+    // This is where a cell and a brush have to part company, and it is the fault
+    // behind "sometimes a block comes out with a piece missing". ApplyStroke skips
+    // the vertices inside the player's body and lays the rest, which is exactly
+    // right for a stroke covering an area — a floor laid around one's own feet is
+    // what the player was asking for. It is wrong for a unit: the skipped vertices
+    // come out as a bite taken out of the block, the block is charged for whole,
+    // and nothing on screen says why it is the shape it is.
+    //
+    // So a cell the body is standing in is refused outright rather than delivered
+    // broken. The player steps aside or jumps, which is what Minecraft and
+    // Terraria both ask of them, and every block that does go down is a block.
+    if (Def(element).rules.blocksBodies && !CellClear(cx, cy, keepClear)) return {};
+
+    // The whole cell otherwise, so a click is never stopped part way through one.
+    // What stops a player with nothing left is the caller, which asks whether
+    // there is a block to spend before it asks the world for anything.
+    return ApplyStroke(CellReach(cx, cy), element, config::kBuildCellArea, keepClear);
+}
+
+World::Stroke World::ExcavateCell(int cx, int cy) {
+    return ApplyStroke(CellReach(cx, cy), std::nullopt, 0, {});
 }
 
 void World::StepWater(Rectangle active) {

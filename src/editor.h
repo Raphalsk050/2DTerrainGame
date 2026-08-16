@@ -68,7 +68,18 @@ public:
     void DrawCursor(const Inventory &inventory, const Grove &grove, flora::Season season,
                     const Camera2D &camera) const;
 
-    float Radius() const { return radius_; }
+    // How many cells across the hand works, and which cells those are.
+    //
+    // The brush was a circle of a radius in pixels and is now a square block of
+    // whole cells, for the reason everything else here is: the world the hand
+    // writes into is a grid now, and a round tool over a square grid can only ever
+    // leave the corners of the cells it crosses. That was visible as bites out of
+    // a wall long before anyone went looking for a cause.
+    int Span() const { return span_; }
+
+    // The block of cells the next action covers, in cell coordinates. Empty where
+    // the cursor is not over the world at all.
+    bool Block(int &outX0, int &outY0, int &outX1, int &outY1) const;
 
     // What the cursor is currently over, or nothing where the space is open.
     // Held from the last update so the head-up display and the cursor agree on
@@ -95,6 +106,24 @@ public:
     // shows the player where it will go, and the click that puts it there. One
     // answer, because two would be a preview that lies.
     std::optional<Vector2> Footing() const { return footing_; }
+
+    // Whether the hand holds something that goes into the world a cell at a time.
+    //
+    // This is the whole of the build mode, and it is *derived* rather than
+    // switched. It comes on because a building material is in the slot and goes
+    // off because the slot ran out — so there is no key to press, no badge to say
+    // which mode this is, and no way to be in the wrong one. The player asked for
+    // "put the item down and stay there until the stack is gone"; a stack that is
+    // gone is a slot that no longer holds a building material, and the mode ends
+    // itself without anybody having to remember to end it.
+    //
+    // It is the same argument the head of this file makes about the two hands: what
+    // the right hand does depends on what is in it.
+    bool Building() const { return building_; }
+
+    // Whether a piece put down now would be taken — in reach, and with something
+    // to fix it to.
+    bool Buildable() const { return buildable_; }
 
     // Whether the ground there will take the seed in hand.
     //
@@ -136,24 +165,59 @@ private:
     // blow actually hits is settled by Grove::Strike against the same rectangles.
     static constexpr float kAimSlack = 10.0f;
 
-    // Brush sizes in pixels. Bounded at the small end by the lattice, since a
-    // brush narrower than the spacing between vertices covers none of them and
-    // silently does nothing.
-    static constexpr float kMinRadius  = 8.0f;
-    static constexpr float kMaxRadius  = 64.0f;
-    static constexpr float kRadiusStep = 4.0f;
+    // Brush sizes, in whole cells of the build grid.
+    //
+    // Counted in cells rather than pixels because there is nothing else left for a
+    // brush to be measured in: every write the hand makes is a whole cell, so a
+    // size between two of them describes nothing. One is a single block, which is
+    // the size building wants; eight is a hundred and forty-four pixels across,
+    // which is about the widest stroke that still lands where it was aimed.
+    static constexpr int kMinSpan = 1;
+    static constexpr int kMaxSpan = 8;
 
     // Turns a vertex yield into whole blocks and puts them away, keeping the
     // fraction for the next stroke. Whatever will not fit is thrown on the
     // ground at `at`.
+    //
+    // The fraction still matters even though a placed cell is exactly one block:
+    // digging a cell out of a *hillside* frees however many of its nine vertices
+    // the ground happened to fill, and the surface crosses cells at every angle.
     void Bank(const World::Yield &freed, Inventory &inventory, Drops &drops, Vector2 at, float away, float now);
 
-    // Lays the material in hand under the brush, spending it. Returns what to
-    // say, or nothing. `body` is left out of the stroke — see World::Place.
-    const char *Lay(World &world, Inventory &inventory, Drops &drops, Vector2 target, Rectangle body, float away,
-                    float now);
+    // Fills the block of cells under the cursor with the material in hand, one
+    // block of it per cell, and stops when the stack runs out.
+    //
+    // One routine for laying ground and for building, because they stopped being
+    // different things when the brush became square: both write whole cells and
+    // both spend one block for each cell they newly fill. What still differs is
+    // the rule about where — a plank has to have something to fix to and a shovel
+    // of soil does not — and that is asked once, of the cell under the cursor.
+    //
+    // Nothing is charged where a cell already held the material, which is what
+    // lets the button be held down and dragged along a wall without the stack
+    // draining while the cursor sits still.
+    const char *Spend(World &world, Inventory &inventory, Drops &drops, Rectangle body, float away, float now);
 
-    float radius_ = 16.0f;
+    // Whether the cell holds something that was built rather than generated.
+    static bool Built(const World &world, int cx, int cy);
+
+    // Whether a cell has anything to fix a piece to.
+    //
+    // Any of the four cells it shares a side with holding ground a body cannot
+    // walk through — the world's own, or a piece already built. Terraria's rule,
+    // and it is what makes the grid a set of *valid* positions rather than a
+    // quadrille ruled over the open sky: a wall grows out of the ground it stands
+    // on, and nothing is left hanging in the air.
+    //
+    // Corners do not count. Two squares meeting at a point hold nothing up, in
+    // this world or in any building that has ever been built.
+    bool Founded(const World &world, int cx, int cy) const;
+
+    // Draws the grid of cells within reach, and the block of them the next action
+    // covers.
+    void DrawGrid(const Stack &held, float zoom) const;
+
+    int span_ = 1;
 
     // Vertices of each material held over from earlier strokes, always less than
     // one block's worth.
@@ -173,6 +237,26 @@ private:
 
     std::optional<Element> under_;
     Vector2 aim_{};
+
+    // Where the reach is measured from, kept from the last update so the grid can
+    // be drawn around the player without the drawing being handed the body again.
+    Vector2 from_{};
+
+    // The build grid's answer for this frame, worked out once beside footing_ and
+    // read by both the grid that shows it and the click that acts on it. Two
+    // answers to one question is a preview that lies — see Footing.
+    bool building_  = false;
+    bool buildable_ = false;
+    bool onCell_    = false;
+    int cellX_      = 0;
+    int cellY_      = 0;
+
+    // The two ways a cell refuses, kept apart because they ask the player for
+    // opposite things: one to build from something that holds, the other to get
+    // out of the way.
+    bool founded_ = false;
+    bool roomy_   = false;
+
 
     // The ground under the cursor, where the hand holds something that would be
     // stood on it. Empty otherwise, so nothing is worked out for a hand that has

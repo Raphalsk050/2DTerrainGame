@@ -26,7 +26,8 @@ enum class Element {
     Soil,
     Sand,
     Snow,
-    Torch,
+    WoodPlank,
+    Cobblestone,
     Coal,
     Copper,
     Iron,
@@ -75,6 +76,29 @@ struct ElementRules {
     // Every occupying material needs its own value. Two sharing one would
     // overlap, since neither gives way to the other.
     int precedence = 0;
+};
+
+// How the right hand puts a material into the world.
+//
+// A row on the table rather than a test in the editor, for the reason item.h
+// gives about Placement: what "this goes down a cell at a time" means has to be
+// one fact in one place, or the hand that lays it, the hand that decides whether
+// it may be laid, and the ghost that shows where it would go end up asking
+// different questions and answering them differently.
+enum class Laying {
+    // By the fistful, under a circular brush of the player's own chosen radius.
+    // What the ground itself is made of: rock, soil, sand, snow. A landscape is
+    // shaped in armfuls and would be absurd to lay out square by square.
+    Brush,
+
+    // One build cell per click, snapped to the grid. What is built rather than
+    // shaped: planks, cobble, walls.
+    //
+    // The distinction is not tidiness. A brush spends material by the area it
+    // happens to sweep, which is exactly what nobody wants of a wall — a wall is
+    // meant to be the same thickness along its whole length, and to end where it
+    // was aimed to end.
+    Cell,
 };
 
 // Where a material comes from.
@@ -515,6 +539,10 @@ struct ElementDef {
     // ever been carried, and when it is, this is the row that says so.
     int stack;
 
+    // Brush unless the row says otherwise, so that adding this changed nothing
+    // about any material that was already here.
+    Laying laying = Laying::Brush;
+
     ElementRules rules;
     ElementSpawn spawn;
     ElementLight light;
@@ -836,54 +864,128 @@ inline constexpr ElementDef kElements[] = {
             },
         .light = {.opacity = 1.0f},
     },
+    // The two built materials. Neither is anywhere in the world until somebody
+    // puts it there — see Generator::None — and both go down a cell at a time
+    // rather than under the brush, which is what separates building from shaping.
+    //
+    // Both sit at the same threshold as everything else in this table, and that
+    // is load-bearing twice over.
+    //
+    // A block has to meet the ground it is laid against without a seam. The
+    // contour crosses where the field meets the threshold, so two materials
+    // crossing at different values part company along their shared edge — a plank
+    // set into a hillside would either sink into the rock or stand a fraction of a
+    // cell off it. Matching the table is what makes a built wall continuous with
+    // the world it is built into.
+    //
+    // And it keeps a new material from reaching into the generator. Every occupying
+    // material is held under everything that outranks it by a term in the *other's*
+    // threshold — see World::ExclusionHeadroom — so a row added at a new threshold
+    // changes the headroom over every older one beneath it, and these two outrank
+    // the whole table. The clamp does not bite at the depths an ore actually sits
+    // at, so nothing was found to move here; matching the table is what means
+    // nothing has to be checked again if it ever does.
+    //
+    // The cost is six tenths of a pixel. At one half the contour would cross at the
+    // midpoint between a filled vertex and its empty neighbour and a cell would
+    // measure exactly its eighteen; at 0.45 it crosses a little further out and the
+    // block is that much proud of its square. Nothing can see it, and it is the
+    // cheaper of the two mistakes.
     {
-        .name      = "torch",
+        .name      = "wood plank",
         .threshold = 0.45f,
-        .paint   = {.tone   = {{196, 128, 44, 255}, {226, 170, 92, 255}, {255, 216, 150, 255}, {255, 242, 210, 255}},
-                    .grain  = 0.30f,
-                    .patch  = 0.30f,
-                    .strata = 0.00f},
-        .contour = {196, 128, 44, 255},
 
-        // The one row here that is not a block face, because a torch is not a
-        // material one has a block of — it is an object, and drawing it as a
-        // square of flame colour would say nothing about what it is. So it is
-        // drawn as the thing: a flame over a shaft. The shaft is the darkest of
-        // its own four rather than a brown fetched from somewhere else, which
-        // keeps the row self-contained the way every other picture is.
+        // Sawn rather than barked: lighter than the wood item it will be made
+        // from, and far more even. What says plank at this size is that the
+        // colour barely moves — a sawn face has grain and no patching at all.
+        .paint   = {.tone   = {{104, 72, 40, 255}, {138, 98, 56, 255}, {170, 128, 78, 255}, {198, 160, 106, 255}},
+                    .grain  = 0.30f,
+                    .patch  = 0.08f,
+
+                    // Boards are courses, like stone is, and at a lower contrast:
+                    // enough for a wall to read as laid up out of lengths.
+                    .strata = 0.85f},
+        .contour = {104, 72, 40, 255},
+
+        // The joint is the whole of it. Two boards with a dark seam between them
+        // and the grain running along each — take the seam away and this is a
+        // brown square that could be anything.
         .icon =
             {
-                "..a...",
-                ".aab..",
-                ".abbc.",
-                "..bc..",
-                "..d...",
-                "..d...",
+                "aaaaaa",
+                "abbbab",
+                "bbbbbb",
+                "dddddd",
+                "bcbccb",
+                "cccccc",
             },
-        .stack = 64,
+        .stack  = 64,
+        .laying = Laying::Cell,
 
-
-        // Claims its vertex, so it replaces what it is put on and can be mined
-        // back out, but stops nothing: a body walks through it and so does
-        // water. A torch that cast its own shadow would sit in a dark spot of
-        // its own making.
-        //
-        // Outranks every ore and every cover, so a torch driven into a seam or
-        // into a snowbank replaces it rather than being swallowed by it.
-        .rules = {.occupies = true, .precedence = 10},
+        // Outranks every ore and every cover, so a plank laid into a seam or into
+        // a snowbank replaces it rather than being swallowed by it. What it
+        // displaces comes back to the player — see World::ApplyBrush, which pays
+        // out whatever it cleared.
+        .rules = {.blocksBodies = true, .blocksLiquid = true, .occupies = true, .precedence = 10},
         .spawn = {.generator = Generator::None},
 
-        // Brighter than the sky, because it has to carry a room on its own
-        // while daylight arrives from every direction at once. Not by much,
-        // though: this is the light given off by every cell the brush covers,
-        // and a wide brush lays down a great many of them.
-        .light = {.opacity = 0.0f, .glow = {255, 198, 130, 255}, .strength = 2.5f},
+        // A shade denser than stone. A plank floor is meant to be the thing that
+        // makes a room a room, and a roof daylight leaked through would leave
+        // nothing for a torch to do.
+        .light = {.opacity = 0.85f},
+    },
+    {
+        .name      = "cobblestone",
+        .threshold = 0.45f,
+
+        // Rock's own greys, cooled very slightly and spread wider apart. Broken
+        // stone catches the light on more faces than bedded stone does, so the
+        // range is what says it has been through a pick.
+        .paint   = {.tone   = {{74, 74, 80, 255}, {102, 102, 108, 255}, {130, 130, 136, 255}, {162, 162, 168, 255}},
+
+                    .grain  = 0.85f,
+
+                    // High patching and no bedding at all, which is exactly the
+                    // opposite of the rock it came out of: cobble is rubble, and
+                    // rubble has no layers left.
+                    .patch  = 1.10f,
+                    .strata = 0.00f},
+        .contour = {74, 74, 80, 255},
+
+        // Stones of no particular size with the joints between them, against
+        // rock's clean horizontal courses. The two greys have to be told apart in
+        // a slot, and this is the only mark that does it.
+        .icon =
+            {
+                "aabaab",
+                "badbba",
+                "bbbdbb",
+                "bdcbcd",
+                "ccdccc",
+                "cdcccd",
+            },
+        .stack  = 64,
+        .laying = Laying::Cell,
+
+        .rules = {.blocksBodies = true, .blocksLiquid = true, .occupies = true, .precedence = 11},
+        .spawn = {.generator = Generator::None},
+
+        // The stone it came from, unchanged. Breaking rock up does not make it
+        // let light through.
+        .light = {.opacity = 0.8f},
     },
     // The ores below follow Minecraft's set and its ordering, on a scale of one
     // block to sixteen pixels: its sea level at Y 64 is this world's y 144 and
-    // its floor at Y -64 is y 2192. What is not carried across is its absolute
-    // heights, since it has a floor to arrange them against and this world does
-    // not, so each peak sits where the ore is actually worth digging for here.
+    // its floor at Y -64 is y 2192. That was the scale when a block here was
+    // sixteen pixels too, and the bands were left alone when it became eighteen
+    // — see kBlockSide. They are absolute heights in pixels and were settled by
+    // digging for the ore rather than by the conversion, so re-deriving them
+    // against the new figure would move every seam in the world to fix a sum
+    // nothing reads. The arithmetic above is history; the depths are the world.
+    //
+    // What is not carried across is Minecraft's absolute heights, since it has a
+    // floor to arrange them against and this world does not, so each peak sits
+    // where the ore is actually worth digging for here.
     //
     // Each ore is written as three numbers and a level: how likely it is where it
     // is densest, how many lattice cells across one vein of it is, how quickly it

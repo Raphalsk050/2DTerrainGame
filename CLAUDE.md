@@ -72,6 +72,21 @@ again with `World::ForgetGrass()` — and reports any column they disagree about
 Both see the same chunks come and go, which is what makes it a test of the
 memory and not of chunk residency.
 
+**`--column` has one unstable number in it, and it is not yours.** The `coal`
+column moves by a thousandth or two between runs of the *same binary* — measured
+at −0.652, −0.652, −0.653 and −0.651 over four consecutive runs with nothing
+rebuilt in between. Every other material is stable, and `--sun` is stable. So a
+`--column` diff that shows coal alone having moved is noise, and a change should
+not be blamed for it; run it three or four times before believing it. Everything
+else in the report still holds to the bar.
+
+The cause is not yet found. `terrain::Quantile` and `World::CalibrateSpawn` are
+both sequential, so it is not a race between workers; the likeliest remaining
+candidate is that coal, being the commonest ore, is the one whose sample count in
+`CalibrateSpawn` sits at the `kMinPerAxis` floor, where one sample entering or
+leaving `values` moves the quantile. Worth fixing — a world that is not
+reproducible cannot be held to a bar at all.
+
 ---
 
 ## 3. Measuring
@@ -87,6 +102,7 @@ whole phases, never inside a `pool::For` body.
 | `--profile [frames] [still]` | the real loop, draw included. Full screen, flying |
 | `--frame x y [frames]` | the simulation phases only, headless, at a fixed place |
 | `--sun x y` | the solved light as numbers |
+| `--build [cells]` | sets a run of build cells and digs it back out; checks the exchange is exact |
 | `--wind`, `--caves`, `--ore`, `--covers`, `--woods`, `--settle`, `--column`, `--tones` | generator reports |
 
 `--woods x0 x1` is the companion to `--covers`: it walks the scatter's own cells
@@ -128,6 +144,12 @@ Full screen, flying, on a 16-core desktop, after the work below:
 | `DrawTufts` | 0.5 | |
 | `DrawMist` | 0.5 | overcast only; nothing on a clear day |
 | **frame** | **24.1** | 42 fps, from 131 ms / 8 fps |
+
+Since measured, `kPixelSize` went from 5 to 3 so that a built block is drawn the
+size of the cell it was placed in — see §10.4. That is the one deliberate
+regression in this table: `PaintChunks` 0.75 → 1.41 ms and the frame 24.0 → 26.2,
+which is 42 fps to 38. Measure over 300 frames rather than 200; a shorter run
+caught the streaming still settling and reported 36 ms, which is not the frame.
 
 The light was 9.5 ms and is now 13.0. The difference is one more cascade, and it
 was not bought for looks: at four, light was gathered over **510 world pixels**
@@ -425,3 +447,171 @@ mountain.
 Both figures were measured, not argued: `--covers` reports the surface's own range
 over a stretch of world, and with the ranges switched off it runs -14 to 310. The
 snow line sits at -60, which ordinary ground never reaches.
+
+---
+
+## 10. Building is a grid, and the grid decided what a block is worth
+
+A material now says how the right hand puts it down — `Laying::Brush` for the
+ground itself, `Laying::Cell` for what is built out of it. That is one field in
+`element.h` and it is read in one place, `Editor::Update`; there is no build mode
+to switch on.
+
+**The mode is derived, not toggled.** `Editor::Building()` is true because a
+building material is in the selected slot, and false because the slot ran out.
+The player's rule — "stay in build mode until the stack is gone" — needs no state
+to implement: a spent stack is a slot that no longer holds a building material.
+It is the same argument `editor.h` already makes about the two hands, that what
+the right hand does depends on what is in it.
+
+**A cell is 18 px because the lattice is 6.** `config::kBuildCell` is three
+lattice steps, so every cell is the same 3×3 vertices wherever it falls. A size
+the lattice does not divide — sixteen, which is what a block used to be — would
+take two vertices across in one place and three in the next, and the same
+material laid twice would come out two different shapes.
+
+**And `kBlockSide` moved from 16 to 18 to follow it.** That is arithmetic, not
+taste. `kVerticesPerBlock` is an area, so at sixteen it was 7.11 and a cell of
+nine vertices cost 1.27 blocks — a player would set four pieces and be charged
+five, and any rounding in their favour would be a way of making planks out of
+nothing. At eighteen it is exactly 9: one cell, one block, one click, one item,
+and digging returns precisely what was spent. `stack.h` carries a `static_assert`
+tying the two together, and `--build` checks the whole exchange end to end.
+
+`Editor::owed_` is still needed and still correct — the brush is a circle over a
+lattice and still crosses part of a block far more often than a whole one. What
+no longer needs it is a cell.
+
+**`ApplyBrush` became `ApplyStroke` and took a shape.** Everything a stroke has
+to get right — what it charges for, what it hands back, what it tells the grass,
+the body it refuses to bury — is the same for a square as for a circle, and the
+list is subtle enough that a second copy would have drifted. The shape is a
+`World::Reach`, an inclusive range of vertex indices plus an optional circle.
+
+The range is counted in vertices rather than derived from the cell's rectangle,
+and that is load-bearing: `LatticeRange` over a cell's bounds includes the vertex
+on its far edge, which belongs to the cell next door. Two neighbours would share a
+column, and clearing one would take a slice out of the other.
+
+### 10.1 A new material's threshold reaches into the generator
+
+The trap this work found, and the reason to keep every row at the table's own
+threshold unless there is a reason not to.
+
+`World::ExclusionHeadroom` holds each occupying material under everything that
+outranks it by `def.threshold + (other.threshold - claim) * kClampGain`. The term
+is in the **other's** threshold — so a row added at a new threshold changes the
+headroom over every older material beneath it, and a material placed only by hand
+still takes part, because `occupies` is what puts it in the contest and not
+`generator`. Planks and cobble outrank the whole table, so they sit above every
+ore in it.
+
+The clamp does not bite at the depths an ore actually sits at, so nothing was
+found to have moved. Matching the table is what means it never has to be checked
+again.
+
+There is a second reason, and it is the one that shows: two materials crossing at
+different values part company along their shared edge. A plank set into a hillside
+at a threshold of its own would either sink into the rock or stand a fraction of a
+cell off it. Matching is what makes a built wall continuous with the world it is
+built into. The cost is six tenths of a pixel on the block — at one half a cell
+would measure exactly its eighteen — and nothing can see it.
+
+### 10.2 A cell is its vertices, and they sit half a step inside it
+
+The bug this shipped with, because it is the kind that is invisible in the code
+and obvious the moment anybody builds anything.
+
+A cell owns three vertices across — for cell `cx` those stand at `18cx`, `18cx+6`
+and `18cx+12`. It is tempting to call the cell `18cx` to `18cx+18` and be done.
+That rectangle is the wrong one. A vertex owns the square **centred** on it: it is
+the square `VertexMeets` and `OverlapsSolid` test against, and it is where the
+contour crosses, half a step out from the last filled vertex. So the cell actually
+covers `18cx-3` to `18cx+15`.
+
+The preview was ruled on the first rectangle and the block landed on the second,
+so every piece appeared three pixels up and to the left of the outline that had
+promised it. `World::CellBounds` and `World::ToCell` both carry the offset now —
+`kCellOffset`, half a lattice step — and everything that draws or tests a cell
+goes through them rather than multiplying the side out for itself.
+
+**`--build` checks it**, and checks it as a round trip: every point inside a
+cell's bounds has to name that cell, and the vertices the cell writes have to lie
+within them. Setting `kCellOffset` back to zero fails the second of those
+immediately, which is what a test for this is worth having.
+
+The exchange check alone does *not* catch it — 24 cells still cost 24 blocks and
+still give back 24 when the rectangle is three pixels out. An economy that
+balances says nothing about where the material landed.
+
+### 10.3 The spade squares up over anything that was built
+
+A round brush over a square grid leaves the corners of every cell it passes, so a
+player rubbing a piece back off a wall gets most of a piece removed and a rind of
+it left standing. Two things make the left hand work in cells instead:
+
+- **The build mode**: while a building material is in hand, the whole hand is
+  square, both buttons.
+- **Anything already built**: `Editor::Built` asks the middle of the cell whether
+  what is there is a `Laying::Cell` material. A placed block went in as a unit and
+  there is no sense in which it comes out as five sevenths of one.
+
+Generated ground is untouched by this — a hillside is not made of units and the
+brush is the right tool for it. The cursor follows the same rule, drawing the cell
+outline instead of the ring wherever the spade is about to work squarely, since a
+ring there would be describing a stroke that is not going to happen.
+
+### 10.4 kPixelSize has to divide the cell *and* the half-step
+
+The second bug the wall showed, and the one that cost a frame.
+
+`marching_squares::DrawPainted` anchors its squares to the **world** — multiples
+of `kPixelSize` — and gives each lattice cell the squares whose centres fall
+inside it. So a run of world that is not a whole number of squares is rasterised
+into a different number of them depending on where it falls.
+
+On terrain that is invisible: no two stretches of a hillside are meant to look
+alike. On a wall of blocks it is the whole complaint. At `kPixelSize = 5` an
+18 px cell came out **three squares wide in one column and four in the next** —
+15 px against 20 px — which reads as bites taken out of the wall.
+
+Counting squares is not the test, and this is the trap worth remembering. A size
+can give every cell the same *number* of squares and still start each run in the
+wrong place, which draws the block beside the square it was promised. The run has
+to begin and end on the cell's own edges.
+
+A block's edges land at **three plus multiples of six**: the contour crosses half
+a lattice step out from the last filled vertex, and vertices are at multiples of
+six. So the square has to divide `kCellOffset`, not just `kBuildCell`. Measured
+with `--build`:
+
+| kPixelSize | squares across an 18 px cell | edges out by |
+|---|---|---|
+| 5 | 3–4 | 2.0 px |
+| 6 | 3 | 3.0 px |
+| 2 | 9 | 1.0 px |
+| **3** | **6** | **0.0 px** |
+
+Only 3 works, and one is the only other divisor of three — at twenty-five times
+the squares. Note that a bigger cell does not rescue five: 30 px is a multiple of
+both 5 and 6 and still misses, because the offset is three either way.
+
+The old comment on `kPixelSize` asked for "a divisor of kResolution" and then gave
+five, which is not one. It had simply never been checked, because until there were
+blocks nothing in the world was supposed to be the same size twice.
+
+### 10.5 A cell is all or nothing, including against the body
+
+`ApplyStroke` skips vertices inside `keepClear` — the player's body — and lays the
+rest. That is deliberate and right for a brush: a floor laid around one's own feet
+is what the player aiming down at them is asking for.
+
+It is wrong for a cell. The skipped vertices come out as a bite taken out of the
+block, the block is charged for whole, and nothing on screen says why it is the
+shape it is. `World::PlaceCell` therefore refuses a cell the body is standing in
+rather than delivering a broken one, and `World::CellClear` is public so the hand
+can ask a frame ahead and turn the square red before it is pressed.
+
+The two refusals are kept apart — `founded_` and `roomy_` in `Editor` — because
+they ask the player for opposite things: one to build from something that holds,
+the other to get out of the way.

@@ -32,6 +32,27 @@ inline constexpr int kMaxZoom = 3;
 // Spacing in pixels between neighbouring grid vertices.
 inline constexpr int kResolution = 6;
 
+// Side of one build cell, in world pixels.
+//
+// Written as a whole number of lattice steps rather than as a size that looked
+// right, and that is the whole of the requirement: a cell has to hold the same
+// vertices wherever it falls. At three steps every cell is exactly the same
+// three-by-three, so two blocks of one material are the same block. At a size
+// that did not divide — sixteen, say, which is what a block used to be — a cell
+// would take two vertices across in one place and three in the next, and the
+// same material laid twice would come out two different shapes.
+//
+// Three and not two or four. Two is twelve pixels, which is the width of the
+// character and reads as gravel rather than as masonry; four is twenty-four,
+// which is the world's terrace riser, and a wall built of them steps a third of
+// the character's height at a time. Eighteen sits between, and it is what
+// kBlockSide is now written against rather than the other way about.
+inline constexpr int kBuildCell = 3 * kResolution;
+
+// Lattice vertices along one side of a build cell, and in one whole cell.
+inline constexpr int kBuildCellVertices = kBuildCell / kResolution;
+inline constexpr int kBuildCellArea     = kBuildCellVertices * kBuildCellVertices;
+
 // Side length of the debug square drawn on each vertex.
 inline constexpr float kVertexSize = 2.0f;
 
@@ -71,9 +92,31 @@ inline constexpr bool kBlockyLight = true;
 // blowing it back up.
 inline constexpr bool kPixelArt = true;
 
-// Side of one square, in world units. A divisor of kResolution keeps the
-// squares lined up with the lattice the field is sampled on.
-inline constexpr float kPixelSize = 5.0f;
+// Side of one square, in world units.
+//
+// It has to divide **kBuildCell and the half-step the build grid is offset by**,
+// and that is a stricter rule than the one written here before — which asked for
+// a divisor of kResolution and then gave five, which is not one.
+//
+// Nothing noticed while the world was only terrain. The rasteriser anchors its
+// squares to the world and gives each lattice cell the squares whose centres fall
+// inside it, so a run of world that is not a whole number of squares comes out as
+// a different number of them depending on where it falls. On a hillside that is
+// invisible: no two stretches of it are meant to look alike anyway. On a wall of
+// blocks it is the whole of what is wrong — identical pieces drawn three squares
+// wide in one column and four in the next, which reads as bites taken out of the
+// wall.
+//
+// A block's edges land at three plus multiples of six: the contour crosses half a
+// lattice step out from the last filled vertex, and the vertices are at multiples
+// of six. So the square has to divide three, and three is the only size worth
+// having (one is twenty-five times the work). Five missed both by two pixels and
+// six misses the offset by three — measured, with `--build`, which now checks it.
+//
+// It costs. Full screen and flying, PaintChunks went 0.75 ms to 1.46 ms and the
+// frame 24.0 to 26.6 — 42 fps to 38. That is the price of the world being drawn
+// at a finer grain than it was, and it buys a wall that is a wall.
+inline constexpr float kPixelSize = 3.0f;
 
 // Side of one square of a plant, in world units.
 //
