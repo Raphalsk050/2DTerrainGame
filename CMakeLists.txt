@@ -75,6 +75,7 @@ add_executable(${PROJECT_NAME}
     src/light.cpp
     src/picture.cpp
     src/liquid_layer.cpp
+    src/lit_layer.cpp
     src/player.cpp
     src/scuff.cpp
     src/console.cpp

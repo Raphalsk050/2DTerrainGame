@@ -4,6 +4,7 @@
 #include "marching_squares.h"
 #include "pool.h"
 #include "profile.h"
+#include "rlgl.h"
 
 #include <algorithm>
 #include <cmath>
@@ -713,11 +714,20 @@ void World::Update(Rectangle view) {
     // A few hundred of them along the edge of the region cost more than the
     // whole solve, and nothing about it looked wrong, which is the worst kind
     // of slow.
-    // The light rounds its region up to a power of two in probes, so it can reach
-    // most of a region past the view before it grows again. Chunks are kept resident
-    // over that whole span rather than over the view, and the figure is generous on
-    // purpose: it is cheaper to hold a chunk than to answer one cell from the noise.
-    const float reserve = static_cast<float>(spacing_) * 64.0f;
+    // Chunks are held over the *light's* region, which is bigger than the view, and
+    // the figure has to be derived rather than picked.
+    //
+    // StepLight rounds its half-width up to a power of two, so the region can be
+    // anything up to twice the view across before it rounds again -- which puts its
+    // edge up to half a view beyond the screen on each side. Every cell out there is
+    // still asked about, and one asked outside a resident chunk is answered from the
+    // noise: every material evaluated and then contested against every other, at
+    // about a hundred times the cost of reading a generated one.
+    //
+    // Set too small this does not look wrong, it just runs. Measured at 64 cells of
+    // margin against a region 512 cells across, the fill was **235 ms of a 279 ms
+    // frame** while the solve it was feeding took 3.5, and nothing on screen said so.
+    const float reserve = static_cast<float>(spacing_) * (view.width / spacing_ * 0.5f + 64.0f);
 
     const Rectangle covered = {view.x - reserve, view.y - reserve, view.width + 2.0f * reserve,
                                view.height + 2.0f * reserve};
@@ -1720,12 +1730,6 @@ void World::AddLight(Vector2 world, light::Radiance radiance, float radius) {
     sparks_.push_back({world, radiance, radius});
 }
 
-void World::AddCover(float fromX, float toX, float share) {
-    if (share <= 0.0f || toX <= fromX) return;
-
-    covers_.push_back({fromX, toX, share});
-}
-
 void World::StepLight(Rectangle region) {
     PROFILE_ZONE("StepLight");
 
@@ -1745,23 +1749,63 @@ void World::StepLight(Rectangle region) {
         return side;
     };
 
-    const int probeCols = roundUp(std::max(1, (i1 - i0 + 1) / 2));
-    const int probeRows = roundUp(std::max(1, (j1 - j0 + 1) / 2));
-
-    const int cols = probeCols * 2;
-    const int rows = probeRows * 2;
-
-    // Snapped so the grid does not slide under the world as the camera walks.
+    // The corner is snapped first and the size worked out from where it landed, and
+    // that order is the whole of this.
     //
-    // It cannot be snapped to the coarsest cascade the way the old solver was: that
-    // cascade is now the whole region across, and jumping by a screen at a time is
-    // worse than crawling. A modest stride pins what actually shows, which is the two
-    // interleaved probe grids -- they stand one cell apart, so an origin landing on an
-    // odd cell swaps them and every row of the field changes at once.
-    constexpr int kSnap = 32;
+    // Doing it the other way round -- size from the view, then snap the corner down
+    // to a stride -- slides the region up to a whole stride left and up while leaving
+    // its width alone, so the right and bottom of the screen fall outside it. Outside
+    // is not dark, it is *nothing*: the field is only solved where it was asked for,
+    // so what that draws is a hard black region covering most of the view, appearing
+    // and disappearing as the snap happens to land. It is the same position from one
+    // moment to the next and a different picture.
+    //
+    // Snapped at all because the two interleaved probe grids stand one cell apart: an
+    // origin on an odd cell swaps them, and every row of the field changes at once.
+    // Two, which is the smallest it can be: the two interleaved probe grids stand one
+    // cell apart, so an odd origin swaps them and every row of the field changes at
+    // once. Beyond that there is nothing to gain by snapping coarsely, and a great
+    // deal to lose.
+    //
+    // Measured, at a fixed world position, as the region jumps one stride:
+    //
+    //     stride   direct light   with the bounce
+    //          8         0.13 %            0.16 %
+    //         32         0.04 %            2.41 %
+    //
+    // The transport does not care where the region stands -- four decimal places of
+    // not caring. What moves is the bounce, and only because the strip a jump newly
+    // exposes has no history behind it and has to build one again. That strip is the
+    // stride wide, so the disturbance is the stride: walking the same distance costs
+    // the same total either way, but a coarse snap saves it all up and spends it in
+    // one flash, which is what is seen, while a fine one dribbles it away under the
+    // noise floor.
+    constexpr int kSnap = 2;
 
     i0 = FloorDiv(i0, kSnap) * kSnap;
     j0 = FloorDiv(j0, kSnap) * kSnap;
+
+    // Margin past the far edge, so a light just off screen still reaches in and the
+    // snap has somewhere to give.
+    constexpr int kMargin = 48;
+
+    const auto side = [&](int span) {
+        return roundUp(std::max(1, (span + kMargin + 1) / 2)) * 2;
+    };
+
+    int cols = side(i1 - i0);
+    int rows = side(j1 - j0);
+
+    // And it does not shrink for a wobble.
+    //
+    // Rounding a span up to a power of two means a view that breathes by one cell
+    // across the boundary doubles and halves the region, and every change of size
+    // frees and reallocates thirty megabytes of buffers -- which is a visible freeze
+    // -- and throws away the accumulated bounce, which is a flash of flat lighting
+    // over the whole screen. Kept unless the need has fallen below half, which is a
+    // real change of zoom rather than a tremble.
+    if (medium_.cols >= cols && medium_.cols / 2 < cols) cols = medium_.cols;
+    if (medium_.rows >= rows && medium_.rows / 2 < rows) rows = medium_.rows;
 
     const float step = static_cast<float>(spacing_);
 
@@ -1897,33 +1941,110 @@ void World::StepLight(Rectangle region) {
 
     sparks_.clear();
 
-    // The cloud, as one figure for the sky rather than as a column of them.
+    // The cloud, laid into the medium as matter.
     //
-    // The per-column arrangement is gone along with the skyline it rode on. Daylight
-    // is no longer credited to a ray by asking what stands over its column; it is
-    // transported, and something that shades one place and not the next has to be in
-    // the medium to do it. Read at the middle of the region, which is where the
-    // player is, so an overcast day is overcast and a clear one is clear.
+    // This is the whole of the cloud's shadow and there is no other term for it. A
+    // cloud is something in the air that light has to get through, so it is written
+    // where it actually is and the shadow falls out of the transport: with the cloud's
+    // own outline, softening with its height above the ground, and gone the moment the
+    // cloud has passed. Under a broken sky that gives the thing you see from an
+    // aeroplane -- separate dark patches shaped like the clouds over them, on ground
+    // that is otherwise in full sun.
     //
-    // What this does not yet carry is a canopy's shade, which used to arrive through
-    // the same channel. That belongs in the medium as leaves rather than here, and is
-    // the next thing this wants.
-    {
-        const float middle = medium_.origin.x + cols * step * 0.5f;
+    // It replaces a share per column. That share was the thickest cloud anywhere above
+    // a column applied to the whole of it, which is not a shadow at all: it dimmed the
+    // sky above the cloud as much as the ground below, it had no edge to it, and one
+    // small cloud drifting past took the light out of everything beneath it from the
+    // ground to the top of the world.
+    //
+    // Two things make it read right, and both are the transport rather than tuning:
+    //
+    //   - It is never fully opaque. What gets through is exp(-sigma * path), so a wisp
+    //     takes a little and a tower takes nearly all, and everything between is
+    //     between. A shadow you can still see the ground through is what a real one
+    //     looks like, and it is what a crop under it should be able to live on.
+    //
+    //   - It is lit from above. The cloud has an albedo, so daylight arriving on top of
+    //     it scatters, which makes it bright on the sunward side and its underside the
+    //     dim grey that a cloud's underside is.
+    if (skyCover_) {
+        PROFILE_ZONE("cloud");
 
-        float shade = sky_.ShadeAt(middle);
+        // How much a cell of the thickest cloud stops. The deck is about seventy cells
+        // deep, so a ray straight down through solid cloud crosses seventy of these:
+        // at 0.02 that leaves about a quarter of the light, which is a firm shadow that
+        // is still plainly not black.
+        constexpr float kCloudSigma = 0.1f;
 
-        for (const Cover &cover : covers_) {
-            if (middle >= cover.fromX && middle <= cover.toX) {
-                shade = std::min(shade + cover.share, 1.0f);
+        // Bright, but well short of the diffuser an albedo near one makes of a volume
+        // -- multiple scattering amplifies by 1/(1 - albedo), and at 0.9 that is ten
+        // times over, which washes the shadow out again from the inside.
+        constexpr light::Radiance kCloudAlbedo = {0.62f, 0.64f, 0.70f};
+
+        const int top    = static_cast<int>(std::ceil((sky_.DeckTop() - medium_.origin.y) / step));
+        const int bottom = static_cast<int>(std::floor((sky_.DeckBottom() - medium_.origin.y) / step));
+
+        const int from = std::max(top, 0);
+        const int to   = std::min(bottom, rows - 1);
+
+        // One line, once, saying what the pass actually wrote. Whether the deck even
+        // falls inside the region, and whether what landed is patchy or a flat sheet,
+        // are the two things that decide whether a cloud shadow can have a shape at
+        // all -- and neither can be told from the picture.
+        static bool reported = false;
+
+        if (!reported) {
+            reported = true;
+
+            float most  = 0.0f;
+            double sum  = 0.0;
+            int filled  = 0;
+
+            for (int i = 0; i < cols; i += 4) {
+                const float worldX           = medium_.origin.x + i * step;
+                const weather::Column column = sky_.ColumnAt(worldX);
+
+                for (int j = std::max(top, 0); j <= std::min(bottom, rows - 1); j++) {
+                    const float density =
+                        sky_.DensityAt({worldX, medium_.origin.y + j * step}, column);
+
+                    most = std::max(most, density);
+                    sum += density;
+                    if (density > 0.01f) filled++;
+                }
             }
+
+            TraceLog(LOG_INFO,
+                     "CLOUD: deck rows %d..%d of 0..%d (region y %.0f..%.0f, deck y %.0f..%.0f), "
+                     "thickest %.3f, filled %d",
+                     from, to, rows - 1, medium_.origin.y, medium_.origin.y + rows * step,
+                     sky_.DeckTop(), sky_.DeckBottom(), most, filled);
         }
 
-        lightSettings_.sky.radiance = skyLight_;
-        lightSettings_.sky.cover    = shade;
+        if (to >= from) {
+            pool::For(cols, [&](int i) {
+                const float worldX = medium_.origin.x + i * step;
+
+                // Once per column, which is what the column is for.
+                const weather::Column column = sky_.ColumnAt(worldX);
+
+                for (int j = from; j <= to; j++) {
+                    const float density = sky_.DensityAt({worldX, medium_.origin.y + j * step}, column);
+                    if (density <= 0.0f) continue;
+
+                    const int cell = medium_.Index(i, j);
+
+                    medium_.sigma[cell] += density * kCloudSigma;
+                    medium_.albedo[cell] = kCloudAlbedo;
+                }
+            });
+        }
     }
 
-    covers_.clear();
+    // The canopy used to hold the sky back here, as a share per column, and it is
+    // gone. See World::AddLight's neighbour in world.h for what it was and why it
+    // could not stay.
+    lightSettings_.sky.radiance = skyLight_;
 
     {
         PROFILE_ZONE("solve");
@@ -2922,6 +3043,67 @@ void World::PaintChunks(Rectangle view) {
             paintedOf_[Key(cx, cy)] = chosen;
         }
     }
+}
+
+void World::DrawUnderground(Rectangle view) const {
+    // How far below the surface the backdrop starts.
+    //
+    // The land is described one lattice column at a time and the ground is drawn
+    // from a contour that crosses half a step out from the last filled vertex, so
+    // the two do not agree to the pixel. A backdrop that started a pixel high
+    // would show as a comb of dark teeth along every hilltop -- not against the
+    // sky, which is the same colour, but against the sky *under a cloud*, where
+    // the backdrop is darkened by the multiply and the sky beside it is not.
+    //
+    // Erring the other way is free: the run this sinks past is inside the ground,
+    // and the ground is drawn over it opaquely.
+    constexpr float kSink = 4.0f;
+
+    // The air over the whole view, exactly as the sky drew it into the frame --
+    // so that whatever survives below is the same colour it has always been, and
+    // a cave mouth still catches the blue of the day it opens onto.
+    sky_.DrawAtmosphere(view);
+
+    const float step = static_cast<float>(spacing_);
+
+    const int first = static_cast<int>(std::floor(view.x / step)) - 1;
+    const int last  = static_cast<int>(std::ceil((view.x + view.width) / step)) + 1;
+
+    const float floorY = view.y + view.height;
+
+    // Taken back off, rather than laid down only where it is wanted: the air is a
+    // stack of bands and drawing it per column would be that stack once for every
+    // column on screen. One fill and one rectangle per column is the same picture
+    // for two hundredths of the work.
+    //
+    // Colour and alpha both to zero, which is what puts the layer back to the
+    // empty it was cleared to -- see LitLayer::Capture for why the alpha is half
+    // the answer here.
+    rlSetBlendFactorsSeparate(RL_ZERO, RL_ZERO, RL_ZERO, RL_ZERO, RL_FUNC_ADD, RL_FUNC_ADD);
+    BeginBlendMode(BLEND_CUSTOM_SEPARATE);
+
+    // Carried along the row, since the right-hand end of one column is the
+    // left-hand end of the next and the surface is dear enough to be worth
+    // asking about once.
+    float left = terrain::Height(first * step, settings_);
+
+    for (int column = first; column <= last; column++) {
+        const float x0    = column * step;
+        const float right = terrain::Height(x0 + step, settings_);
+
+        // The lower of the two ends, since the contour between them can be as
+        // deep as either and the erase has to clear whichever it is.
+        const float surface = std::max(left, right) + kSink;
+
+        left = right;
+
+        const float cut = std::min(surface, floorY);
+        if (cut <= view.y) continue;
+
+        DrawRectangleRec({x0, view.y, step, cut - view.y}, WHITE);
+    }
+
+    EndBlendMode();
 }
 
 void World::DrawTerrain(Rectangle view) const {

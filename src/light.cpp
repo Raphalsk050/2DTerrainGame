@@ -145,7 +145,6 @@ void Field::Program::Locate() {
     skyRadiance = rlGetLocationUniform(id, "uSkyRadiance");
     skyHorizon  = rlGetLocationUniform(id, "uSkyHorizon");
     skyZenith   = rlGetLocationUniform(id, "uSkyZenith");
-    skyCover    = rlGetLocationUniform(id, "uSkyCover");
 
     opacityGuard = rlGetLocationUniform(id, "uOpacityGuard");
 }
@@ -361,6 +360,11 @@ void Field::Readback() {
 
     rlReadShaderBuffer(final_, field_.data(),
                        static_cast<unsigned int>(field_.size() * sizeof(float)), 0);
+
+    // origin_ still describes the solve that produced this, because Solve reads back
+    // before it takes the new one.
+    readOrigin_  = origin_;
+    readSpacing_ = spacing_;
 }
 
 void Field::SetGrid(const Program &program, const Level &level) const {
@@ -398,7 +402,6 @@ void Field::SetSky(const Program &program) const {
     SetVec3(program.skyRadiance, settings_.sky.radiance);
     SetFloat(program.skyHorizon, settings_.sky.horizon);
     SetFloat(program.skyZenith, settings_.sky.zenith);
-    SetFloat(program.skyCover, std::clamp(settings_.sky.cover, 0.0f, 1.0f));
 }
 
 void Field::Dispatch(int x, int y, int z, int localX, int localY, int localZ) const {
@@ -537,6 +540,17 @@ void Field::Solve(const Medium &medium, const Settings &settings) {
     if (medium.cols <= 0 || medium.rows <= 0) return;
     if (!Allocate(medium.cols, medium.rows)) return;
 
+    // How far the region has walked since the solve whose fluence is about to be fed
+    // back. Zero on the first solve and whenever it was reallocated, since there is
+    // nothing behind it to line up with.
+    int driftX = 0;
+    int driftY = 0;
+
+    if (primed_ && spacing_ > 0.0f) {
+        driftX = static_cast<int>(std::lround((medium.origin.x - origin_.x) / medium.spacing));
+        driftY = static_cast<int>(std::lround((medium.origin.y - origin_.y) / medium.spacing));
+    }
+
     spacing_ = medium.spacing;
     origin_  = medium.origin;
 
@@ -546,6 +560,7 @@ void Field::Solve(const Medium &medium, const Settings &settings) {
     // --- the source term, and the accumulator cleared -------------------------
     rlEnableShader(source_.id);
     SetScene(source_);
+    SetIVec2(rlGetLocationUniform(source_.id, "uDrift"), driftX, driftY);
 
     rlBindShaderBuffer(scene_, 0);
     rlBindShaderBuffer(sourceBuf_, 1);
@@ -596,8 +611,8 @@ Radiance Field::At(Vector2 world) const {
 
     // Bilinear between the four nearest cells, since a cell's value belongs at its
     // centre and a caller asking about a point between two of them wants the point.
-    const float u = (world.x - origin_.x) / spacing_ - 0.5f;
-    const float v = (world.y - origin_.y) / spacing_ - 0.5f;
+    const float u = (world.x - readOrigin_.x) / readSpacing_ - 0.5f;
+    const float v = (world.y - readOrigin_.y) / readSpacing_ - 0.5f;
 
     const int i0 = static_cast<int>(std::floor(u));
     const int j0 = static_cast<int>(std::floor(v));

@@ -992,11 +992,27 @@ void Sky::DrawAtmosphere(Rectangle view) const {
     // scrolls.
     const float top = std::floor(view.y / band) * band;
 
+    // How bright the day is, floored at whatever the night is worth.
+    //
+    // Here and not in AirAt, which is right to give colour alone: its other three
+    // callers are the rain, the snow and the fog, and all three are drawn *inside*
+    // the light and would be dimmed twice. This one is not — the drawn sky is the
+    // source, and nothing else is going to darken it. See Atmosphere::night.
+    const float floorLight = std::clamp(settings_.air.night, 0.0f, 1.0f);
+    const float day        = floorLight + (1.0f - floorLight) * std::clamp(today_.light, 0.0f, 1.0f);
+
     // The weather's own cover, not a column's. The wash is a property of the sky
     // over the whole view; reading it per column would draw a comb of vertical
     // stripes across the air behind the clouds.
+    //
+    // Scaled after the wash rather than before it, so an overcast night goes dark
+    // grey. Dimming only the blue would leave a closed sky sitting at the full
+    // brightness of Atmosphere::overcast at midnight, which is brighter than the
+    // clear sky it replaced.
     for (float y = top; y < view.y + view.height; y += band) {
-        DrawRectangleRec({view.x, y, view.width, band}, AirAt(y + band * 0.5f, now_.cover));
+        const Color air = Scale(AirAt(y + band * 0.5f, now_.cover), {day, day, day});
+
+        DrawRectangleRec({view.x, y, view.width, band}, air);
     }
 }
 

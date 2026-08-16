@@ -17,6 +17,7 @@ struct Toggles {
     bool chunks   = false; // Chunk borders, coordinates and what pins them.
     bool layers   = false; // The world height grid and the spawn bands on it.
     bool light    = false; // The probes the light was solved on.
+    bool limits   = false; // Every edge the light solve has — see DrawLightLimits.
 
     // Skips the light entirely and draws the world at full brightness.
     //
@@ -85,6 +86,36 @@ void DrawLayers(const World &world, Rectangle view);
 // coarsely it is known, which is what a rule reading a light level is really
 // asking about.
 void DrawLight(const World &world, Rectangle view);
+
+// Every edge the light solve has, drawn over the world it is lighting.
+//
+// The overlay for "does this move when I move?", and it exists because that
+// question cannot be answered from a picture of the light alone. A solve that is
+// correct everywhere can still change what it produces at a fixed world point
+// simply by standing somewhere else, and every way it can do so is a boundary:
+//
+//   - **The region.** The solve covers a rectangle around the view and nothing
+//     outside it is lit at all. Its corner is snapped to a stride of cells, so it
+//     does not slide with the player, it *jumps* — and the jump is drawn.
+//   - **The probe lattices.** Each cascade level stands its probes twice its own
+//     step apart, so a region that jumps two cells re-phases every level above the
+//     first. The three coarsest are drawn because that is where a re-phasing is
+//     large enough to see; the rest are reported as numbers.
+//   - **The cloud deck.** The cloud is matter, stamped into the medium between the
+//     deck's two edges — and the stamp is clipped to the region. So the deck is only
+//     as thick as the part of it that fell inside, and a region whose top edge
+//     crosses the deck's changes the optical depth of every cloud on screen at once.
+//     Two rectangles: where the deck is, and how much of it was stamped.
+//
+// There was a per-column *cover* strip here too, for the share of sky a canopy held
+// back. It went with the canopy shade itself — see World::AddCover's note, which is
+// the whole account of what this overlay was built to find.
+//
+// What is deliberately *not* here: a cache boundary, because the solve has none. It
+// keeps one frame of fluence to feed the bounce and nothing else, and that history
+// is reprojected by however far the region walked. Chunk residency is a cache and it
+// is on F3.
+void DrawLightLimits(const World &world, Rectangle view);
 
 // The surface the world's collision actually presents, column by column, against
 // the surface the world is drawn at.

@@ -73,6 +73,13 @@ void ReadToggles(Toggles &toggles) {
     if (IsKeyPressed(KEY_F3)) toggles.chunks = !toggles.chunks;
     if (IsKeyPressed(KEY_F4)) toggles.layers = !toggles.layers;
     if (IsKeyPressed(KEY_F5)) toggles.light = !toggles.light;
+
+    // L rather than a function key, and beside F5 rather than on it: the two answer
+    // opposite halves of the same question and are wanted together. F5 draws what the
+    // light *is* and covers the world doing it; this draws where its edges are and
+    // leaves the world visible under them, which is the only way to see a shadow
+    // moving against a boundary that is not.
+    if (IsKeyPressed(KEY_L)) toggles.limits = !toggles.limits;
     if (IsKeyPressed(KEY_F6)) toggles.unlit = !toggles.unlit;
     if (IsKeyPressed(KEY_F7)) toggles.fastWeather = !toggles.fastWeather;
 
@@ -138,52 +145,214 @@ void DrawGroundCollision(const World &world, Rectangle view) {
     }
 }
 
+// The solved light on its own, in grey, over everything.
+//
+// Not the light multiplied into the world -- that is the game, and the game is
+// exactly what hides the light. A shadow's shape cannot be judged against ground
+// that already has a texture, a colour and a shape of its own, and the sky is the
+// worst of it: it is drawn by the backdrop and normally shows whatever the backdrop
+// felt like, so the one place a cloud's shadow is easiest to read is the one place
+// the field was never visible.
+//
+// Here the field is drawn flat, opaque, across its whole region, sky included, with
+// the colour taken out. White is lit, grey is partly shadowed, black is unlit, and
+// nothing else is on screen to argue with it. It is the view to take a picture of
+// when a shadow looks wrong.
 void DrawLight(const World &world, Rectangle view) {
     const light::Field &field = world.Light();
 
-    const float spacing = field.Spacing();
+    const Texture2D texture = field.Screen();
+    if (texture.id == 0) return;
 
-    // Each probe fills its own patch, rather than being marked with a dot in
-    // the middle of it. At one probe per cell the dots are smaller than the gaps
-    // between them, and the overlay reads as a halftone screen laid over the
-    // world instead of as the light.
-    //
-    // Filling shows the field for what it is: the blocks are the resolution the
-    // light is actually known at, which is the thing worth looking at here.
-    for (int i = 0; i < field.Cols(); i++) {
-        for (int j = 0; j < field.Rows(); j++) {
-            const Vector2 at = field.ProbePosition(i, j);
+    // Luminance, so a warm sun and a blue sky do not read as two different amounts of
+    // light when they are the same amount of light.
+    static Shader grey  = {};
+    static bool attempted = false;
 
-            if (at.x < view.x - spacing || at.x > view.x + view.width + spacing) continue;
-            if (at.y < view.y - spacing || at.y > view.y + view.height + spacing) continue;
+    if (!attempted) {
+        attempted = true;
 
-            const light::Radiance value = field.ProbeAt(i, j);
-            const float exposure        = field.Exposure();
+        grey = LoadShaderFromMemory(nullptr, R"(#version 330
+in vec2 fragTexCoord;
+uniform sampler2D texture0;
+out vec4 finalColor;
 
-            const Color colour = {
-                static_cast<unsigned char>(std::clamp(light::Expose(value.r, exposure), 0.0f, 1.0f) * 255.0f),
-                static_cast<unsigned char>(std::clamp(light::Expose(value.g, exposure), 0.0f, 1.0f) * 255.0f),
-                static_cast<unsigned char>(std::clamp(light::Expose(value.b, exposure), 0.0f, 1.0f) * 255.0f),
-                255,
-            };
+void main() {
+    vec3 lit = texture(texture0, fragTexCoord).rgb;
+    float value = dot(lit, vec3(0.2126, 0.7152, 0.0722));
 
-            DrawRectangleV({at.x - spacing * 0.5f, at.y - spacing * 0.5f}, {spacing, spacing}, colour);
-        }
+    finalColor = vec4(value, value, value, 1.0);
+}
+)");
     }
 
-    // A sparse rule over the top, so the grid has a scale to be read against
-    // and the view does not become an unbroken field of black where the light
-    // runs out.
-    constexpr int kRule = 16;
+    const Rectangle source = {0.0f, 0.0f, static_cast<float>(field.Cols()),
+                              static_cast<float>(field.Rows())};
+
+    const Rectangle target = {field.Origin().x, field.Origin().y,
+                              field.Cols() * field.Spacing(), field.Rows() * field.Spacing()};
+
+    if (grey.id != 0) BeginShaderMode(grey);
+
+    DrawTexturePro(texture, source, target, {0.0f, 0.0f}, 0.0f, WHITE);
+
+    if (grey.id != 0) EndShaderMode();
+
+    // A sparse rule, so a shape has a scale to be read against and the edge of the
+    // solved region can be seen for what it is rather than mistaken for a shadow.
+    constexpr int kRule = 32;
+
+    const float spacing = field.Spacing();
 
     for (int i = 0; i < field.Cols(); i += kRule) {
-        const float x = field.ProbePosition(i, 0).x - spacing * 0.5f;
-        DrawLineV({x, view.y}, {x, view.y + view.height}, {90, 96, 110, 110});
+        const float x = field.Origin().x + i * spacing;
+        DrawLineV({x, target.y}, {x, target.y + target.height}, {90, 96, 110, 70});
     }
 
     for (int j = 0; j < field.Rows(); j += kRule) {
-        const float y = field.ProbePosition(0, j).y - spacing * 0.5f;
-        DrawLineV({view.x, y}, {view.x + view.width, y}, {90, 96, 110, 110});
+        const float y = field.Origin().y + j * spacing;
+        DrawLineV({target.x, y}, {target.x + target.width, y}, {90, 96, 110, 70});
+    }
+
+    DrawRectangleLinesEx(target, 2.0f, {240, 120, 60, 160});
+}
+
+void DrawLightLimits(const World &world, Rectangle view) {
+    const light::Field &field = world.Light();
+
+    if (field.Cols() <= 0 || field.Rows() <= 0) return;
+
+    const float spacing = field.Spacing();
+    const Vector2 at    = field.Origin();
+
+    const Rectangle region = {at.x, at.y, field.Cols() * spacing, field.Rows() * spacing};
+
+    // --- the probe lattices, coarse first -------------------------------------
+    //
+    // Coarsest brightest, on the argument the whole overlay rests on: a lattice of
+    // spacing 2^n cells re-phased by a jump of two cells has moved by 2^(1-n) of its
+    // own period, so the coarse levels are where a jump is a large fraction of the
+    // structure and the fine ones are where it is a rounding. If a boundary is being
+    // crossed, it is being crossed on one of the lines drawn brightest.
+    //
+    // Three, and not all of them. Level zero stands its probes two cells apart, which
+    // over five hundred columns is a grey wash rather than a grid.
+    const std::vector<light::Field::Level> &stack = field.Levels(0);
+
+    const int drawn = std::min<int>(3, static_cast<int>(stack.size()));
+
+    for (int d = 0; d < drawn; d++) {
+        const light::Field::Level &level = stack[stack.size() - 1 - d];
+
+        // Down towards the fine levels, so the coarsest reads as the structure and
+        // the two under it as the grid it sits in.
+        const unsigned char ink = static_cast<unsigned char>(200 >> d);
+
+        const Color line = {120, 210, 255, ink};
+
+        for (int i = 0; i < level.gx; i++) {
+            const float x = field.LevelProbe(level, i, 0).x;
+            if (x < view.x || x > view.x + view.width) continue;
+
+            DrawLineV({x, std::max(region.y, view.y)},
+                      {x, std::min(region.y + region.height, view.y + view.height)}, line);
+        }
+
+        // Only for the coarsest, and only across. The y lattice is the same two cells
+        // at every level -- halving happens in x alone -- so drawing it three times
+        // draws one grid three times.
+        if (d > 0) continue;
+
+        for (int j = 0; j < level.gy; j += 8) {
+            const float y = field.LevelProbe(level, 0, j).y;
+            if (y < view.y || y > view.y + view.height) continue;
+
+            DrawLineV({std::max(region.x, view.x), y},
+                      {std::min(region.x + region.width, view.x + view.width), y}, line);
+        }
+    }
+
+    // --- the cloud deck, and how much of it the region actually holds ---------
+    //
+    // The cloud is matter, stamped into the medium between the deck's two edges --
+    // and the stamp is clipped to the region, `max(top, 0)` and `min(bottom, rows-1)`.
+    // So the deck is only as thick as the part of it that fell inside, and a region
+    // whose top edge crosses the deck's changes the optical depth of every cloud on
+    // screen at once. That is a boundary the player crosses by walking, and neither
+    // the sky nor the light says a word about it.
+    //
+    // Two rectangles: where the deck is, and where it was stamped. When they are the
+    // same rectangle the deck is whole. When the dashed one is shorter, it is not.
+    const float deckTop    = world.Sky().DeckTop();
+    const float deckBottom = world.Sky().DeckBottom();
+
+    if (deckBottom > deckTop) {
+        const Rectangle deck = {region.x, deckTop, region.width, deckBottom - deckTop};
+
+        DrawRectangleLinesEx(deck, 1.0f, {160, 200, 255, 120});
+
+        const float stamped = std::max(deckTop, region.y);
+        const float ends    = std::min(deckBottom, region.y + region.height);
+
+        if (ends > stamped) {
+            DrawRectangleRec({region.x, stamped, region.width, ends - stamped}, {160, 200, 255, 24});
+        }
+    }
+
+    // --- the region, and the corner that jumps --------------------------------
+    DrawRectangleLinesEx(region, 3.0f, {240, 120, 60, 220});
+
+    // The origin in cells rather than in pixels, because the snap is counted in
+    // cells and a figure in pixels hides whether it landed on the stride.
+    const int originI = static_cast<int>(std::lround(at.x / spacing));
+    const int originJ = static_cast<int>(std::lround(at.y / spacing));
+
+    constexpr float kArm = 40.0f;
+
+    DrawLineEx({at.x - kArm, at.y}, {at.x + kArm, at.y}, 3.0f, {255, 255, 255, 230});
+    DrawLineEx({at.x, at.y - kArm}, {at.x, at.y + kArm}, 3.0f, {255, 255, 255, 230});
+
+    // --- what none of the above can be read off -------------------------------
+    const light::Settings &settings = world.LightSettings();
+
+    const char *lines[] = {
+        TextFormat("region  %d x %d cells @ %.0f px   origin cell %d, %d", field.Cols(), field.Rows(),
+                   static_cast<double>(spacing), originI, originJ),
+        TextFormat("cascades  %d   coarsest %d x %d probes, %d dirs, step %d cells",
+                   static_cast<int>(stack.size()), stack.empty() ? 0 : stack.back().gx,
+                   stack.empty() ? 0 : stack.back().gy, stack.empty() ? 0 : stack.back().dirs,
+                   stack.empty() ? 0 : stack.back().step),
+        TextFormat("sky  radiance %.3f %.3f %.3f   horizon %.2f  zenith %.2f",
+                   static_cast<double>(settings.sky.radiance.r), static_cast<double>(settings.sky.radiance.g),
+                   static_cast<double>(settings.sky.radiance.b), static_cast<double>(settings.sky.horizon),
+                   static_cast<double>(settings.sky.zenith)),
+        TextFormat("bounce %s   cross blur %s   exposure %.2f", settings.bounce ? "on" : "off",
+                   settings.crossBlur ? "on" : "off", static_cast<double>(settings.exposure)),
+
+        // The line to watch while walking. `skipped` is canopies the sheet is not
+        // holding, so their shade is not in the boundary condition at all — if it
+        // moves off zero as you walk, the daylight is being driven by a draw cache.
+        // How much of the deck the region is holding. Short of the whole of it and
+        // every cloud on screen is thinner than it looks.
+        TextFormat("deck  y %.0f..%.0f   region y %.0f..%.0f   %s   cloud %s", static_cast<double>(world.Sky().DeckTop()),
+                   static_cast<double>(world.Sky().DeckBottom()), static_cast<double>(region.y),
+                   static_cast<double>(region.y + region.height),
+                   (world.Sky().DeckTop() >= region.y && world.Sky().DeckBottom() <= region.y + region.height)
+                       ? "whole"
+                       : "CLIPPED",
+                   world.SkyCover() ? "on" : "off"),
+    };
+
+    // Clear of the top of the screen, where the head-up display already is: the
+    // region's corner is almost always above the view, so text placed at it clamps to
+    // the top and lands on top of that.
+    const float textX = std::max(region.x, view.x) + 8.0f;
+    float textY       = std::max(region.y, view.y) + 108.0f;
+
+    for (const char *line : lines) {
+        DrawText(line, static_cast<int>(textX), static_cast<int>(textY), kLabelSize, {255, 255, 255, 230});
+
+        textY += kLabelSize + 4.0f;
     }
 }
 

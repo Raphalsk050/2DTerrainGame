@@ -197,24 +197,28 @@ public:
 
     // Sky held back over a run of columns, for the next solve only.
     //
-    // The spark read the other way round: re-offered every frame, so nothing has
-    // to be told when the thing casting it moves or is cut down.
+    // There was an AddCover here, and the canopy shade that used it is gone. Worth
+    // the note, because the idea will look obvious again:
     //
-    // A *column* and not a volume, and that distinction is the whole of this. It
-    // was a rectangle of extinction stamped into the medium, which is what a
-    // material does — and it was wrong for the same reason it is right for a
-    // material: extinction is fog, and a material's cell is also drawn, so its
-    // own picture hides it. A canopy stands in open air where nothing is drawn,
-    // so the fog was the only thing on screen and every tree wore a grey blob in
-    // the sky above it. Softening the edge and dropping the figure to a tenth
-    // made the blob fainter and no less a blob.
+    // A canopy could not be stamped into the medium as extinction the way a cloud
+    // is — extinction is fog, a material's own picture hides its cell, and a canopy
+    // stands in open air where nothing is drawn, so the fog was the only thing on
+    // screen and every tree wore a grey blob in the sky above it. So it was held
+    // back as a *share per column* instead, applied to the sky a ray reached at the
+    // end of its march.
     //
-    // This is the arrangement the clouds already use — `Medium::cover`, one
-    // figure per column, applied to the sky a ray reaches at the end of its
-    // march. Nothing is added to the air; what changes is how much sky arrives
-    // underneath. Added to whatever the cloud is already holding back, because
-    // shade under a cloud under a canopy is both.
-    void AddCover(float fromX, float toX, float share);
+    // What that could not survive is that the share is offered by whatever the grove
+    // is currently holding, and the grove's set turns over as the player walks. A
+    // tree entering or leaving it added or removed a whole band of held-back sky at
+    // once, and the ground under that band stepped. Nothing about it was gradual and
+    // nothing about it was transport: it was a set membership changing, expressed as
+    // daylight. It read as the light flickering as you walked, and it survived
+    // turning the bounce off, which is what finally placed it.
+    //
+    // The way back is the one the cloud already took: put the leaves themselves into
+    // the medium as matter, so a canopy occludes by being there. Then it is
+    // transport like everything else, it moves when the tree moves, and no set
+    // membership is involved. Until then a wood has no dark floor.
 
     // Light reaching a world position, and the same as a single level in [0,1].
     //
@@ -280,6 +284,27 @@ public:
     // Steps the weather through clear, fair, overcast, storm and back to the sky's
     // own sequence. See weather::Sky::ForceMood.
     void CycleWeather() { sky_.CycleMood(); }
+
+    // Whether cloud and canopy hold any of the sky back, for the light only.
+    //
+    // An instrument and not a setting. The cover is the one thing about daylight that
+    // is still a field handed in from outside rather than transported, so when the
+    // light moves as the player walks it is the first thing that has to be ruled in
+    // or out -- and the only way to rule it out is to switch it off and walk the same
+    // ground again. The clouds go on being drawn: what stops is their say over the
+    // light, so the two can be told apart on screen.
+    // The two things that stand between the sky and the ground, each on its own
+    // switch.
+    //
+    // They used to share one, and that made the switch useless for the only job it
+    // has: a flicker that survives turning "sky cover" off has been cleared of two
+    // suspects at once and of neither individually. They are not even the same kind
+    // of thing — the cloud is matter stamped into the medium and transported through,
+    // the canopy is a share held back per column because its leaves are drawn rather
+    // than laid into the medium — so one switch was hiding that too.
+    void ToggleSkyCover() { skyCover_ = !skyCover_; }
+    bool SkyCover() const { return skyCover_; }
+
 
     // Holds one, by index, or hands the sky back its own sequence below zero.
     void ForceWeather(int mood) { sky_.ForceMood(mood); }
@@ -386,6 +411,29 @@ public:
 
     // How many tufts the world can no longer describe on its own.
     int MownTufts() const { return static_cast<int>(mown_.size()); }
+
+    // What stands behind the ground: the air of a cave, and the far wall of one.
+    //
+    // The frame draws the sky twice, and this is the second of them. The first is
+    // drawn straight into the frame and is never multiplied by the light, because
+    // it is the *source* — a cloud's shadow falls through the sky and not onto it.
+    // That is right for every pixel of sky the player can actually see and wrong
+    // for every pixel below the land, where what is behind a cave is not sky at
+    // all but the rock the cave was cut out of. Left alone, an unlit cavern came
+    // out the colour of a bright afternoon.
+    //
+    // So the same air is laid down again inside the lit layer and then taken back
+    // off everywhere the land is not standing behind it. What is left is opaque
+    // under the ground and gone above it: the multiply darkens the first to the
+    // black a cave should be, and the sky drawn behind the layer shows through the
+    // second untouched.
+    //
+    // The land here is the *generator's* land and not the world's, on the rule §8
+    // of CLAUDE.md states for the covers: what is behind a cave is a property of
+    // the country, and a hole somebody dug is a hole into rock rather than a
+    // window onto the sky. It is also what keeps a platform built in mid-air from
+    // turning the whole sky under it into cave.
+    void DrawUnderground(Rectangle view) const;
 
     // Split so that liquids can be collected into their own layer and
     // composited in a single blend.
@@ -981,14 +1029,7 @@ private:
 
     std::vector<Spark> sparks_;
 
-    // Sky held back over a span of columns, lasting one solve.
-    struct Cover {
-        float fromX = 0.0f;
-        float toX   = 0.0f;
-        float share = 0.0f;
-    };
-
-    std::vector<Cover> covers_;
+    bool skyCover_ = true;
 
     light::Settings lightSettings_{};
 

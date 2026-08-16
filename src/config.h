@@ -155,8 +155,8 @@ inline constexpr bool kDrawContours = false;
 //
 // Adjustable while the game runs, with the keys below, so the balance can be
 // settled by walking around at each setting rather than by argument.
-inline constexpr float kLanternStrength = 2.0f;
-inline constexpr float kLanternRadius   = 10.0f;
+inline constexpr float kLanternStrength = 0.0f;
+inline constexpr float kLanternRadius   = 2.0f;
 inline constexpr Color kLanternGlow     = {255, 206, 150, 255};
 
 // How much one press changes it, and how far it can be pushed either way.

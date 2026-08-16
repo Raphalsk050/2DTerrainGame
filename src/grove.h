@@ -76,9 +76,11 @@ public:
     // nothing left to say are dropped.
     void Update(const World &world, Rectangle view, Vector2 player, float now, float dt, Inventory &into);
 
-    // Offers every visible canopy to the light as shade, so a wood has a dark
-    // floor. Re-offered each frame; see World::AddShade.
-    void Shade(World &world, float now) const;
+    // There was a Shade here, offering every visible canopy to the light as a share
+    // of held-back sky. It is gone, and World::AddCover's note says why: the set of
+    // trees offering it turned over as the player walked, so bands of daylight
+    // appeared and vanished under a moving player. A wood has no dark floor until
+    // the leaves are matter in the medium.
 
     // Drawn between the terrain and the character, and so before the light is
     // multiplied over the frame: a tree is lit by the same daylight as the ground

@@ -64,6 +64,17 @@ uniform int uRadianceStride;
 // illumination, 0 for direct light alone.
 uniform float uBounce;
 
+// How far the region has moved since the frame whose fluence is being fed back, in
+// scene cells.
+//
+// The feedback buffer is indexed by cell and the region walks with the camera, so a
+// cell is a different piece of the world from one frame to the next. Read without
+// this, the bounce arrives displaced by however far the region jumped -- and since a
+// rock face is lit entirely by the bounce, every jump flashes the lighting across the
+// whole screen. It shows up as the light being unstable while walking and steady
+// while standing still, which is exactly the shape of the fault.
+uniform ivec2 uDrift;
+
 // --- the medium -------------------------------------------------------------
 uniform int uSceneW;
 uniform int uSceneH;
@@ -86,7 +97,7 @@ uniform int uSpanY;
 uniform vec3 uSkyRadiance;
 uniform float uSkyHorizon;   // how far up a ray must point before any sky reaches it
 uniform float uSkyZenith;    // and where it has all of it
-uniform float uSkyCover;     // what the weather is holding back, in [0,1]
+
 
 const float kPi = 3.14159265358979323846;
 const float kTau = 6.28318530717958647692;
@@ -178,9 +189,8 @@ vec3 SkyRadiance(vec2 dir) {
     if (len < 1e-6) return vec3(0.0);
 
     float up = -dir.y / len;    // world y grows downward
-    float share = smoothstep(uSkyHorizon, uSkyZenith, up);
 
-    return uSkyRadiance * (share * (1.0 - uSkyCover));
+    return uSkyRadiance * smoothstep(uSkyHorizon, uSkyZenith, up);
 }
 )GLSL";
 
@@ -242,7 +252,12 @@ void main() {
     // which is the difference between it and the sweep it replaces: the old solver
     // pushed light into solids with a chamfer distance transform, over a reach and a
     // lip that both had to be set by hand and were wrong at different depths.
-    vec3 incident = bPrevious[cell].rgb;
+    // Last frame's light at *this* piece of the world, not at this index.
+    ivec2 was = ivec2(x, y) + uDrift;
+
+    bool remembered = was.x >= 0 && was.y >= 0 && was.x < uSceneW && was.y < uSceneH;
+
+    vec3 incident = remembered ? bPrevious[was.y * uSceneW + was.x].rgb : vec3(0.0);
 
     if (sigma > 1.0) {
         vec3 outside = vec3(0.0);
@@ -256,10 +271,12 @@ void main() {
                 int ny = y + dy;
                 if (nx < 0 || ny < 0 || nx >= uSceneW || ny >= uSceneH) continue;
 
-                int at = ny * uSceneW + nx;
-                if (bScene[at].albedoSigma.a > 1.0) continue;
+                if (bScene[ny * uSceneW + nx].albedoSigma.a > 1.0) continue;
 
-                outside += bPrevious[at].rgb;
+                ivec2 back = ivec2(nx, ny) + uDrift;
+                if (back.x < 0 || back.y < 0 || back.x >= uSceneW || back.y >= uSceneH) continue;
+
+                outside += bPrevious[back.y * uSceneW + back.x].rgb;
                 facing += 1.0;
             }
         }

@@ -68,13 +68,6 @@ constexpr float kSwayPeriod  = 3.1f;
 constexpr float kSwayHurry   = 1.6f;
 constexpr float kSwayUrgency = 1.30f;
 
-// Share of the sky a crown holds back from the ground under it.
-//
-// Read as cover rather than as extinction — see World::AddCover. A share, so it
-// is directly how much daylight the wood floor loses, and half is a wood: dim
-// enough to be its own place, bright enough to walk through.
-constexpr float kCanopyShade = 0.5f;
-
 // Seconds a tree takes to go over, and how long the trunk takes to go once it
 // has landed.
 //
@@ -1585,50 +1578,6 @@ void Grove::DrawStump(const flora::Plant &plant, const Standing &standing) const
                             stump.y + static_cast<float>(j) * pixel},
                            {pixel, pixel}, colour);
         }
-    }
-}
-
-void Grove::Shade(World &world, float now) const {
-    if (!sheet_.Ready()) return;
-
-    for (const flora::Plant &plant : plants_) {
-        const flora::SpeciesDef &def = flora::Def(plant.species);
-
-        // A tree on its way down or gone stops shading the ground. Nothing has to
-        // be told: the shade is re-offered every frame and this one simply is not
-        // offered.
-        const Standing standing = Read(plant, now);
-        if (standing.felling >= 0.0f || standing.stump) continue;
-
-        // And a tree that has not been drawn casts nothing. The two used to
-        // disagree — this walked every plant while the draw skipped whatever the
-        // frame's budget had not reached — and what reached the screen was a row
-        // of grey blobs hanging in an empty sky, one for every tree that was not
-        // there yet. Asking the sheet is what keeps the shadow and the thing
-        // casting it the same set.
-        //
-        // Asked and not requested: this must not spend the frame's drawing budget
-        // or pick a season, both of which are the draw's business.
-        if (!sheet_.Holds(plant.id)) continue;
-
-        // The crown alone, not the whole sprite: the bare trunk below it stops
-        // nothing worth solving for, and including it would put a column of dusk
-        // down to the ground under every tree.
-        //
-        // And the crown it actually has, not the one it will have. A sapling
-        // casting a full oak's shade darkens a strip of ground a hundred pixels
-        // wide from under a plant the size of a boot.
-        const std::size_t grown = flora::StageIndex(standing.stage);
-
-        const float height = def.height[grown] * plant.scale;
-        const float width  = def.canopyWidth[grown] * plant.scale;
-
-        const float foot = height * def.shape.clearance;
-
-        (void)height;
-        (void)foot;
-
-        world.AddCover(plant.base.x - width * 0.5f, plant.base.x + width * 0.5f, kCanopyShade);
     }
 }
 

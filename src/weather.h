@@ -21,7 +21,8 @@
 //   THE CLOUD FIELD   procedural, a pure function of position
 //        |
 //        +--> what is drawn in the sky
-//        +--> how much daylight reaches the ground   (light::Medium::cover)
+//        +--> how much daylight reaches the ground   (stamped into light::Medium
+//                                                     as matter, and transported)
 //        +--> where the drops fall from
 //
 // Rain belongs to the top of that list and not the bottom, and this is the one
@@ -256,6 +257,25 @@ struct Atmosphere {
     // world beneath it. A multiple of config::kPixelSize keeps its steps in line
     // with everything else's.
     float bandHeight = 10.0f;
+
+    // How much of the sky's colour is left at midnight, as a share of full day.
+    //
+    // **This is the knob for a night that is too bright or too dark**, and it is
+    // the only one: nothing else darkens the drawn sky. It used to need no knob
+    // because the whole frame was multiplied by the solved light, and the light
+    // carried the day for free — Sky::AirAt still says so, and is still right about
+    // itself. But the sky is now drawn on the *source* side of that multiply (see
+    // lit_layer.h: a cloud's shadow falls through the sky, not onto it), so what
+    // the multiply used to do has to be said here instead.
+    //
+    // Deliberately not zero. A clear night sky is a very dark blue and not black,
+    // and taking it to black would leave the stars hanging in a void with no sky
+    // for them to be in. Around a tenth is what the old multiply came to at
+    // midnight, which is where this starts.
+    //
+    // Only the *drawn* sky. How much light the world receives at night is the
+    // light solver's business and lives in light::Sky::radiance.
+    float night = 0.10f;
 };
 
 // The stars, which are what the sky is when there is no sun in it.
@@ -1347,6 +1367,20 @@ public:
     // The light solver is told this so the shade lands under the cloud and not on
     // it.
     float ShadeBelow() const { return settings_.base + settings_.rainDrop; }
+
+    // The band of sky cloud can stand in, as absolute heights. Y grows downward, so
+    // the top is the smaller number.
+    //
+    // Handed out so the light can lay the cloud into its medium as matter. Everything
+    // else about a cloud's effect on the ground used to arrive as CoverAt -- one share
+    // per column, the thickest cloud anywhere above it -- and a share is not a shadow:
+    // it darkens the whole column including the sky above the cloud, it has no edge,
+    // and a small high cloud dims as hard as an overcast. Given the band, the solver
+    // can put the cloud where it actually is and let the shadow fall out of the
+    // transport, with the cloud's own shape and softening with its distance from the
+    // ground, the way one does.
+    float DeckTop() const { return settings_.ceiling; }
+    float DeckBottom() const { return settings_.base + settings_.rainDrop; }
 
     // Colour of the air at a height, cloud cover included.
     Color AirAt(float worldY, float cover) const;

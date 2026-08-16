@@ -126,8 +126,6 @@ struct Sky {
     float horizon = -0.1f;
     float zenith  = 0.35f;
 
-    // What the weather is holding back, in [0,1].
-    float cover = 0.0f;
 };
 
 struct Settings {
@@ -189,14 +187,21 @@ public:
     Radiance ProbeAt(int i, int j) const {
         if (i < 0 || j < 0 || i >= cols_ || j >= rows_ || !primed_) return {};
 
+
         const std::size_t at = (static_cast<std::size_t>(j) * cols_ + i) * 4;
 
         return {field_[at], field_[at + 1], field_[at + 2]};
     }
 
     // Where that cell sits in the world.
+    //
+    // The readback's origin and not the current one. They are the same while the
+    // region is still and differ by however far it moved on the frame it moved --
+    // which is up to a snap stride, and reading one through the other displaces every
+    // answer by that much.
     Vector2 ProbePosition(int i, int j) const {
-        return {origin_.x + (i + 0.5f) * spacing_, origin_.y + (j + 0.5f) * spacing_};
+        return {readOrigin_.x + (i + 0.5f) * readSpacing_,
+                readOrigin_.y + (j + 0.5f) * readSpacing_};
     }
 
     // The exposed field as a texture, for the screen. One texel per medium cell.
@@ -217,8 +222,12 @@ public:
     // the long ones.
     long Rays() const { return rays_; }
 
-private:
     // One cascade level's shape and where it starts in the pyramid buffer.
+    //
+    // Public because the debug view draws it. What a level is cannot be inferred from
+    // the region's size -- levels 0 and 2 run the region the long way and 1 and 3
+    // across it, so the two quadrant families have different level counts -- and a
+    // drawing that guessed at it would be a picture of the guess.
     struct Level {
         int gx      = 0;
         int gy      = 0;
@@ -228,6 +237,25 @@ private:
         int count   = 0;
     };
 
+    // The pyramid for one of the four quadrant rotations, coarsest level last.
+    //
+    // Empty before the first solve. Rotation is taken modulo four rather than
+    // asserted: this is read by an overlay, and an overlay is not worth a crash.
+    const std::vector<Level> &Levels(int rotation) const { return levels_[rotation & 3]; }
+
+    // Where the probe of `level` at lattice position (i, j) stands, in the world.
+    //
+    // The x lattice is spaced by twice the level's step because a probe pair straddles
+    // its cell, and the y lattice by two because the two parities interleave one scene
+    // cell apart -- see ProbeScene in the shaders, which this mirrors for rotation
+    // zero. Only rotation zero: the other three sweep the region turned, and drawing
+    // all four at once draws the region four times over in four different grids.
+    Vector2 LevelProbe(const Level &level, int i, int j) const {
+        return {origin_.x + (2.0f * i * level.step + 0.5f) * spacing_,
+                origin_.y + (2.0f * j + 0.5f) * spacing_};
+    }
+
+private:
     // A compiled program and the uniform locations it uses. Locations are fetched
     // once: glGetUniformLocation is a string lookup and this dispatches a hundred
     // times a frame.
@@ -240,7 +268,7 @@ private:
         int sceneW = -1, sceneH = -1;
         int xDir = -1, yDir = -1, anchor = -1;
         int spanX = -1, spanY = -1;
-        int skyRadiance = -1, skyHorizon = -1, skyZenith = -1, skyCover = -1;
+        int skyRadiance = -1, skyHorizon = -1, skyZenith = -1;
         int opacityGuard = -1;
 
         void Locate();
@@ -294,6 +322,16 @@ private:
 
     std::vector<Cell> staging_;
     std::vector<float> field_;   // the readback, four floats per cell
+
+    // Where the field being read back was solved.
+    //
+    // Kept apart from origin_ because the readback is a frame behind: Solve moves the
+    // region and then solves, so by the time anything asks, origin_ describes the
+    // solve that has just been dispatched while field_ still holds the one before it.
+    // Indexing one with the other displaces every reading by exactly how far the
+    // region walked, which is a whole snap stride on the frames it walks.
+    Vector2 readOrigin_ = {};
+    float readSpacing_  = 1.0f;
 
     int cols_       = 0;
     int rows_       = 0;

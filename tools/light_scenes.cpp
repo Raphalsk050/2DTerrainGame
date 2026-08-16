@@ -475,6 +475,116 @@ bool Closure(light::Field &field) {
     return passed;
 }
 
+// Does the field depend on where the region happens to be standing?
+//
+// It must not. The region walks with the camera and snaps to a stride, so it jumps by
+// a whole stride at a time while the world underneath it does not move at all. Every
+// jump that changes the answer is a flash across the entire screen, and the faster the
+// player walks the more of them there are -- which is what "the light flickers when I
+// move" is made of, and it is invisible standing still, which is when it gets tested.
+//
+// Measured the only way that means anything: converge the field, move the region by a
+// stride with the world held still, solve once, and compare the light at the *same
+// world positions* before and after.
+void Stability(light::Field &field, int stride, bool bounce, bool sky, const char *label) {
+    // The world as a function of absolute position, evaluated over whatever window the
+    // region happens to be looking through.
+    //
+    // It has to be built this way and not by copying a fixed picture across: a scene
+    // laid out in cell coordinates and then shifted loses whatever falls off the edge,
+    // so the two solves are looking at *different worlds* and the difference measured
+    // is mostly the missing wall. Asked at absolute coordinates, both windows describe
+    // the same country and the only thing that changed is where the region stands --
+    // which is the entire question.
+    //
+    // Periodic, so no feature is ever near an edge in one window and not the other.
+    const auto build = [&](Medium &medium, int shift) {
+        medium.Resize(kSide, kSide);
+        medium.spacing = 1.0f;
+        medium.origin  = {static_cast<float>(shift), 0.0f};
+
+        for (int j = 0; j < kSide; j++) {
+            for (int i = 0; i < kSide; i++) {
+                const int wx = i + shift;   // absolute
+                const int wy = j;
+
+                Material material = kAir;
+
+                // A floor, a ceiling, and a colonnade of pillars every 96.
+                if (wy < 24 || wy > kSide - 24) {
+                    material = kStone;
+                } else if (((wx % 96) + 96) % 96 < 18 && wy > 120 && wy < kSide - 120) {
+                    material = kStone;
+                }
+
+                // A lamp every 192, offset so it never lands on a pillar.
+                const int lampX = ((wx - 48) % 192 + 192) % 192;
+                const int lampY = wy - 80;
+
+                if (lampX * lampX + lampY * lampY < 100) material = Lamp(14.0f);
+
+                Put(medium, i, j, material);
+            }
+        }
+    };
+
+    light::Settings settings;
+    settings.exposure     = 1.0f;
+    settings.bounce       = bounce;
+    settings.sky.radiance = sky ? light::Radiance{0.05f, 0.06f, 0.08f} : light::Radiance{};
+    settings.sky.horizon  = -0.35f;
+    settings.sky.zenith   = 0.25f;
+
+    Medium settled;
+    build(settled, 0);
+
+    for (int n = 0; n < 14; n++) field.Solve(settled, settings);
+
+    // The light at a grid of world positions, before the region moves.
+    std::vector<double> before;
+
+    for (int j = 64; j < kSide - 64; j += 4) {
+        for (int i = 64; i < kSide - 64; i += 4) {
+            before.push_back(
+                static_cast<double>(light::Luminance(field.At({static_cast<float>(i) + 0.5f,
+                                                               static_cast<float>(j) + 0.5f}))));
+        }
+    }
+
+    Medium moved;
+    build(moved, stride);
+
+    // Twice. The readback is a frame behind by design, so one solve only dispatches
+    // the moved region -- what comes back is still the settled one, and comparing that
+    // against itself measures nothing. The second solve is the one that can be read.
+    field.Solve(moved, settings);
+    field.Solve(moved, settings);
+
+    double worst = 0.0;
+    double total = 0.0;
+    double level = 0.0;
+    std::size_t n = 0;
+
+    for (int j = 64; j < kSide - 64; j += 4) {
+        for (int i = 64; i < kSide - 64; i += 4) {
+            const double after = static_cast<double>(
+                light::Luminance(field.At({static_cast<float>(i) + 0.5f,
+                                           static_cast<float>(j) + 0.5f})));
+
+            const double moved_by = std::fabs(after - before[n]);
+
+            worst = std::max(worst, moved_by);
+            total += moved_by;
+            level += after;
+
+            n++;
+        }
+    }
+
+    std::printf("%8d %12.6f %12.6f %10.4f %9.2f%%\n", stride, total / n, worst, level / n,
+                (level / n > 0.0) ? 100.0 * (total / n) / (level / n) : 0.0);
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -692,6 +802,22 @@ int main(int argc, char **argv) {
             std::printf("%-14s %12.6f %12.6f %10.3f %10.4f\n", settings.crossBlur ? "on" : "off",
                         rough.alongY, rough.alongX,
                         rough.alongX > 0.0 ? rough.alongY / rough.alongX : 0.0, rough.level);
+        }
+    }
+
+    if (measurements) {
+        std::printf("\nchange at a fixed world position when the region jumps\n");
+        std::printf("%8s %12s %12s %10s %9s\n", "stride", "mean", "worst", "level", "of level");
+
+        // The matrix that says which half of the solve is unstable. The bounce and the
+        // sky are the two independent things that could be; if either is steady on its
+        // own, the fault is in the other, and if both are steady the fault is in how
+        // they are combined.
+        for (int stride : {2, 8, 32}) {
+            Stability(field, stride, true, true, "bounce + sky");
+            Stability(field, stride, false, true, "sky only");
+            Stability(field, stride, true, false, "bounce only");
+            Stability(field, stride, false, false, "neither: lamps alone");
         }
     }
 

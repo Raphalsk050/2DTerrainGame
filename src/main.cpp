@@ -7,6 +7,7 @@
 #include "grove.h"
 #include "hotbar.h"
 #include "liquid_layer.h"
+#include "lit_layer.h"
 #include "player.h"
 #include "profile.h"
 #include "console.h"
@@ -14,6 +15,7 @@
 #include "sod.h"
 #include "soil.h"
 #include "raylib.h"
+#include "rlgl.h"
 #include "terrain.h"
 #include "weather.h"
 #include "world.h"
@@ -806,11 +808,6 @@ void DrawProbe(World &world, Grove &grove, Inventory &gathered, Rectangle strip,
     // the multiply does to them are two answers, and tuning either while looking
     // at both together is how a palette ends up fighting a time of day.
     if (lit != 0) {
-        // The canopies first, exactly as the frame does it. Shade is re-offered
-        // every frame and is gone the moment nobody offers it, so a probe that
-        // skipped this would be measuring a world with no woods in it.
-        if (plants) grove.Shade(world, world.Sky().Time());
-
         world.StepLight(strip);
 
         // One draws the world as it is seen; the other draws the light on its
@@ -2208,7 +2205,6 @@ void ReportFrame(World &world, Grove &grove, Inventory &gathered, Vector2 at, in
         marks[3] = (GetTime() - t0) * 1000.0;
 
         t0 = GetTime();
-        grove.Shade(world, world.Sky().Time());
         world.StepLight(active);
         marks[4] = (GetTime() - t0) * 1000.0;
 
@@ -2237,12 +2233,6 @@ void ReportFrame(World &world, Grove &grove, Inventory &gathered, Vector2 at, in
     profile::Report("phases");
 }
 
-// The world, from the sky down to the brush cursor over it.
-//
-// Split out from the head-up display because the two are wanted apart: with the
-// inventory open the world goes through a blur and the display does not, and a
-// blur needs the world rendered into a target of its own. Neither half opens the
-// frame, so the caller decides whether that target is the screen.
 // The solved light, multiplied over the frame.
 //
 // There is no texture to keep and no pixel loop to run: the solver exposes the field
@@ -2261,26 +2251,52 @@ void ComposeLight(const light::Field &field) {
     const Rectangle target = {field.Origin().x, field.Origin().y,
                               field.Cols() * field.Spacing(), field.Rows() * field.Spacing()};
 
-    BeginBlendMode(BLEND_MULTIPLIED);
+    // Spelled out rather than taken from BLEND_MULTIPLIED, because what this has
+    // to do to the alpha is not what it does to the colour and the two are only
+    // accidentally the same here. Drawn into LitLayer, the alpha channel is how
+    // much of the sky each pixel covers, and dimming it would open the ground up
+    // and let the blue through wherever the light was low. Alpha therefore keeps
+    // what is already in the target, whatever the multiply does to the colour.
+    //
+    // BLEND_MULTIPLIED happens to leave it alone too -- it is
+    // (RL_DST_COLOR, RL_ONE_MINUS_SRC_ALPHA), and the field's own alpha is 1
+    // everywhere, so the destination survives -- but that rests on a constant in
+    // light_shaders.h that nothing here is entitled to assume.
+    rlSetBlendFactorsSeparate(RL_DST_COLOR, RL_ZERO,   // colour: multiply
+                              RL_ZERO,      RL_ONE,    // alpha:  keep
+                              RL_FUNC_ADD,  RL_FUNC_ADD);
+
+    BeginBlendMode(BLEND_CUSTOM_SEPARATE);
     DrawTexturePro(texture, source, target, {0.0f, 0.0f}, 0.0f, WHITE);
     EndBlendMode();
 }
 
-void DrawScene(const World &world, const Grove &grove, const fixture::Fixtures &fixtures, const Inventory &inventory,
-               const Player &player, const scuff::Trail &trail,
-               const Editor &editor, const LiquidLayer &liquids, const light::Field &lights, const Camera2D &camera,
-               const debug_view::Toggles &debug, bool aiming) {
+// Everything in the world that the light multiplies: the cloud standing in the
+// air, the ground, what grows on it, what walks on it and the weather in front
+// of it -- and then the multiply itself, which is the last thing this draws.
+//
+// The one thing left out is the atmosphere behind it all. See lit_layer.h for
+// why, and for why the clouds are not left out with it.
+//
+// Called between LitLayer::Capture and LitLayer::Finish, so it runs before
+// BeginDrawing like every other capture in the loop.
+void DrawLitWorld(const World &world, const Grove &grove, const fixture::Fixtures &fixtures, const Player &player,
+                  const scuff::Trail &trail, const LiquidLayer &liquids, const light::Field &lights,
+                  const Camera2D &camera, const debug_view::Toggles &debug) {
     const Rectangle view = ViewBounds(camera);
 
     BeginMode2D(camera);
 
-    // The air first, filling the frame. It replaces clearing it rather than being
-    // drawn over a cleared one: there is no height at which the sky is not some
-    // colour, so there is nothing for a background to be.
-    world.Sky().DrawAtmosphere(view);
+    // What is behind the ground, which is the only part of the sky that belongs on
+    // this side of the multiply. See World::DrawUnderground.
+    world.DrawUnderground(view);
 
-    // Then the cloud standing in it, and then the ground over both. Underground the
-    // band is out of view and this returns having done nothing.
+    // It erases with a blend of its own and leaves BLEND_ALPHA behind it, which is
+    // not the one the layer is built with.
+    LitLayer::Blend();
+
+    // The cloud standing in the air first, and then the ground over it. Underground
+    // the band is out of view and this returns having done nothing.
     world.Sky().DrawClouds(view, world.Spacing());
 
     {
@@ -2361,17 +2377,57 @@ void DrawScene(const World &world, const Grove &grove, const fixture::Fixtures &
 
     BeginMode2D(camera);
 
-    // Then the whole scene is multiplied by the light at once. Everything drawn
-    // before this line is lit; everything after it is not, which is exactly the
+    // Then the whole layer is multiplied by the light at once, and this is the
+    // last thing drawn into it. Everything above this line is lit; everything
+    // the frame draws after the layer is composited is not, which is exactly the
     // right side of the line for anything meant to be read rather than seen.
     //
     // Skipping the multiply is all it takes to see the world unlit, since the
     // world underneath was already drawn at full brightness.
+    //
+    // It leaves the blend where EndBlendMode leaves it, which is not the blend
+    // the layer is built with — so anything added below this line has to set
+    // LitLayer's blend again, or draw with an alpha the layer cannot record.
     {
         PROFILE_ZONE("lights.Compose");
 
         if (!debug.unlit) ComposeLight(lights);
     }
+
+    EndMode2D();
+}
+
+// The world, from the sky down to the brush cursor over it.
+//
+// Split out from the head-up display because the two are wanted apart: with the
+// inventory open the world goes through a blur and the display does not, and a
+// blur needs the world rendered into a target of its own. Neither half opens the
+// frame, so the caller decides whether that target is the screen.
+void DrawScene(const World &world, const Grove &grove, const Inventory &inventory, const Player &player,
+               const Editor &editor, const LitLayer &lit,
+               const Camera2D &camera, const debug_view::Toggles &debug, bool aiming) {
+    const Rectangle view = ViewBounds(camera);
+
+    const auto season = static_cast<flora::Season>(world.Sky().Turn().index);
+
+    BeginMode2D(camera);
+
+    // The air first, filling the frame. It replaces clearing it rather than being
+    // drawn over a cleared one: there is no height at which the sky is not some
+    // colour, so there is nothing for a background to be.
+    //
+    // And on this side of the light, alone among the things that are drawn in
+    // world space. The sky is the source; a cloud's shadow falls through it and
+    // not onto it. What is behind the *ground* is drawn again on the other side —
+    // see World::DrawUnderground, which is where the two are told apart.
+    world.Sky().DrawAtmosphere(view);
+
+    EndMode2D();
+
+    // Then the world over it, already lit, in one blend.
+    lit.Compose();
+
+    BeginMode2D(camera);
 
     // The stars go on this side of that line, and they are the only part of the
     // world that does.
@@ -2391,6 +2447,10 @@ void DrawScene(const World &world, const Grove &grove, const fixture::Fixtures &
     if (debug.layers) debug_view::DrawLayers(world, view);
     if (debug.chunks) debug_view::DrawChunks(world, view);
     if (debug.light) debug_view::DrawLight(world, view);
+
+    // After the light's own picture, so the edges are drawn over whichever of the
+    // two views is underneath them. They are about both.
+    if (debug.limits) debug_view::DrawLightLimits(world, view);
 
     // Last of the overlays, so the colliders sit over the grids rather than under
     // them: what this is for is comparing a box against the picture it belongs to,
@@ -2437,12 +2497,15 @@ void DrawHud(const World &world, const Grove &grove, const Player &player, const
     DrawLabel("left: dig  |  right: place what is held  |  planks and cobble build on the grid  |"
               "  1-9 or wheel: slot  |  tab: inventory  |  - / +: brush size  |  R: regenerate",
               10, 28, ink);
-    DrawLabel(TextFormat("V: vertices  |  F3: chunks  |  F4: height grid  |  F5: light probes  |  F6: unlit %s  |"
-                         "  F7: fast weather %s  |  F8: next quarter  |  F9: season %s  |  F10: sheet  |"
-                         "  F11: stock up  |  F12: weather %s  |  , . : lantern %.1f",
-                         debug.unlit ? "on" : "off", debug.fastWeather ? "on" : "off",
-                         kSeasonNames[world.Sky().Turn().index],
-                         (world.Sky().ForcedMood() < 0) ? "auto" : world.Sky().MoodName(), lantern),
+    DrawLabel(TextFormat("V: vertices  |  B: bounce %s  |  L: light limits  |  F3: chunks  |  F4: height grid  |"
+                         "  F5: light field  |"
+                         "  F6: unlit %s  |  F7: fast weather %s  |  F8: next quarter  |  F9: season %s  |"
+                         "  F10: sheet  |  F11: stock up  |  F12: weather %s  |  C: cloud shade %s  |"
+                         "  , . : lantern %.1f",
+                         world.LightSettings().bounce ? "on" : "off", debug.unlit ? "on" : "off",
+                         debug.fastWeather ? "on" : "off", kSeasonNames[world.Sky().Turn().index],
+                         (world.Sky().ForcedMood() < 0) ? "auto" : world.Sky().MoodName(),
+                         world.SkyCover() ? "on" : "off", lantern),
               10, 46, ink);
 
     DrawLabel(TextFormat("chunks: %d (%d pinned)   edits kept: %d   plants: %d (%d drawn, %d kept)   rays: %ld",
@@ -3794,12 +3857,24 @@ int main(int argc, char **argv) {
     // The two ends of a day, and they are two colours rather than one turned down.
     //
     // Noon is the near-neutral light this world was lit by before there was a clock;
-    // midnight is a fiftieth of it and blue where the day is not. Both are radiances
-    // and neither can be read as a brightness — light reaches the screen through an
-    // exposure curve, so this midnight is a readable dark rather than the near-black
-    // the ratio suggests, and a torch stops washing out against it and starts
-    // reading as the warm thing it is.
-    world.SetDaylight({2.6f, 2.8f, 3.1f}, {0.05f, 0.06f, 0.09f});
+    // midnight is a twenty-fifth of it and blue where the day is not. Both are
+    // radiances and neither can be read as a brightness — light reaches the screen
+    // through an exposure curve, so this midnight is a readable dark rather than the
+    // near-black the ratio suggests, and a torch stops washing out against it and
+    // starts reading as the warm thing it is.
+    //
+    // **This is the knob for a ground that is too dark at night**, and the second
+    // triple is the whole of it. Down at these values the exposure curve is near
+    // enough straight, so doubling them roughly doubles what the ground comes out
+    // at — which is not true at the noon end, where the curve is saturated and
+    // halving the radiance costs five per cent.
+    //
+    // It no longer touches the drawn sky. The two came apart when the sky moved to
+    // the source side of the light multiply (see lit_layer.h); how bright the night
+    // *looks* is weather::Atmosphere::night, and this is how much light the world
+    // actually receives. What every step up here costs is the torch: it is a step
+    // towards a night a player can cross without lighting one.
+    world.SetDaylight({2.6f, 2.8f, 3.1f}, {0.20f, 0.24f, 0.36f});
 
     if (probing) {
         const Rectangle strip = {static_cast<float>(std::atof(argv[2])), static_cast<float>(std::atof(argv[3])),
@@ -3840,6 +3915,9 @@ int main(int argc, char **argv) {
 
     LiquidLayer liquids;
 
+    // The world's own layer, so that the light multiplies the world and not the
+    // sky behind it. See lit_layer.h.
+    LitLayer lit;
 
     Backdrop backdrop;
     backdrop.Create();
@@ -3953,6 +4031,7 @@ int main(int argc, char **argv) {
         // was told about one and something else was not.
         camera.offset = {GetScreenWidth() / 2.0f, GetScreenHeight() / 2.0f + GetScreenHeight() / 4.0f};
         liquids.Fit(GetScreenWidth(), GetScreenHeight());
+        lit.Fit(GetScreenWidth(), GetScreenHeight());
         backdrop.Fit(GetScreenWidth(), GetScreenHeight());
 
         // How far in the view is set, read before anything asks what the view
@@ -4073,6 +4152,37 @@ int main(int argc, char **argv) {
         // Everything a gale does — the rain, the shade, the gusts, the leaves
         // coming off a wood — has to be judged with one blowing.
         if (!typing && IsKeyPressed(KEY_F12)) world.CycleWeather();
+
+        // C: take the cloud out of the light while leaving it on screen. It used to
+        // gate the tree shade as well, which made it useless for clearing either
+        // suspect on its own — and then the tree shade turned out to be the bug and
+        // went. See World::AddCover's note.
+        if (!typing && IsKeyPressed(KEY_C)) world.ToggleSkyCover();
+
+        // B: the multi-bounce, on and off. Beside C because it is the same kind of
+        // key — neither is a way of playing, both are ways of telling two things
+        // apart that are on top of each other while both are on.
+        //
+        // It is here because the bounce is fed back temporally: one bounce a frame,
+        // this frame's scattering source being last frame's fluence. That history is
+        // the only thing in the solver that remembers where the region *was*, so it
+        // is the only thing that can disagree with itself when the region moves —
+        // and the bank of scenes measures exactly that, at 2.4% of level with the
+        // bounce on against 0.07% with it off (see LIGHT.md §3). Anything that
+        // flickers under a walking player is either in that 2.4% or is not the
+        // bounce at all, and one keypress is the whole difference between those two
+        // answers.
+        //
+        // Off is not a look. Direct light with volumetric occlusion is a duller
+        // world and a wrong one; nothing lit round a corner, no colour carried off a
+        // surface. See light::Settings::bounce.
+        if (!typing && IsKeyPressed(KEY_B)) {
+            light::Settings tuned = world.LightSettings();
+
+            tuned.bounce = !tuned.bounce;
+
+            world.SetLightSettings(tuned);
+        }
 
         // An action beside the other two, and for the reason F8 gives: the debug
         // toggles hold the state of the screen, and this is not a state.
@@ -4211,15 +4321,6 @@ int main(int argc, char **argv) {
                 world.StepWeather(dt * (debug.fastWeather ? debug_view::kFastWeather : 1.0f));
             }
 
-            // Offered on the same terms as the lantern above, and for the same
-            // reason: a canopy that has to be re-offered to keep shading needs
-            // nothing told to it when the tree is felled.
-            {
-                PROFILE_ZONE("grove.Shade");
-
-                grove.Shade(world, world.Sky().Time());
-            }
-
             // Solved after the world has finished moving, so the light matches the
             // frame it is about to be drawn over rather than the one before it.
             world.StepLight(active);
@@ -4238,13 +4339,28 @@ int main(int argc, char **argv) {
             liquids.Capture(world, ViewBounds(camera), camera);
         }
 
+        // And the world, into a target of its own so the multiply below reaches
+        // the world and stops short of the sky behind it. Same constraint again,
+        // and the reason this is the whole scene bar the atmosphere rather than
+        // just the light: the multiply has to happen where the layer is, and the
+        // layer cannot be opened once the frame has been.
+        {
+            PROFILE_ZONE("DrawLitWorld");
+
+            lit.Capture();
+
+            if (lit.Ready()) DrawLitWorld(world, grove, fixtures, player, trail, liquids, world.Light(), camera, debug);
+
+            lit.Finish();
+        }
+
         // And the world itself, when it is about to be put behind a panel. Same
         // constraint, one step further: a texture mode cannot be opened inside a
         // frame, so the scene is drawn into the backdrop's target out here and
         // only the blurred result is drawn once the frame is open.
         if (packOpen) {
             backdrop.Capture();
-            DrawScene(world, grove, fixtures, inventory, player, trail, editor, liquids, world.Light(), camera, debug, !packOpen);
+            DrawScene(world, grove, inventory, player, editor, lit, camera, debug, !packOpen);
             backdrop.Finish();
         }
 
@@ -4254,7 +4370,7 @@ int main(int argc, char **argv) {
             PROFILE_ZONE("DrawScene");
 
             if (packOpen) backdrop.Compose(config::kPanelDim);
-            else DrawScene(world, grove, fixtures, inventory, player, trail, editor, liquids, world.Light(), camera, debug, !packOpen);
+            else DrawScene(world, grove, inventory, player, editor, lit, camera, debug, !packOpen);
         }
 
         {
@@ -4287,6 +4403,7 @@ int main(int argc, char **argv) {
     world.UnloadPainted();
     grove.Unload();
     liquids.Unload();
+    lit.Unload();
     backdrop.Unload();
     CloseWindow();
 
