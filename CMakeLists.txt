@@ -55,6 +55,7 @@ add_executable(${PROJECT_NAME}
     src/canopy.cpp
     src/drop.cpp
     src/editor.cpp
+    src/fixture.cpp
     src/flora.cpp
     src/grove.cpp
     src/hotbar.cpp

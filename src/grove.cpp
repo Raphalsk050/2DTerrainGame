@@ -639,6 +639,10 @@ void Grove::ReadGround(const World &world, Rectangle view) {
         // two, because a step is the whole of the error the scan can have.
         const bool shaft = (scanned - land) > spacing;
 
+        // The terrain's texel, and only ever the terrain's: this is the profile the
+        // *scatter* stands trees on, and the scatter is deliberately blind to what
+        // has been dug or built. A plant the player puts down goes through
+        // World::FootingUnder instead, which asks the material it lands on.
         surface_[static_cast<std::size_t>(i)] =
             marching_squares::DrawnTop(shaft ? scanned : land, config::kPixelSize);
 

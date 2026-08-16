@@ -236,6 +236,10 @@ std::int64_t CellAt(float worldX) {
     return static_cast<std::int64_t>(std::floor(worldX / kTuftSpan));
 }
 
+// The world's own texel and not the material's, which is correct here and worth
+// saying so it is not "fixed" later: grass only ever grows on soil — see
+// sod::kCovers — and soil is drawn at the terrain's size. Nothing laid by the cell
+// grows anything, so the finer texels a built block uses never reach this.
 float DrawnTop(float crossing) {
     return marching_squares::DrawnTop(crossing, config::kPixelSize);
 }

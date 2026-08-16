@@ -145,11 +145,21 @@ Full screen, flying, on a 16-core desktop, after the work below:
 | `DrawMist` | 0.5 | overcast only; nothing on a clear day |
 | **frame** | **24.1** | 42 fps, from 131 ms / 8 fps |
 
-Since measured, `kPixelSize` went from 5 to 3 so that a built block is drawn the
-size of the cell it was placed in — see §10.4. That is the one deliberate
-regression in this table: `PaintChunks` 0.75 → 1.41 ms and the frame 24.0 → 26.2,
-which is 42 fps to 38. Measure over 300 frames rather than 200; a shorter run
-caught the streaming still settling and reported 36 ms, which is not the frame.
+`kPixelSize` went from 5 to 3 so that a built block is drawn the size of the cell
+it was placed in — see §10.4. That costs `PaintChunks` 0.75 → 1.44 ms and the
+frame 42 fps → 38, and it is the price of a wall that is a wall. Terrain at 5 with
+blocks at 1 measured 41 fps and was tried; it is not available, for the reason
+§12.1 gives.
+
+**Two things about measuring it**, both learned the hard way here:
+
+- **300 frames, not 200.** A shorter run catches the streaming still settling and
+  reported 36 ms, which is not the frame.
+- **Watch a zone you did not touch.** Repeated runs during this work drifted from
+  24.2 ms to 31.6 with `spread` and `lights.Update` climbing 20% — in a change
+  that never went near the light solver. That is the machine heating up under
+  back-to-back builds, not the diff. If an untouched zone moved, none of the
+  numbers mean anything yet; let it cool and measure again.
 
 The light was 9.5 ms and is now 13.0. The difference is one more cascade, and it
 was not bought for looks: at four, light was gathered over **510 world pixels**
@@ -615,3 +625,189 @@ can ask a frame ahead and turn the square red before it is pressed.
 The two refusals are kept apart — `founded_` and `roomy_` in `Editor` — because
 they ask the player for opposite things: one to build from something that holds,
 the other to get out of the way.
+
+### 10.6 The brush became square, and then it became the only shape
+
+`World::Place` and `World::Excavate` — the circular brush of an arbitrary radius
+— are gone. Everything the hand writes is now a whole cell, and a wide stroke is
+a block of cells the caller walks.
+
+That is not tidiness, it is the same bug one more time. A round tool over a
+square grid can only ever leave the corners of the cells it crosses, so digging
+beside a wall left rinds of it standing and the player could not tell why. The
+brush size is now counted in **cells** (`Editor::span_`, one to eight) because
+there is nothing else left for it to be measured in: a size between two cells
+describes nothing that can happen.
+
+`Editor::Lay` and `Editor::Set` collapsed into `Editor::Spend` when they did.
+Laying ground and building stopped being different operations — both write whole
+cells and both spend one block per cell newly filled. What still differs is the
+rule about *where*, and that is asked once, of the cell under the cursor.
+
+`Editor::owed_` survives, and it is worth knowing why given that a placed cell is
+exactly one block: digging a cell out of a *hillside* frees however many of its
+nine vertices the ground happened to fill, and the surface crosses cells at every
+angle. The fraction is real on the way in and never on the way out.
+
+---
+
+## 11. The four building items, and the three mechanics under them
+
+A plank, cobble, a wall and a torch. They look like one feature and they are
+three, which is the whole reason they are worth writing down together.
+
+| item | where it lives | why |
+|---|---|---|
+| wood plank | `kElements`, solid | has a field, collides, is mined — it is a material |
+| cobblestone | `kElements`, solid | the same |
+| wood wall | `kElements`, `background` | has a field and is mined, but does not collide and is drawn behind |
+| torch | `kItems` + `fixture::Fixtures` | an object with a sprite and a light, not an eighteen-pixel square of flame colour |
+
+### 11.1 Digging stone gives cobble, and that is a table row
+
+`ElementDef::yields`, read only through `YieldOf`. `Element::Count` stands for
+"itself", since a constexpr row cannot name itself in its own initialiser.
+
+Rock yields cobblestone, which is Minecraft's rule and is what gives the player
+anything to build with before there is any crafting. It also means the
+generator's own rock is the only rock there is — a player can put cobble back but
+never stone — so ground that was never dug goes on looking different from ground
+that was.
+
+`Editor::owed_` still banks the debt against the material actually dug, not
+against what it yields, so a seam of rock and a wall of cobble never pour their
+remainders into one another.
+
+### 11.2 The wall is the only thing that shares a cell, and it cost the journal a field
+
+A wall is `occupies = false` **on purpose**. Two occupying materials can never
+share a vertex — that is what makes "what is here?" a question with one answer —
+and a wall has to share, because the whole point of it is to stand behind a block
+and still be there when the block is dug out.
+
+Three things follow, and each is somewhere different:
+
+- **It is painted in its own pass**, first, inside the same chunk texture. Being
+  first in there is being behind the ground *and* behind the character, since all
+  the terrain is drawn before the character is — so it costs no second texture, no
+  second blit and no change to the order of the frame. Its colour is dark
+  **opaquely**, never by alpha, or the cache equivalence in §5.5 breaks.
+- **`WriteVertex` drops the chunk's texture for it** even though it clears no
+  silhouette. A wall is in no silhouette — it contests nothing — but it is in the
+  picture, and without this a wall appears only when something else happens to
+  drop the texture.
+- **`World::Edit` grew a second field.** `element` and `behind`. One record per
+  vertex holding both layers is what keeps a wall from being forgotten when the
+  block over it is dug, which is the first case a player will hit.
+
+**Digging order is load-bearing**: `ExcavateCell` takes whatever is in front, and
+only where it took nothing does it take the wall. A spade that took both at once
+would make a wall impossible to keep; one that took neither would make it
+impossible to remove.
+
+`--build` checks all of it, including walking the chunk out of residency and back.
+
+### 11.3 A torch is a third table, and three is the right number
+
+`fixture.h`. An element is a material with a field, a threshold, a rank and a
+spawn rule; an item is a name, a picture and a count. A torch is neither: it has
+a **place** — one cell, chosen by a player — and a picture of a thing rather than
+of a material's face.
+
+It used to be an element and was the wrong shape twice: drawn as a material it
+was a square of flame colour, and laid by the brush it went into every vertex the
+brush covered, so one click lit a room like a furnace. The old row's own comment
+admitted the second.
+
+- **Sparse and permanent**, keyed by cell, on the model of `Grove::remembered_`.
+  No function of position produces a torch somebody hung.
+- **`Illuminate` re-offers the light every frame**, which is the contract
+  `World::AddLight` already had with the lantern, so nothing in the solver knows
+  fixtures exist.
+- **`Undermine`** drops one whose surface was dug away, beside the grove's own
+  pass and for the same reason.
+- **Anchors are a bitmask** — floor, wall, roof, behind — so "any surface" is a
+  real answer and a workbench asking for floor alone is one field.
+
+`fixture::KindOf` matches an item to a fixture **by name**, the same trick
+`flora::SpeciesOf` uses. The alternative is an index written down in two tables
+edited at different times, where the first row inserted above either silently
+makes torches out of apples.
+
+**A torch in the hand lights the way**, added on top of the base lantern rather
+than replacing it. A game that goes black when the last torch is spent has taken
+something away; this gives something.
+
+---
+
+## 12. One texel for every material, and why it was tried the other way
+
+`config::kPixelSize` is 3, every material uses it, and `ElementPaint::texel`
+exists to say so rather than to be varied.
+
+It was varied. Terrain ran at 5 and built blocks at 1, which measured **24.2 ms
+against 26.6** and gave a block eighteen texels across instead of six — room for
+authored pixel art at near enough Minecraft's 16×16. Both ends improved, because
+the cost of a fine texel is paid over the area drawn in it and the world is nearly
+all terrain.
+
+It was also wrong, and the fault is worth keeping written down because the field
+still looks like an invitation.
+
+### 12.1 A pale rind down the side of every block
+
+The draw paints each material as the union of itself and everything that outranks
+it — `World::Occupancy` — and that union is what stops a gap opening between two
+materials whose squares fall differently.
+
+So a coarse material paints the *ground of the fine one above it* in its own big
+squares. Those overhang the block by up to a texel; the fine material then covers
+only its own exact area, and the overhang is left standing. What it looks like is
+a rind along every placed block, brightest where the material underneath is snow.
+
+Two things about it were misleading:
+
+- **It happens with no snow anywhere near.** The union is positive over the block
+  whatever the snow field says, so snow's silhouette is painted in snow's colour
+  over a block hanging in clear air. It was first seen that way and read as a
+  chunk-border artefact.
+- **Removing the union trades it for a worse fault.** Filtering the silhouette to
+  materials sharing a texel opens **two pixels of open sky** round every block,
+  measured. The union is load-bearing.
+
+The way to keep varying texels is to draw each silhouette at the finest texel of
+everything it gathers, and that costs the whole chunk wherever anything is built.
+Worth it for authored art; not worth it for procedural paint, which is what the
+blocks went back to.
+
+### 12.2 Do not key the silhouette on anything the filter does not use
+
+Left behind from the attempt above: `Occupancy` kept a `texel` in its cache key
+after the filter that read it was removed. The draw asked for one silhouette and
+the liquid clamp asked for another, identical, and every chunk built both.
+
+**7.4 ms a frame** — 34.1 ms against 26.6, or 29 fps against 38 — for two copies
+of the same grid. It looked exactly like the machine being warm, and the thing
+that separated the two was `spread` at 1.80 while warm and 1.59 once the
+duplication was gone. A zone you did not touch is the instrument; see §4.
+### 12.3 Where a thing lands still asks the material
+
+`DrawnTop` answers "where was this surface actually *drawn*", and it is what makes
+a tree, the grass and the player's feet sit on the ground instead of floating over
+the contour. With one texel it could be asked without saying about what. With
+several it cannot.
+
+`World::FootingUnder` now reads `OccupantAt` half a step inside the surface and
+quantises onto that material's grid. Without it, a plank floor drawn five times
+finer than the hillside beside it would still be stood on as though it were
+hillside.
+
+The other two callers were checked and deliberately left alone, which is worth
+writing down so neither is "fixed" later:
+
+- **`sod.cpp`** — grass only ever grows on soil, and soil is terrain. Nothing laid
+  by the cell grows anything, so the fine texels never reach it. This is also the
+  hot path the grass band runs on, and it stays a constant.
+- **`grove.cpp`** — this is the profile the *scatter* stands trees on, and the
+  scatter is deliberately blind to what has been dug or built. A plant the player
+  puts down goes through `FootingUnder` instead.

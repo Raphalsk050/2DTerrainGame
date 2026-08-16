@@ -144,6 +144,7 @@ World::World(const terrain::Settings &settings, int spacing) : settings_(setting
         paint_[e] = soil::For(kElements[e], settings_.seed + static_cast<int>(e) * kPaintStride);
     }
 
+
     // The generator's own cutoffs first, since everything below asks it where
     // the ground is and an uncalibrated one answers with no caves at all.
     terrain::Calibrate(settings_);
@@ -578,7 +579,7 @@ World::Chunk &World::Settle(int cx, int cy, Chunk &&chunk) {
     return chunks_.emplace(Key(cx, cy), std::move(chunk)).first->second;
 }
 
-void World::Remember(Vector2 vertex, std::optional<Element> element) {
+void World::Remember(Vector2 vertex, std::optional<Element> element, bool behind) {
     int cx = 0;
     int cy = 0;
     ToChunk(vertex, cx, cy);
@@ -590,21 +591,35 @@ void World::Remember(Vector2 vertex, std::optional<Element> element) {
 
     std::vector<Edit> &bucket = edits_[Key(cx, cy)];
 
-    // Overwritten rather than appended. A vertex has one state, so digging out
-    // what was placed there leaves one record saying it is empty, and a stroke
-    // swept back and forth over the same spot costs what one stroke costs.
+    // Overwritten rather than appended. A vertex has one state per layer, so
+    // digging out what was placed there leaves one record saying it is empty, and
+    // a stroke swept back and forth over the same spot costs what one stroke
+    // costs.
+    //
+    // The layer written is the only one touched. That is the whole of what makes a
+    // wall survive the block in front of it being dug: the two live in one record
+    // and neither erases the other.
     //
     // A linear scan, and it can afford to be: a bucket holds at most the
-    // vertices of one chunk, and a brush of any usable radius covers a hundredth
+    // vertices of one chunk, and a stroke of any usable size covers a hundredth
     // of them.
     for (Edit &edit : bucket) {
         if (edit.i != i || edit.j != j) continue;
 
-        edit.element = element;
+        if (behind) {
+            edit.behind = element;
+        } else {
+            edit.element = element;
+        }
+
         return;
     }
 
-    bucket.push_back({i, j, element});
+    if (behind) {
+        bucket.push_back({.i = i, .j = j, .behind = element});
+    } else {
+        bucket.push_back({.i = i, .j = j, .element = element});
+    }
 }
 
 void World::FromKey(std::int64_t key, int &outI, int &outJ) {
@@ -662,6 +677,20 @@ void World::ApplyEdits(Chunk &chunk, int cx, int cy) const {
 
                 if (edit.element.has_value()) {
                     chunk.fields[ElementIndex(*edit.element)].SetValue(i, j, 1.0f);
+                }
+
+                // The layer behind, cleared and refilled on its own terms. The
+                // generator never puts a wall anywhere — they are all hand-built —
+                // so an empty record is an empty wall and there is nothing to fall
+                // back to.
+                for (std::size_t e = 0; e < kElementCount; e++) {
+                    if (!kElements[e].rules.background) continue;
+
+                    chunk.fields[e].SetValue(i, j, 0.0f);
+                }
+
+                if (edit.behind.has_value()) {
+                    chunk.fields[ElementIndex(*edit.behind)].SetValue(i, j, 1.0f);
                 }
 
                 // So the rebuilt chunk is pinned exactly as the original was, and
@@ -931,6 +960,13 @@ void World::WriteVertex(Element element, Vector2 vertex, float value) {
                 DropPainted(cx + dx, cy + dy);
             }
 
+            // A wall is in no silhouette — it contests nothing, so there is no
+            // maximum for it to be part of — but it *is* in the picture, painted
+            // behind the ground. Without this a wall put up appears only when
+            // something else happens to drop the chunk's texture, which is the kind
+            // of bug that looks like the click was missed.
+            if (Def(element).rules.background) DropPainted(cx + dx, cy + dy);
+
             if (Def(element).rules.flows && value > water::kDryMass) chunk.holdsLiquid = true;
         }
     }
@@ -1093,6 +1129,30 @@ bool World::ClearVertex(Vector2 vertex, Yield &yield) {
     return removed;
 }
 
+bool World::ClearWall(Vector2 vertex, Yield &yield) {
+    bool removed = false;
+
+    for (std::size_t e = 0; e < kElementCount; e++) {
+        const ElementDef &def = kElements[e];
+        if (!def.rules.background) continue;
+
+        const Element element = static_cast<Element>(e);
+        const float value     = ValueAt(element, vertex);
+
+        if (value <= 0.0f) continue;
+
+        if (value > def.threshold) yield[e]++;
+
+        WriteVertex(element, vertex, 0.0f);
+        MarkEdited(vertex);
+        Remember(vertex, std::nullopt, true);
+
+        removed = true;
+    }
+
+    return removed;
+}
+
 bool World::VertexMeets(Vector2 vertex, Rectangle rect) const {
     // Empty stands for "nothing to keep clear", which is what a caller with no
     // body to protect passes. Tested rather than assumed, since a zero-width
@@ -1132,10 +1192,6 @@ World::Stroke World::ApplyStroke(const Reach &reach, std::optional<Element> plac
         for (int j = reach.j0; j <= reach.j1; j++) {
             const Vector2 vertex = {i * step, j * step};
 
-            // A cell takes the whole of its range and says so with no radius at
-            // all; a brush keeps to its circle inside the square that bounds it.
-            if (reach.radius > 0.0f && !CheckCollisionPointCircle(vertex, reach.centre, reach.radius)) continue;
-
             // A liquid is poured into a space, not pressed into one. It does
             // not clear what it lands on; it simply does not land there.
             if (place.has_value() && Def(*place).rules.flows) {
@@ -1145,6 +1201,23 @@ World::Stroke World::ApplyStroke(const Reach &reach, std::optional<Element> plac
 
                 WriteVertex(*place, vertex, water::kMaxMass);
                 edit.filled++;
+                continue;
+            }
+
+            // A wall goes in behind whatever is already there and takes nothing
+            // out. It contests no vertex, so there is nothing to clear and nothing
+            // to hand back — which is what lets a wall be put up through a wall of
+            // planks and be there when they come down.
+            if (place.has_value() && Def(*place).rules.background) {
+                const bool gained = ValueAt(*place, vertex) <= Def(*place).threshold;
+
+                if (gained && edit.filled >= budget) return finish();
+
+                WriteVertex(*place, vertex, 1.0f);
+                MarkEdited(vertex);
+                Remember(vertex, *place, true);
+
+                if (gained) edit.filled++;
                 continue;
             }
 
@@ -1187,7 +1260,7 @@ World::Stroke World::ApplyStroke(const Reach &reach, std::optional<Element> plac
                 // a faint gradient.
                 WriteVertex(*place, vertex, 1.0f);
                 MarkEdited(vertex);
-                Remember(vertex, *place);
+                Remember(vertex, *place, false);
 
                 // Only where the vertex actually changed hands, and only for the
                 // one material grass grows on. A brush swept back over its own
@@ -1236,7 +1309,7 @@ World::Stroke World::ApplyStroke(const Reach &reach, std::optional<Element> plac
                                || ValueAt(Element::Soil, {vertex.x, vertex.y + step}) > Def(Element::Soil).threshold;
 
             if (ClearVertex(vertex, edit.freed)) {
-                Remember(vertex, std::nullopt);
+                Remember(vertex, std::nullopt, false);
 
                 if (overSoil) {
                     Disturb(vertex);
@@ -1258,35 +1331,38 @@ World::Reach World::CellReach(int cx, int cy) const {
     return {.i0 = cx * across, .j0 = cy * across, .i1 = cx * across + across - 1, .j1 = cy * across + across - 1};
 }
 
-// Half a lattice step, which is what the build grid is offset by.
-//
-// A cell *is* its three vertices, and a vertex owns the square centred on it —
-// the same square VertexMeets and OverlapsSolid test against, and the same one
-// the contour crosses half a step out from the last filled vertex. So the cell
-// holding vertices 3cx, 3cx+1 and 3cx+2, which stand at 18cx, 18cx+6 and 18cx+12,
-// covers 18cx-3 to 18cx+15 and not 18cx to 18cx+18.
-//
-// Getting this wrong is not subtle and it was wrong: the preview was drawn on the
-// second of those and the block landed on the first, so every piece appeared three
-// pixels up and to the left of the square it had been promised.
-inline constexpr float kCellOffset = config::kResolution / 2.0f;
 
 void World::ToCell(Vector2 world, int &outCx, int &outCy) {
-    outCx = FloorDiv(static_cast<int>(std::floor(world.x + kCellOffset)), config::kBuildCell);
-    outCy = FloorDiv(static_cast<int>(std::floor(world.y + kCellOffset)), config::kBuildCell);
+    outCx = FloorDiv(static_cast<int>(std::floor(world.x + config::kCellOffset)), config::kBuildCell);
+    outCy = FloorDiv(static_cast<int>(std::floor(world.y + config::kCellOffset)), config::kBuildCell);
 }
 
 Rectangle World::CellBounds(int cx, int cy) {
     const auto side = static_cast<float>(config::kBuildCell);
 
-    return {cx * side - kCellOffset, cy * side - kCellOffset, side, side};
+    return {cx * side - config::kCellOffset, cy * side - config::kCellOffset, side, side};
+}
+
+bool World::WalledAt(int cx, int cy) const {
+    const Rectangle at = CellBounds(cx, cy);
+
+    const Vector2 middle = {at.x + at.width * 0.5f, at.y + at.height * 0.5f};
+
+    for (std::size_t e = 0; e < kElementCount; e++) {
+        const ElementDef &def = kElements[e];
+        if (!def.rules.background) continue;
+
+        if (ValueAt(static_cast<Element>(e), middle) > def.threshold) return true;
+    }
+
+    return false;
 }
 
 bool World::CellClear(int cx, int cy, Rectangle keepClear) const {
     if (keepClear.width <= 0.0f || keepClear.height <= 0.0f) return true;
 
     // The cell's bounds are exactly the union of the squares its vertices own —
-    // see kCellOffset — and VertexMeets tests one of those squares against a
+    // see config::kCellOffset — and VertexMeets tests one of those squares against a
     // rectangle. So the body reaching any vertex of the cell is the body reaching
     // the cell, asked once instead of nine times.
     return !CheckCollisionRecs(CellBounds(cx, cy), keepClear);
@@ -1315,7 +1391,30 @@ World::Stroke World::PlaceCell(Element element, int cx, int cy, Rectangle keepCl
 }
 
 World::Stroke World::ExcavateCell(int cx, int cy) {
-    return ApplyStroke(CellReach(cx, cy), std::nullopt, 0, {});
+    Stroke out = ApplyStroke(CellReach(cx, cy), std::nullopt, 0, {});
+
+    // Whatever was in front of the wall, if anything was.
+    for (std::size_t e = 0; e < kElementCount; e++) {
+        if (out.freed[e] > 0) return out;
+    }
+
+    // Nothing was, so the wall is what the spade was pointed at.
+    //
+    // Terraria's order, and the only one that lets a wall be built behind a block
+    // and taken down again: while the block is there the spade takes the block,
+    // and the wall is reachable exactly when the space in front of it is open. A
+    // spade that took both at once would make a wall impossible to keep, and one
+    // that took neither would make it impossible to remove.
+    const Reach reach = CellReach(cx, cy);
+    const float step  = static_cast<float>(spacing_);
+
+    for (int i = reach.i0; i <= reach.i1; i++) {
+        for (int j = reach.j0; j <= reach.j1; j++) {
+            ClearWall({static_cast<float>(i) * step, static_cast<float>(j) * step}, out.freed);
+        }
+    }
+
+    return out;
 }
 
 void World::StepWater(Rectangle active) {
@@ -2308,7 +2407,19 @@ bool World::FootingUnder(Vector2 world, float reach, float &outTop) const {
     // same correction ReadGround makes for the trees. A square is filled when its
     // centre is inside, so the drawn surface sits up to most of a texel below the
     // contour, and anything seated on the contour instead floats by that much.
-    const auto seated = [](float crossing) { return marching_squares::DrawnTop(crossing, config::kPixelSize); };
+    // Onto *that material's* grid, since materials are no longer all drawn at one
+    // size — see ElementPaint::texel. Read half a step inside the surface, which is
+    // where the material whose top row of squares this is actually sits; on the
+    // crossing itself the answer is whatever the contour rounded to.
+    //
+    // Without this a plank floor, drawn five times finer than the hillside beside
+    // it, would still be stood on as though it were hillside, and everything put
+    // down on it would sit up to a terrain texel above or below the boards.
+    const auto seated = [&](float crossing) {
+        const std::optional<Element> under = OccupantAt({world.x, crossing + step * 0.5f});
+
+        return marching_squares::DrawnTop(crossing, under.has_value() ? Def(*under).paint.texel : config::kPixelSize);
+    };
 
     // Inside something already. The answer is the top of whatever the cursor is
     // in, found by walking up: a cursor in the middle of a ramp means the ramp,
@@ -2699,6 +2810,24 @@ void World::PaintChunk(Painted &slot, int cx, int cy) {
     const Chunk *chunk = Find(cx, cy);
 
     if (chunk != nullptr) {
+        // The walls first, so everything else covers them.
+        //
+        // Into the same texture rather than a layer of its own, and that is worth
+        // saying: a wall is behind the ground and behind the character, and the
+        // whole of the terrain is already drawn before the character is. So being
+        // first in here is being behind both, for no second texture, no second
+        // blit, and no change to the order of the frame.
+        //
+        // They take no part in the exclusion order below — a wall contests no
+        // vertex, so it is in nobody's silhouette and has none of its own.
+        for (std::size_t e = 0; e < kElementCount; e++) {
+            const ElementDef &def = kElements[e];
+            if (!def.rules.background) continue;
+
+            marching_squares::DrawPainted(chunk->fields[e], def.threshold, paint_[e], Outline(def.contour),
+                                          def.paint.texel, covered);
+        }
+
         // Painted from the back, each material drawn as itself together with
         // everything that outranks it — the order DrawTerrain used to walk across
         // every chunk at once. Chunks tile without overlapping, so drawing one
@@ -2710,7 +2839,7 @@ void World::PaintChunk(Painted &slot, int cx, int cy) {
                 const std::size_t index = ElementIndex(element);
 
                 marching_squares::DrawPainted(chunk->fields[index], def.threshold, paint_[index],
-                                              Outline(def.contour), config::kPixelSize, covered);
+                                              Outline(def.contour), def.paint.texel, covered);
                 continue;
             }
 
@@ -2718,7 +2847,7 @@ void World::PaintChunk(Painted &slot, int cx, int cy) {
             if (silhouette.Empty()) continue;
 
             marching_squares::DrawPainted(silhouette.field, 0.0f, paint_[ElementIndex(element)],
-                                          Outline(def.contour), config::kPixelSize, covered,
+                                          Outline(def.contour), def.paint.texel, covered,
                                           {.firstCol = silhouette.firstCol,
                                            .lastCol  = silhouette.lastCol,
                                            .firstRow = silhouette.firstRow,
@@ -2890,7 +3019,7 @@ void World::DrawTerrain(Rectangle view) const {
 
                     if (config::kPixelArt) {
                         marching_squares::DrawPainted(chunk->fields[index], def.threshold, paint_[index],
-                                                      Outline(def.contour), config::kPixelSize, view);
+                                                      Outline(def.contour), def.paint.texel, view);
                     } else {
                         marching_squares::DrawFilled(chunk->fields[index], def.threshold, Body(def));
                         if (config::kDrawContours) {
@@ -2928,7 +3057,7 @@ void World::DrawTerrain(Rectangle view) const {
                     PROFILE_ZONE("paint ground");
 
                     marching_squares::DrawPainted(field, 0.0f, paint_[ElementIndex(element)], Outline(def.contour),
-                                                  config::kPixelSize, view,
+                                                  def.paint.texel, view,
                                                   {.firstCol = silhouette.firstCol,
                                                    .lastCol  = silhouette.lastCol,
                                                    .firstRow = silhouette.firstRow,
@@ -3007,7 +3136,7 @@ void World::DrawTerrain(Rectangle view) const {
 
                 if (config::kPixelArt) {
                     marching_squares::DrawPainted(chunk->fields[e], def.threshold, paint_[e], Outline(def.contour),
-                                                  config::kPixelSize, view);
+                                                  def.paint.texel, view);
                 } else {
                     marching_squares::DrawFilled(chunk->fields[e], def.threshold, Body(def));
                     if (config::kDrawContours) marching_squares::DrawContour(chunk->fields[e], def.threshold, def.contour);
@@ -3043,7 +3172,7 @@ void World::DrawLiquids(Rectangle view) const {
 
                 if (config::kPixelArt) {
                     marching_squares::DrawPainted(field, style.threshold, paint_[e], Outline(surface),
-                                                  config::kPixelSize);
+                                                  style.paint.texel);
                 } else {
                     marching_squares::DrawFilled(field, style.threshold, body);
                     if (config::kDrawContours) marching_squares::DrawContour(field, style.threshold, surface);

@@ -3,6 +3,7 @@
 #include "config.h"
 #include "debug_view.h"
 #include "editor.h"
+#include "fixture.h"
 #include "grove.h"
 #include "hotbar.h"
 #include "light_layer.h"
@@ -69,6 +70,14 @@ light::Radiance Lantern(float strength) {
 
     return {config::kLanternGlow.r * kByte * strength, config::kLanternGlow.g * kByte * strength,
             config::kLanternGlow.b * kByte * strength};
+}
+
+// And any lamp described the way the tables describe one.
+light::Radiance Glow(const ElementLight &light) {
+    constexpr float kByte = 1.0f / 255.0f;
+
+    return {light.glow.r * kByte * light.strength, light.glow.g * kByte * light.strength,
+            light.glow.b * kByte * light.strength};
 }
 
 // The world region the frame covers. Read from the window rather than from the
@@ -2213,8 +2222,8 @@ void ReportFrame(World &world, Grove &grove, Inventory &gathered, Vector2 at, in
 // inventory open the world goes through a blur and the display does not, and a
 // blur needs the world rendered into a target of its own. Neither half opens the
 // frame, so the caller decides whether that target is the screen.
-void DrawScene(const World &world, const Grove &grove, const Inventory &inventory, const Player &player,
-               const scuff::Trail &trail,
+void DrawScene(const World &world, const Grove &grove, const fixture::Fixtures &fixtures, const Inventory &inventory,
+               const Player &player, const scuff::Trail &trail,
                const Editor &editor, const LiquidLayer &liquids, const LightLayer &lights, const Camera2D &camera,
                const debug_view::Toggles &debug, bool aiming) {
     const Rectangle view = ViewBounds(camera);
@@ -2266,6 +2275,11 @@ void DrawScene(const World &world, const Grove &grove, const Inventory &inventor
         // What the wood left on the ground, over the plants and under the character.
         grove.Fallen().Draw();
     }
+
+    // What the player has put up. Over the ground it is fixed to and under the
+    // character, so walking past a torch passes in front of it — which is where a
+    // thing on a wall belongs, and is the same place the pickups above sit.
+    fixtures.Draw(view);
 
     // Under the character and over the ground, which is where dust off a foot
     // belongs: it is in front of the hillside it came out of and behind the boot
@@ -3176,6 +3190,8 @@ int main(int argc, char **argv) {
     // and they are settled by walking through a wood at each setting rather than
     // by argument, the same way the lantern and the cave coverage were.
     Grove grove;
+
+    fixture::Fixtures fixtures;
     grove.Configure({.seed = settings.seed}, settings, world.Sky());
 
 
@@ -3450,8 +3466,9 @@ int main(int argc, char **argv) {
         // What that needs is for kPixelSize to divide the cell *and* the half-step
         // it is offset by, so the only sizes that work at all are the divisors of
         // kCellOffset.
-        const auto drawnSpan = [](float from, float span, float &outFrom, float &outTo) {
-            const float pixel = config::kPixelSize;
+        const float pixel = Def(what).paint.texel;
+
+        const auto drawnSpan = [pixel](float from, float span, float &outFrom, float &outTo) {
 
             const int m0 = static_cast<int>(std::floor(from / pixel));
             const int m1 = static_cast<int>(std::ceil((from + span) / pixel));
@@ -3492,15 +3509,15 @@ int main(int argc, char **argv) {
         const bool steady = (fewest == most) && slip < 0.001f;
 
         std::printf("drawn:    %d..%d squares of %.0f px across a %d px cell, edges out by %.1f px\n", fewest, most,
-                    config::kPixelSize, config::kBuildCell, slip);
+                    pixel, config::kBuildCell, slip);
 
         if (fewest != most) {
             std::printf("WRONG: identical blocks are drawn %d and %d squares wide — %.0f does not divide %d\n", fewest,
-                        most, config::kPixelSize, config::kBuildCell);
+                        most, pixel, config::kBuildCell);
         } else if (slip >= 0.001f) {
             std::printf("WRONG: blocks are drawn %.1f px off their own cell — %.0f does not divide the %.0f px"
                         " half-step the grid is offset by\n",
-                        slip, config::kPixelSize, config::kResolution / 2.0f);
+                        slip, pixel, config::kResolution / 2.0f);
         }
 
         const bool whole = (filled == cells * config::kBuildCellArea);
@@ -3509,14 +3526,125 @@ int main(int argc, char **argv) {
         if (!whole) std::printf("WRONG: a cell did not fill its own %d vertices\n", config::kBuildCellArea);
         if (!even) std::printf("WRONG: digging returned %d vertices against %d laid\n", freed, filled);
 
-        if (whole && even && square && steady) {
+        // The wall and the block that shares its cell — the one pair in the world
+        // that occupies the same place, and the only thing here a journal of one
+        // material per vertex could not have described.
+        //
+        // Three things to get wrong, all of them silent: the wall could be wiped
+        // out by the block going in front of it, the spade could take both at once
+        // or neither, and the pair could survive in memory but not survive the
+        // chunk being dropped and rebuilt.
+        const int wx = cells + 4;
+
+        const Rectangle wall = World::CellBounds(wx, cy);
+        const Vector2 middle = {wall.x + wall.width * 0.5f, wall.y + wall.height * 0.5f};
+
+        world.PlaceCell(Element::WoodWall, wx, cy);
+        world.PlaceCell(Element::WoodPlank, wx, cy);
+
+        const bool together = world.WalledAt(wx, cy) && world.OccupantAt(middle) == Element::WoodPlank;
+
+        // Walked far enough away that the chunk is released, then back — the same
+        // check planning.md §4.5 describes for an ordinary edit.
+        world.Update({static_cast<float>(wx) * config::kBuildCell + 12000.0f, 0.0f, 1000.0f, 600.0f});
+        world.Update({static_cast<float>(wx) * config::kBuildCell - 500.0f, middle.y - 300.0f, 1000.0f, 600.0f});
+
+        const bool kept = world.WalledAt(wx, cy) && world.OccupantAt(middle) == Element::WoodPlank;
+
+        // The spade takes the block first and the wall only once the block is gone.
+        const World::Stroke first = world.ExcavateCell(wx, cy);
+
+        const bool blockFirst = first.freed[ElementIndex(Element::WoodPlank)] > 0
+                             && first.freed[ElementIndex(Element::WoodWall)] == 0 && world.WalledAt(wx, cy);
+
+        const World::Stroke second = world.ExcavateCell(wx, cy);
+
+        const bool wallAfter = second.freed[ElementIndex(Element::WoodWall)] > 0 && !world.WalledAt(wx, cy);
+
+        const bool layered = together && kept && blockFirst && wallAfter;
+
+        if (!together) std::printf("WRONG: a plank set in front of a wall did not leave both standing\n");
+        if (!kept) std::printf("WRONG: the pair did not survive the chunk being dropped and rebuilt\n");
+        if (!blockFirst) std::printf("WRONG: digging took the wall before the block in front of it\n");
+        if (!wallAfter) std::printf("WRONG: digging the open cell did not take the wall\n");
+
+        if (layered) std::printf("layered: a wall keeps its cell under a block, and is dug out after it\n");
+
+        if (whole && even && square && steady && layered) {
             std::printf("\nexact: %d cells cost %.0f blocks and gave back %.0f\n", laid, cost, back);
             std::printf("aligned: every point in a cell names it, and its vertices sit inside it\n");
             std::printf("drawn:   every cell rasterises to the same squares, on its own edges\n");
         }
 
+        // And a picture of it, where one was asked for.
+        //
+        // Everything above is arithmetic, and none of it can see whether the face
+        // a material draws is the face somebody authored — a picture tiled a third
+        // of a block out passes every check here and is obvious the moment it is
+        // looked at. This builds a patch of wall out of each cell-laid material and
+        // draws it through the real path, cache and all.
+        if (argc >= 4 && TextIsEqual(argv[3], "--png")) {
+            const int side = 9;
+
+            // Well clear of the run above and of any terrain.
+            const int px = 60;
+            const int py = -50;
+
+            const Element kinds[] = {Element::WoodPlank, Element::Cobblestone, Element::WoodWall};
+
+            const Rectangle around = {static_cast<float>(px) * config::kBuildCell - 400.0f,
+                                      static_cast<float>(py) * config::kBuildCell - 400.0f,
+                                      static_cast<float>(3 * (side + 2) + 1) * config::kBuildCell + 800.0f,
+                                      static_cast<float>(side + 2) * config::kBuildCell + 800.0f};
+
+            // Resident before anything is laid into them. A cell written into a
+            // chunk that is not here yet is remembered and replayed later, which is
+            // correct and is not what this picture is testing — and getting it
+            // wrong leaves a seam exactly on the chunk border, which looks like a
+            // fault in the drawing.
+            world.Update(around);
+
+            for (int k = 0; k < 3; k++) {
+                const int ox = px + k * (side + 2);
+
+                // Snow packed round each patch, because that is the case the
+                // fringe shows in and it is not a hypothetical: snow is drawn at
+                // the terrain's coarse texel and is outranked by everything built,
+                // so its silhouette used to reach out over a block and paint the
+                // ground around it in its own big squares. The block then covered
+                // only its own exact area and the overhang stayed — a pale rind
+                // down the side of every piece, in any chunk cold enough to hold
+                // snow.
+                for (int i = -2; i < side + 2; i++) {
+                    for (int j = -2; j < side + 2; j++) world.PlaceCell(Element::Snow, ox + i, py + j);
+                }
+
+                for (int i = 0; i < side; i++) {
+                    for (int j = 0; j < side; j++) world.PlaceCell(kinds[k], ox + i, py + j);
+                }
+            }
+
+            const Rectangle strip = {static_cast<float>(px) * config::kBuildCell - 20.0f,
+                                     static_cast<float>(py) * config::kBuildCell - 20.0f,
+                                     static_cast<float>(3 * (side + 2) + 1) * config::kBuildCell + 40.0f,
+                                     static_cast<float>(side + 2) * config::kBuildCell + 40.0f};
+
+            Inventory unused{};
+
+            // Unlit, which is the whole point of it: what a material's own face
+            // looks like and what the light is doing to it are two questions, and
+            // a solid wall of blocks puts its own middle in the dark — so a lit
+            // picture of one shows the light and not the drawing.
+            // Weather forced clear, or what falls out of the sky lands in the
+            // picture: at this height a shower draws streaks straight down the
+            // wall, and they read as seams in the drawing rather than as rain.
+            DrawProbe(world, grove, unused, strip, argv[4], 4, 0.0f, false, 0, 0, 0);
+
+            std::printf("wrote %s\n", argv[4]);
+        }
+
         CloseWindow();
-        return (whole && even && square && steady) ? 0 : 1;
+        return (whole && even && square && steady && layered) ? 0 : 1;
     }
 
     if (timing) {
@@ -3851,6 +3979,12 @@ int main(int argc, char **argv) {
             // time it scrolls in.
             grove.Update(world, ViewBounds(camera), player.Centre(), world.Sky().Time(), dt, inventory);
 
+            // Anything whose surface has been dug out from under it comes down.
+            // Beside the grove's own pass and for the same reason: what a fixture
+            // is fixed to is the world, and the world is what the player has just
+            // been changing.
+            fixtures.Undermine(world, grove.Fallen(), world.Sky().Time());
+
             // The two that read the mouse wait out the click that closed the
             // panel; the plants above do not, since nothing about them is a
             // click.
@@ -3864,7 +3998,7 @@ int main(int argc, char **argv) {
                 // ninety-six, and a block laid into where the body is about to be
                 // is a block the body is stopped by rather than buried in.
                 const char *said =
-                    editor.Update(world, inventory, grove, camera, player.Bounds(), world.Sky().Time());
+                    editor.Update(world, inventory, grove, fixtures, camera, player.Bounds(), world.Sky().Time());
 
                 if (said != nullptr) {
                     notice    = said;
@@ -3874,7 +4008,10 @@ int main(int argc, char **argv) {
         }
 
         if (!typing) debug_view::ReadToggles(debug);
-        if (!typing && IsKeyPressed(KEY_R)) world.Reset();
+        if (!typing && IsKeyPressed(KEY_R)) {
+            world.Reset();
+            fixtures.Clear();
+        }
 
         // An action rather than a state, so it is read here beside the other one and
         // not held in the debug toggles. Asking again while one is running queues
@@ -3994,7 +4131,32 @@ int main(int argc, char **argv) {
             // Re-offered every frame rather than registered once. A light that has
             // to be renewed to keep burning needs nothing told to it when the thing
             // carrying it moves, and nothing told to it when that thing is gone.
-            world.AddLight(player.Centre(), Lantern(lantern), config::kLanternRadius);
+            // A torch in the hand is a torch, held up. The base lantern stays
+            // underneath it rather than being replaced: what it is for is placing a
+            // foot in the dark, and a game that goes black whenever the last torch
+            // is spent is a game that has taken something away rather than given
+            // something. Holding one lights the way properly.
+            const Stack &carried = inventory.Held();
+
+            const bool lit = carried.holds == Holds::Item && carried.count > 0
+                          && Def(carried.AsItem()).placement == Placement::Fixture;
+
+            if (lit) {
+                const std::optional<fixture::Kind> kind = fixture::KindOf(carried.AsItem());
+
+                if (kind.has_value()) {
+                    const ElementLight &glow = fixture::Of(*kind).light;
+
+                    world.AddLight(player.Centre(), Lantern(lantern) + Glow(glow), config::kLanternRadius * 3.0f);
+                } else {
+                    world.AddLight(player.Centre(), Lantern(lantern), config::kLanternRadius);
+                }
+            } else {
+                world.AddLight(player.Centre(), Lantern(lantern), config::kLanternRadius);
+            }
+
+            // And every one that has been put up, re-offered on the same terms.
+            fixtures.Illuminate(world, active);
 
             // Drifted before the light is solved, because the shade the cloud casts is
             // read during the solve. Advancing it afterwards would light every frame by
@@ -4044,7 +4206,7 @@ int main(int argc, char **argv) {
         // only the blurred result is drawn once the frame is open.
         if (packOpen) {
             backdrop.Capture();
-            DrawScene(world, grove, inventory, player, trail, editor, liquids, lights, camera, debug, !packOpen);
+            DrawScene(world, grove, fixtures, inventory, player, trail, editor, liquids, lights, camera, debug, !packOpen);
             backdrop.Finish();
         }
 
@@ -4054,7 +4216,7 @@ int main(int argc, char **argv) {
             PROFILE_ZONE("DrawScene");
 
             if (packOpen) backdrop.Compose(config::kPanelDim);
-            else DrawScene(world, grove, inventory, player, trail, editor, liquids, lights, camera, debug, !packOpen);
+            else DrawScene(world, grove, fixtures, inventory, player, trail, editor, liquids, lights, camera, debug, !packOpen);
         }
 
         {

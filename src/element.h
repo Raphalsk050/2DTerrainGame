@@ -28,6 +28,7 @@ enum class Element {
     Snow,
     WoodPlank,
     Cobblestone,
+    WoodWall,
     Coal,
     Copper,
     Iron,
@@ -76,6 +77,21 @@ struct ElementRules {
     // Every occupying material needs its own value. Two sharing one would
     // overlap, since neither gives way to the other.
     int precedence = 0;
+
+    // Sits behind the world rather than in it: drawn before the ground, walked
+    // through, and never in contest for a vertex.
+    //
+    // This is Terraria's wall, and the whole of what makes it a *second layer*
+    // rather than a fifteenth material is that it does not occupy. Two occupying
+    // materials can never share a vertex — that is what makes "what is here?" a
+    // question with one answer — and a wall has to share, because the point of it
+    // is to stand behind a block and still be there when the block is dug out.
+    //
+    // So it keeps its own field, is cut back by nothing, cuts back nothing, and is
+    // painted in its own pass. What it costs is that the digging order has to be
+    // written down somewhere, since "what is here" now has two answers: the spade
+    // takes the block first and the wall only once the block is gone.
+    bool background = false;
 };
 
 // How the right hand puts a material into the world.
@@ -503,6 +519,32 @@ struct ElementPaint {
     // alone gives clouds inside the stone. Zero for anything with no bedding to
     // show, which is most things that are not stone.
     float strata = 0.0f;
+
+    // Side of one drawn square, in world units, for this material.
+    //
+    // Every row uses config::kPixelSize today and **they all have to**, which is
+    // worth writing down because the field looks like an invitation to vary it and
+    // varying it is a bug.
+    //
+    // The draw paints each material as the union of itself and everything that
+    // outranks it — see World::Occupancy — and that union is what stops a gap
+    // opening between two materials whose squares fall differently. So a coarse
+    // material paints the *ground of the fine one above it* in its own big squares,
+    // which overhang the block by up to a texel; the fine material then covers only
+    // its own exact area and the overhang is left standing. What that looks like is
+    // a pale rind down the side of every placed block, brightest where the material
+    // underneath is snow — and it happens even where there is no snow within a mile,
+    // because the union is positive over the block whatever the snow field says.
+    //
+    // Removing the union instead trades the fringe for a two-pixel gap of open sky
+    // round every block, which is worse. Measured both ways.
+    //
+    // The way to make this varyable is to draw each silhouette at the finest texel
+    // of everything it gathers, and that costs the whole chunk. It was worth it
+    // while blocks were going to carry authored pixel art at eighteen texels
+    // across; it is not worth it for procedural paint.
+    float texel = config::kPixelSize;
+
 };
 
 struct ElementDef {
@@ -542,6 +584,17 @@ struct ElementDef {
     // Brush unless the row says otherwise, so that adding this changed nothing
     // about any material that was already here.
     Laying laying = Laying::Brush;
+
+    // What comes up in the hand when this is dug, where that is not itself.
+    //
+    // Stone breaks into cobble, which is Minecraft's rule and the reason the
+    // player has anything to build with before there is any crafting: what is dug
+    // out of a hillside is not the same thing as the hillside. Everything else
+    // comes up as what it was.
+    //
+    // `Count` stands for "itself", because a row of a constexpr table cannot name
+    // itself in its own initialiser. Read it through YieldOf and never directly.
+    Element yields = Element::Count;
 
     ElementRules rules;
     ElementSpawn spawn;
@@ -594,6 +647,16 @@ inline constexpr ElementDef kElements[] = {
                 "cdccdc",
             },
         .stack = 64,
+
+        // Broken stone, not stone. What a pick takes out of a hillside is rubble,
+        // and rubble is what there is to build with — which is also the whole of
+        // why the world starts the player with nothing and a hillside.
+        //
+        // It means the untouched rock of the generator is the only rock there is:
+        // a player can never put it back, only cobble in its place. That is
+        // Minecraft's arrangement and it is worth keeping for the same reason —
+        // ground that was never dug looks different from ground that was.
+        .yields = Element::Cobblestone,
 
         .rules = {.blocksBodies = true, .blocksLiquid = true, .occupies = true, .precedence = 0},
         .spawn   = {.generator = Generator::Terrain},
@@ -904,7 +967,11 @@ inline constexpr ElementDef kElements[] = {
 
                     // Boards are courses, like stone is, and at a lower contrast:
                     // enough for a wall to read as laid up out of lengths.
-                    .strata = 0.85f},
+                    .strata = 0.85f,
+
+                    // Eighteen texels across a block, which is where authored
+                    // pixel art goes. See ElementPaint::texel.
+                    },
         .contour = {104, 72, 40, 255},
 
         // The joint is the whole of it. Two boards with a dark seam between them
@@ -973,6 +1040,49 @@ inline constexpr ElementDef kElements[] = {
         // The stone it came from, unchanged. Breaking rock up does not make it
         // let light through.
         .light = {.opacity = 0.8f},
+    },
+    {
+        .name      = "wood wall",
+        .threshold = 0.45f,
+
+        // The plank's own tones taken down towards the dark, and that is the whole
+        // of how a wall reads as *behind*. Not by being faded — see the cache rule
+        // in CLAUDE.md §5.5, which needs every colour the ground is drawn in to be
+        // opaque — but by being the colour a plank is when no light reaches it.
+        //
+        // Far enough down that a wall is never mistaken for the floor in front of
+        // it. A player builds a room out of both at once, and the two have to be
+        // told apart at a glance in the dark.
+        .paint   = {.tone   = {{40, 28, 16, 255}, {56, 39, 22, 255}, {72, 52, 31, 255}, {88, 68, 44, 255}},
+                    .grain  = 0.28f,
+                    .patch  = 0.08f,
+                    .strata = 0.85f},
+        .contour = {40, 28, 16, 255},
+
+        // The plank's face, read in the dark. The same joint in the same place, so
+        // a wall behind a wall of planks lines up with it.
+        .icon =
+            {
+                "aaaaaa",
+                "abbbab",
+                "bbbbbb",
+                "dddddd",
+                "bcbccb",
+                "cccccc",
+            },
+        .stack  = 64,
+        .laying = Laying::Cell,
+
+        // Behind everything and in the way of nothing. No precedence, because it
+        // never enters the contest — see ElementRules::background.
+        .rules = {.background = true},
+        .spawn = {.generator = Generator::None},
+
+        // Casts nothing. A wall that dimmed the light would darken the room it is
+        // the back of, and the torch standing in front of it would be solving a
+        // problem the wall had just invented. Deliberate, and the first thing to
+        // revisit if a built room ever wants to be dark on its own.
+        .light = {.opacity = 0.0f},
     },
     // The ores below follow Minecraft's set and its ordering, on a scale of one
     // block to sixteen pixels: its sea level at Y 64 is this world's y 144 and
@@ -1342,6 +1452,29 @@ static_assert(ElementIconsAreSquare(), "every element icon is six rows of six ch
 // Two occupying materials sharing a precedence would overlap, since neither one
 // gives way to the other, and the vertex they share would have no single
 // answer to what is in it.
+// A material laid by the cell has to be drawn on a grid that lands on the cell's
+// own edges. Those are at multiples of config::kBuildCell offset by half a lattice
+// step, so its texel has to divide both — which leaves 1 and 3.
+//
+// Checked here rather than left to be noticed, because what getting it wrong looks
+// like is a wall with bites out of it, and it took a while to find the first time.
+consteval bool BuildTexelsLandOnCells() {
+    for (const ElementDef &def : kElements) {
+        if (def.laying != Laying::Cell) continue;
+
+        const int texel = static_cast<int>(def.paint.texel);
+
+        if (static_cast<float>(texel) != def.paint.texel || texel <= 0) return false;
+        if (config::kBuildCell % texel != 0) return false;
+        if ((config::kResolution / 2) % texel != 0) return false;
+    }
+
+    return true;
+}
+
+static_assert(BuildTexelsLandOnCells(),
+              "a material laid by the cell must be drawn on a texel dividing kBuildCell and half a lattice step");
+
 consteval bool PrecedencesAreDistinct() {
     for (std::size_t a = 0; a < kElementCount; a++) {
         if (!kElements[a].rules.occupies) continue;
@@ -1397,6 +1530,17 @@ static_assert(CoversFitUnderTheCrust(), "a cover may not reach deeper than kCove
 
 inline constexpr const ElementDef &Def(Element element) {
     return kElements[ElementIndex(element)];
+}
+
+// What digging this material puts in the hand.
+//
+// The one place ElementDef::yields is read, so that "itself" is spelled out once
+// rather than at every call site — and so that a row which forgets to say
+// anything still answers correctly.
+inline constexpr Element YieldOf(Element element) {
+    const Element what = Def(element).yields;
+
+    return (what == Element::Count) ? element : what;
 }
 
 // Vertical displacement of a band's two edges at a horizontal position.

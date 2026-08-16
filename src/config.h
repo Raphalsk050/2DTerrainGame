@@ -53,6 +53,15 @@ inline constexpr int kBuildCell = 3 * kResolution;
 inline constexpr int kBuildCellVertices = kBuildCell / kResolution;
 inline constexpr int kBuildCellArea     = kBuildCellVertices * kBuildCellVertices;
 
+// How far the build grid is offset from a multiple of the cell, in world pixels.
+//
+// Half a lattice step. A cell *is* its three vertices, and a vertex owns the
+// square centred on it — the same square VertexMeets tests against and the same
+// one the contour crosses. So the cell holding the vertices at 18cx, 18cx+6 and
+// 18cx+12 covers 18cx-3 to 18cx+15, and everything that draws or tests a cell has
+// to carry that three.
+inline constexpr float kCellOffset = kResolution / 2.0f;
+
 // Side length of the debug square drawn on each vertex.
 inline constexpr float kVertexSize = 2.0f;
 
@@ -92,30 +101,22 @@ inline constexpr bool kBlockyLight = true;
 // blowing it back up.
 inline constexpr bool kPixelArt = true;
 
-// Side of one square, in world units.
+// Side of one drawn square, in world units.
 //
-// It has to divide **kBuildCell and the half-step the build grid is offset by**,
-// and that is a stricter rule than the one written here before — which asked for
-// a divisor of kResolution and then gave five, which is not one.
+// It has to divide kBuildCell **and** kCellOffset, and that is stricter than the
+// rule written here before — which asked for a divisor of kResolution and then
+// gave five, which is not one. A block's edges land at three plus multiples of
+// six, so the square has to divide three: 1 and 3 are the only sizes, and 3 is
+// the only one worth having.
 //
-// Nothing noticed while the world was only terrain. The rasteriser anchors its
-// squares to the world and gives each lattice cell the squares whose centres fall
-// inside it, so a run of world that is not a whole number of squares comes out as
-// a different number of them depending on where it falls. On a hillside that is
-// invisible: no two stretches of it are meant to look alike anyway. On a wall of
-// blocks it is the whole of what is wrong — identical pieces drawn three squares
-// wide in one column and four in the next, which reads as bites taken out of the
-// wall.
+// Nothing noticed while the world was only terrain, because a hillside is grain
+// and no two stretches of one are meant to look alike. On a wall of identical
+// blocks it was the whole complaint — pieces drawn three squares wide in one
+// column and four in the next, which reads as bites taken out of the wall.
 //
-// A block's edges land at three plus multiples of six: the contour crosses half a
-// lattice step out from the last filled vertex, and the vertices are at multiples
-// of six. So the square has to divide three, and three is the only size worth
-// having (one is twenty-five times the work). Five missed both by two pixels and
-// six misses the offset by three — measured, with `--build`, which now checks it.
-//
-// It costs. Full screen and flying, PaintChunks went 0.75 ms to 1.46 ms and the
-// frame 24.0 to 26.6 — 42 fps to 38. That is the price of the world being drawn
-// at a finer grain than it was, and it buys a wall that is a wall.
+// **One size for every material, and that is load-bearing.** See
+// ElementPaint::texel: a material drawn at its own size is a fringe of the
+// material underneath it standing out around every block.
 inline constexpr float kPixelSize = 3.0f;
 
 // Side of one square of a plant, in world units.

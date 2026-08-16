@@ -25,7 +25,7 @@
 // any biome — a jungle sapling grows in a snowfield. What the climate decides is
 // what *grows on its own*, which is the scatter's business and stays there; what
 // a player plants is what a player is holding.
-enum class Item { Wood, OakSapling, PineSapling, BirchSapling, AppleSapling, Apple, Resin, Fibre, Count };
+enum class Item { Wood, OakSapling, PineSapling, BirchSapling, AppleSapling, Apple, Resin, Fibre, Torch, Count };
 
 inline constexpr std::size_t kItemCount = static_cast<std::size_t>(Item::Count);
 
@@ -49,6 +49,14 @@ enum class Placement {
 
     // Takes root standing on the ground under the cursor, and grows.
     Plant,
+
+    // Fixes to a surface in one cell of the build grid, and stays there.
+    //
+    // The row that says which surfaces, and what it gives off, is fixture::kKinds
+    // rather than anything here — see the head of fixture.h for why a torch is not
+    // a material and not just an item either. What this enumerator does is send
+    // the hand to the right table.
+    Fixture,
 };
 
 struct ItemDef {
@@ -243,6 +251,31 @@ inline constexpr ItemDef kItems[] = {
                     },
             },
         .stack = 64,
+    },
+    {
+        .name   = "torch",
+        .colour = {255, 198, 130, 255},
+
+        // The same flame the fixture draws standing in the world, so what is in
+        // the slot and what goes on the wall are recognisably one thing. The two
+        // are written out separately because the tables are separate and neither
+        // may reach into the other — but they are the same six rows, and retuning
+        // one means retuning the other.
+        .picture =
+            {
+                .tone = {{255, 242, 210, 255}, {255, 216, 150, 255}, {226, 170, 92, 255}, {196, 128, 44, 255}},
+                .art =
+                    {
+                        "..a...",
+                        ".aab..",
+                        ".abbc.",
+                        "..bc..",
+                        "..d...",
+                        "..d...",
+                    },
+            },
+        .stack     = 64,
+        .placement = Placement::Fixture,
     },
 };
 

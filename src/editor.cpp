@@ -40,7 +40,11 @@ void Editor::Bank(const World::Yield &freed, Inventory &inventory, Drops &drops,
 
         owed_[e] -= static_cast<float>(blocks) * kVerticesPerBlock;
 
-        const Stack dug = BlocksOf(static_cast<Element>(e), blocks);
+        // What the hand gets, which is not always what was in the ground — see
+        // ElementDef::yields. The debt above is still kept against the material
+        // that was actually dug, so a seam of rock and a wall of cobble do not
+        // pour their remainders into one another.
+        const Stack dug = BlocksOf(YieldOf(static_cast<Element>(e)), blocks);
 
         const int refused = inventory.Add(dug);
         if (refused <= 0) continue;
@@ -148,8 +152,20 @@ bool Editor::Built(const World &world, int cx, int cy) {
 }
 
 bool Editor::Founded(const World &world, int cx, int cy) const {
-    return world.OverlapsSolid(World::CellBounds(cx - 1, cy)) || world.OverlapsSolid(World::CellBounds(cx + 1, cy))
-        || world.OverlapsSolid(World::CellBounds(cx, cy - 1)) || world.OverlapsSolid(World::CellBounds(cx, cy + 1));
+    // A wall behind this very cell will hold it, which is how a room gets a floor
+    // and a shelf without every piece of it having to reach the ground. It is also
+    // what makes the wall worth putting up first, exactly as it is in Terraria:
+    // back the room, then build into it.
+    if (world.WalledAt(cx, cy)) return true;
+
+    // Otherwise one of the four it shares a side with — holding ground a body
+    // cannot walk through, or holding a wall of its own so that a wall can be run
+    // out from a wall.
+    const auto holds = [&](int nx, int ny) {
+        return world.OverlapsSolid(World::CellBounds(nx, ny)) || world.WalledAt(nx, ny);
+    };
+
+    return holds(cx - 1, cy) || holds(cx + 1, cy) || holds(cx, cy - 1) || holds(cx, cy + 1);
 }
 
 namespace {
@@ -295,8 +311,8 @@ void DrawSpade(Vector2 at, float scale, float thick, Color color) {
 } // namespace
 
 
-const char *Editor::Update(World &world, Inventory &inventory, Grove &grove, const Camera2D &camera, Rectangle body,
-                           float now) {
+const char *Editor::Update(World &world, Inventory &inventory, Grove &grove, fixture::Fixtures &fixtures,
+                           const Camera2D &camera, Rectangle body, float now) {
     // Where the character is, for the reach and for which side a spilled block
     // is thrown out on. The middle of the body, which is where the arm is.
     const Vector2 player = {body.x + body.width / 2.0f, body.y + body.height / 2.0f};
@@ -442,6 +458,26 @@ const char *Editor::Update(World &world, Inventory &inventory, Grove &grove, con
         int y1 = 0;
         if (!Block(x0, y0, x1, y1)) return nullptr;
 
+        // A fixture standing in the way comes off first, and the stroke stops
+        // there. It is in front of the ground in every sense — drawn over it, and
+        // the only thing in the cell a player pointing at a lit wall can mean — so
+        // taking it and the wall behind it in one click would make a torch
+        // impossible to move.
+        {
+            fixture::Kind what = fixture::Kind::Torch;
+
+            if (fixtures.Remove(cellX_, cellY_, what)) {
+                const Rectangle where = World::CellBounds(cellX_, cellY_);
+
+                if (inventory.Add(ItemsOf(Item::Torch, 1)) > 0) {
+                    grove.Fallen().Scatter(ItemsOf(Item::Torch, 1),
+                                           {where.x + where.width * 0.5f, where.y + where.height * 0.5f}, away, now);
+                }
+
+                return nullptr;
+            }
+        }
+
         World::Yield freed{};
 
         for (int cx = x0; cx <= x1; cx++) {
@@ -480,6 +516,25 @@ const char *Editor::Update(World &world, Inventory &inventory, Grove &grove, con
     if (!IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) return nullptr;
 
     if (held.Empty()) return "nothing in hand";
+
+    // A fixture goes into the cell the cursor is over, on whatever surface that
+    // cell has — which surfaces those are is fixture::Def's to say and not this
+    // module's, exactly as what a sapling roots in belongs to flora.
+    if (Def(held.AsItem()).placement == Placement::Fixture) {
+        if (!onCell_) return nullptr;
+
+        const std::optional<fixture::Kind> kind = fixture::KindOf(held.AsItem());
+        if (!kind.has_value()) return "that is not something to put down";
+
+        if (fixtures.At(cellX_, cellY_).has_value()) return "there is already something here";
+        if (!fixture::Fixtures::Holds(world, *kind, cellX_, cellY_)) return "nothing here to fix it to";
+
+        if (!fixtures.Place(*kind, cellX_, cellY_)) return "there is already something here";
+
+        inventory.Take(inventory.Selected(), 1);
+
+        return nullptr;
+    }
 
     // Everything that goes into the world whole rather than by the fistful goes
     // in the same way: on the ground the cursor found, which is the ground the

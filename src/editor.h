@@ -1,6 +1,7 @@
 #pragma once
 
 #include "element.h"
+#include "fixture.h"
 #include "grove.h"
 #include "inventory.h"
 #include "raylib.h"
@@ -54,8 +55,8 @@ public:
     // Returns what the world had to say back, or nothing. A refusal that is
     // never spoken is the same to a player as a button that is broken, and the
     // caller is where the notice is already kept.
-    const char *Update(World &world, Inventory &inventory, Grove &grove, const Camera2D &camera, Rectangle body,
-                       float now);
+    const char *Update(World &world, Inventory &inventory, Grove &grove, fixture::Fixtures &fixtures,
+                       const Camera2D &camera, Rectangle body, float now);
 
     // Outline of the area the next click affects, drawn in world space so it
     // sits over the material it is about to change.

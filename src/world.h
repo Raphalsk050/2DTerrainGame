@@ -123,30 +123,6 @@ public:
         int filled = 0;
     };
 
-    // Fills every vertex within `radius` with a material, clearing whatever was
-    // there first, and stops once it has newly filled `budget` of them. Placing
-    // is always a replacement, since two materials cannot share a vertex; a
-    // liquid is the exception and simply does not enter a vertex a solid already
-    // fills.
-    //
-    // The budget is how a supply that runs out mid-stroke stops the brush where
-    // the material ran out instead of continuing for free. It is tested before
-    // anything is cleared, so the brush never digs out ground it cannot afford
-    // to replace.
-    //
-    // `keepClear` is a region no material a body cannot walk through may be laid
-    // in — the character's own body, in practice. Without it a player aiming at
-    // their own feet walls themselves in, and the ground they built is the one
-    // ground they cannot dig back out of, because a body already inside the rock
-    // is refused every move it tries to make. Liquids ignore it: standing in
-    // water is swimming and not being buried.
-    Stroke Place(Element element, Vector2 world, float radius, int budget, Rectangle keepClear = {});
-
-    // Empties every vertex within `radius` and reports what came out. This is
-    // the shape the mining action takes: the world performs the removal, the
-    // caller decides what the yield is worth.
-    Stroke Excavate(Vector2 world, float radius);
-
     // The build grid: which cell a world position falls in, and where a cell is.
     //
     // The grid is the lattice counted in threes and is anchored at the world
@@ -159,17 +135,24 @@ public:
 
     // Fills one cell of the build grid, or empties it.
     //
-    // The square counterpart of Place and Excavate, and the same routine
-    // underneath — everything a stroke has to get right is the same for a cell as
-    // for a brush, and the list is long enough that a second copy of it would
-    // drift: what it charges for, what it hands back, what it tells the grass,
-    // and the body it refuses to bury.
+    // The only way anything writes into the world by hand. There was a circular
+    // brush of an arbitrary radius beside these and it is gone: a round tool over
+    // a square grid can only ever leave the corners of the cells it crosses, which
+    // is what a wall with bites out of it is made of. A wide stroke is a block of
+    // these, which the caller walks.
     //
-    // What differs is only the shape and the accounting. A cell is exactly
-    // config::kBuildCellArea vertices, which is exactly one block, so a click
-    // spends one and digging it out returns one — see kVerticesPerBlock. Nothing
-    // is charged where the cell already held the material, which reports back as a
-    // `filled` of zero.
+    // A cell is exactly config::kBuildCellArea vertices, which is exactly one
+    // block, so a click spends one and digging it out returns one — see
+    // kVerticesPerBlock. Nothing is charged where the cell already held the
+    // material, which reports back as a `filled` of zero.
+    //
+    // Placing is always a replacement, since two materials cannot share a vertex;
+    // a liquid is the exception and simply does not enter a vertex a solid already
+    // fills. `keepClear` is a region no material a body cannot walk through may be
+    // laid in — the character's own body, in practice. Without it a player aiming
+    // at their own feet walls themselves in, and the ground they built is the one
+    // ground they cannot dig back out of, because a body already inside the rock
+    // is refused every move it tries to make.
     Stroke PlaceCell(Element element, int cx, int cy, Rectangle keepClear = {});
     Stroke ExcavateCell(int cx, int cy);
 
@@ -180,6 +163,13 @@ public:
     // square can go red before it is pressed rather than the press being
     // swallowed. PlaceCell asks it again and is the one that enforces it.
     bool CellClear(int cx, int cy, Rectangle keepClear) const;
+
+    // Whether anything stands in the layer behind a cell.
+    //
+    // Asked at the middle of the cell, for the reason everything else about a cell
+    // is: at its edge the answer is whatever the contour rounded to, and the
+    // question is about the cell as a whole.
+    bool WalledAt(int cx, int cy) const;
 
     // Advances the liquid inside `active` by one step. The region is copied
     // into a flat buffer, simulated, and written back, which keeps the
@@ -506,7 +496,7 @@ private:
 
     // The state a hand-edited vertex was left in.
     //
-    // Not a history and not a delta — the state. A brush leaves a vertex holding
+    // Not a history and not a delta — the state. A stroke leaves a vertex holding
     // exactly one material at full or holding nothing at all, so the last stroke
     // over a vertex is the whole truth about it and editing the same one a
     // hundred times stores one of these.
@@ -519,6 +509,15 @@ private:
 
         // What was left there, or nothing where it was dug out.
         std::optional<Element> element;
+
+        // And what was left *behind* it, on the same terms.
+        //
+        // A second field rather than a second record, because a wall and the block
+        // in front of it are two things at one vertex and neither is the truth
+        // about the other — see ElementRules::background. One record per vertex is
+        // what keeps a wall from being forgotten when the block over it is dug,
+        // which is exactly the case the player will hit first.
+        std::optional<Element> behind;
     };
 
     // Two indices packed into one, for the maps keyed by a pair of them. Named
@@ -611,7 +610,9 @@ private:
     // dropped whatever it holds, or the world grows with the distance walked
     // rather than with the size of the view. So walking far enough from
     // something built and coming back found it gone.
-    void Remember(Vector2 vertex, std::optional<Element> element);
+    // Files what a vertex was left holding, in one of its two layers. 
+    // names the wall rather than the block — see Edit, which keeps both.
+    void Remember(Vector2 vertex, std::optional<Element> element, bool behind);
 
     // Notes that a lattice position was turned over by hand just now, so the
     // grass over it has to be earned again rather than being there the moment the
@@ -669,37 +670,30 @@ private:
     // through open sky changes nothing and must not be remembered as having.
     bool ClearVertex(Vector2 vertex, Yield &yield);
 
+    // The same for the layer behind, which ClearVertex deliberately leaves
+    // standing — see ExcavateCell for the order the two are taken in.
+    bool ClearWall(Vector2 vertex, Yield &yield);
+
     // The lattice vertices one stroke covers.
     //
-    // Held as an index range rather than as a rectangle because the two shapes
-    // want it worked out differently and only one of them can be trusted to a
-    // bounding box. A cell has to own exactly its own three vertices across, and
-    // the range LatticeRange derives from a cell's rectangle includes the vertex
-    // on its far edge — which belongs to the cell next door. Two neighbouring
-    // cells would then share a column, and clearing one would take a slice out of
-    // the other.
+    // Held as an index range rather than as a rectangle, because the range
+    // LatticeRange derives from a cell's rectangle includes the vertex on its far
+    // edge — which belongs to the cell next door. Two neighbouring cells would
+    // then share a column, and clearing one would take a slice out of the other.
     struct Reach {
         // Inclusive, in whole lattice vertices from the world origin.
         int i0 = 0;
         int j0 = 0;
         int i1 = 0;
         int j1 = 0;
-
-        // The brush's circle. A radius of zero or less means every vertex in the
-        // range, which is what a square cell asks for.
-        Vector2 centre{};
-        float radius = 0.0f;
     };
 
-    // Both edits a stroke can make, over whichever shape it reaches. Placing
-    // clears the vertex first, so it is the same edit as digging with a second
-    // half. `budget` bounds how many vertices the placed material may newly take,
-    // and is ignored when digging. `keepClear` is the region solids may not be
-    // laid in — see Place.
+    // Both edits a stroke can make. Placing clears the vertex first, so it is the
+    // same edit as digging with a second half. `budget` bounds how many vertices
+    // the placed material may newly take, and is ignored when digging.
+    // `keepClear` is the region solids may not be laid in — see PlaceCell.
     Stroke ApplyStroke(const Reach &reach, std::optional<Element> place, int budget, Rectangle keepClear);
 
-    // The two shapes, each working out its own vertex range.
-    Reach BrushReach(Vector2 world, float radius) const;
     Reach CellReach(int cx, int cy) const;
 
     // Whether the square a vertex owns meets a rectangle.
@@ -837,6 +831,7 @@ private:
     // that a hundred times a frame to get the same seven colours would be work
     // done to arrive back where it started.
     std::array<soil::Paint, kElementCount> paint_{};
+
 
     // The grass over the ground now in play, one entry per lattice column.
     //
