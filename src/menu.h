@@ -31,6 +31,12 @@ enum class Screen {
     Multiplayer,
     Options,
 
+    // The world being made, and the one screen nothing can be done on. It has no
+    // back arrow and answers no key: there is no half-made world to go back to,
+    // and a cancel would have to unwind a measurement that is already half
+    // written into the world it is measuring.
+    Loading,
+
     // Not drawn by anything here. It is on the stack so that the loop can ask one
     // question — what is on top — instead of keeping a second flag beside it that
     // says whether a menu is up.
@@ -71,6 +77,14 @@ public:
 
     void Open(Screen screen) { stack_.push_back(screen); }
 
+    // What the loading screen says and how far along its bar is.
+    //
+    // Pushed in by the loop rather than read out by the screen, because what is
+    // being waited for is the loop's business: the menu is not allowed to know
+    // that a world has a wood in it, and the world is not allowed to know that
+    // anything is watching.
+    void Working(const char *what, float share);
+
     // Down one, unless there is nothing under it. The title with nothing beneath
     // it is where the game starts, and a stack that can empty itself is a black
     // screen with no way out.
@@ -105,6 +119,12 @@ private:
 
     // Whether the gamemode list is hanging open under its row.
     bool dropped_ = false;
+
+    // What the loading screen is showing. A buffer rather than a pointer, because
+    // the line is composed by whoever is doing the work and must not outlive the
+    // frame they composed it in.
+    char made_[96] = "";
+    float share_   = 0.0f;
 
     std::vector<Screen> stack_{Screen::Title};
 };

@@ -3458,49 +3458,6 @@ int main(int argc, char **argv) {
         return (wrong == 0) ? 0 : 1;
     }
 
-    // TEMP-TIME
-    if (argc >= 2 && TextIsEqual(argv[1], "--timecreate")) {
-        const auto tick = [](const char *what, double from) {
-            const double now = GetTime();
-            std::printf("%-22s %7.1f ms%c", what, (now - from) * 1000.0, 10);
-            return now;
-        };
-
-        double at = GetTime();
-
-        settings.seed = 12345;
-        terrain::Calibrate(settings);
-        at = tick("terrain::Calibrate", at);
-
-        world.Rebuild(settings);
-        at = tick("World::Rebuild", at);
-
-        world.SetWeather(sky);
-        at = tick("SetWeather", at);
-
-        grove.Clear();
-        at = tick("Grove::Clear", at);
-
-        grove.Configure({.seed = settings.seed}, settings, world.Sky());
-        at = tick("Grove::Configure", at);
-
-        const float top = terrain::Height(0.0f, settings);
-        const Rectangle view = {-620.0f, top - 500.0f, 1240.0f, 1000.0f};
-
-        world.Update(view);
-        at = tick("first World::Update", at);
-
-        world.PaintChunks(view);
-        at = tick("PaintChunks", at);
-
-        world.StepLight(view);
-        at = tick("first StepLight", at);
-
-        CloseWindow();
-        return 0;
-    }
-    // TEMP-TIME-END
-
     if (argc >= 2 && TextIsEqual(argv[1], "--build")) {
         // Sets a run of cells into open sky, digs the same run back out, and
         // checks that the world gave back exactly what it was given.
@@ -4091,6 +4048,27 @@ int main(int argc, char **argv) {
 
     Gamemode mode = Gamemode::Survival;
 
+    // Making a world, one stage per frame.
+    //
+    // The stages are here rather than inside the world because most of them are not
+    // the world's: the wood has to be replanted, the character put somewhere to
+    // stand, the bag emptied. What they have in common is that each is a piece of
+    // work short enough to sit inside a frame, so the screen in front of them keeps
+    // drawing and the bar keeps moving.
+    //
+    // Each stage says what it is about to do, is drawn once, and *then* does it. A
+    // stage that announced itself after the fact would name the thing the player has
+    // already waited through, and the longest one would be the one nobody ever saw a
+    // line for.
+    struct Making {
+        bool running = false;
+
+        int stage = 0;
+        int said  = -1;
+
+        Gamemode mode = Gamemode::Survival;
+    } making;
+
     // Straight into the world when nobody is at the keys. A profile of the title
     // screen is a profile of four rectangles, and the report is about the frame the
     // game actually costs.
@@ -4164,8 +4142,8 @@ int main(int argc, char **argv) {
 
             if (wish.create) {
                 // A new country in the object every other system already points at
-                // — see World::Rebuild for why it is done this way round and not by
-                // building a second world.
+                // — see World::BeginRebuild for why it is done this way round and
+                // not by building a second world.
                 settings.seed = wish.seed;
 
                 // Measured again here as well as inside the world, and for the
@@ -4174,33 +4152,130 @@ int main(int argc, char **argv) {
                 // from, and an uncalibrated copy is a different world.
                 terrain::Calibrate(settings);
 
-                world.Rebuild(settings);
-                world.SetWeather(sky);
+                world.BeginRebuild(settings);
 
-                // And everything that remembers the world that is gone. The wood
-                // keeps records keyed on the cell a tree grows in, the fixtures
-                // stand in cells, and both would otherwise turn up in a country
-                // that never had them.
-                grove.Clear();
-                grove.Configure({.seed = settings.seed}, settings, world.Sky());
+                making = {};
 
-                fixtures.Clear();
-                inventory.Clear();
+                making.running = true;
+                making.mode    = wish.mode;
 
-                mode = wish.mode;
+                menu.Open(menu::Screen::Loading);
+            }
 
-                // Dropped in above the ground at the origin, as at startup: the
-                // surface there is wherever this seed's relief put it.
-                player = Player({0.0f, terrain::Height(0.0f, settings) - 96.0f});
+            // A slice of the making, if one is under way.
+            //
+            // About a frame's worth, and the world stops on the first block past it —
+            // see World::StepRebuild. What that buys is a screen that answers the
+            // mouse and a bar that moves while several seconds of measurement go by,
+            // instead of a window the desktop paints over as not responding.
+            if (making.running) {
+                constexpr float kSlice = 0.012f;
 
-                camera.target = player.Centre();
+                // How far along the bar each stage stands. The measurement is nearly
+                // all of the wait, so it is given nearly all of the bar — a bar whose
+                // stages are evenly spaced would crawl through the first and jump
+                // through the rest, which is a bar that lies about how long is left.
+                constexpr float kMeasured = 0.78f;
 
-                packOpen = false;
-                holdOff  = true;
+                const char *doing = "";
+                float share       = 0.0f;
 
-                chat.Say(TextFormat("world %d, %s", settings.seed, NameOf(mode)), console::Tone::Done);
+                switch (making.stage) {
+                case 0: doing = "reading the shape of the land"; share = 0.0f; break;
+                case 1: doing = "measuring what this world holds"; share = kMeasured; break;
+                case 2: doing = "growing the woods"; share = 0.84f; break;
+                case 3: doing = "finding you somewhere to stand"; share = 0.88f; break;
+                case 4: doing = "cutting the caves under your feet"; share = 0.94f; break;
+                default: doing = "painting the ground"; share = 1.0f; break;
+                }
 
-                menu.Play();
+                // Said first and done next frame, so the line on screen is about the
+                // work being waited for rather than the work already over.
+                if (making.said != making.stage) {
+                    menu.Working(doing, share);
+
+                    making.said = making.stage;
+                } else {
+                    switch (making.stage) {
+                    case 0:
+                        // Nothing of its own: BeginRebuild did it. The stage exists so
+                        // that the first line is on screen before the measurement
+                        // takes the frame.
+                        making.stage++;
+                        break;
+
+                    case 1: {
+                        // The long one, and the only one that comes back unfinished.
+                        // Its own line names the seam being measured, so the screen
+                        // says which of the six is costing the second it is costing.
+                        const World::Making step = world.StepRebuild(kSlice);
+
+                        menu.Working(step.what, step.share * kMeasured);
+
+                        if (step.done) making.stage++;
+                        break;
+                    }
+
+                    case 2:
+                        world.SetWeather(sky);
+
+                        // Everything that remembers the world that is gone. The wood
+                        // keeps records keyed on the cell a tree grows in, the
+                        // fixtures stand in cells, and both would otherwise turn up in
+                        // a country that never had them.
+                        grove.Clear();
+                        grove.Configure({.seed = settings.seed}, settings, world.Sky());
+
+                        fixtures.Clear();
+                        inventory.Clear();
+
+                        making.stage++;
+                        break;
+
+                    case 3:
+                        mode = making.mode;
+
+                        // Dropped in above the ground at the origin, as at startup:
+                        // the surface there is wherever this seed's relief put it.
+                        player = Player({0.0f, terrain::Height(0.0f, settings) - 96.0f});
+
+                        camera.target = player.Centre();
+                        camera.offset = {GetScreenWidth() / 2.0f, GetScreenHeight() / 2.0f + GetScreenHeight() / 4.0f};
+
+                        packOpen = false;
+                        holdOff  = true;
+
+                        making.stage++;
+                        break;
+
+                    case 4:
+                        // The chunks the player will be standing in. Done here rather
+                        // than left to the first frame of play, which is where it used
+                        // to land: a game that opens on a stutter is a game that opens
+                        // badly, and this is a screen that is already waiting.
+                        world.Update(Expand(ViewBounds(camera), kSimulationMargin));
+
+                        making.stage++;
+                        break;
+
+                    case 5:
+                        // And their pictures, for the same reason. PaintChunks opens a
+                        // render target, so it has to run outside a frame — which is
+                        // where this is.
+                        world.PaintChunks(ViewBounds(camera));
+
+                        making.stage++;
+                        break;
+
+                    default:
+                        making.running = false;
+
+                        chat.Say(TextFormat("world %d, %s", settings.seed, NameOf(mode)), console::Tone::Done);
+
+                        menu.Play();
+                        break;
+                    }
+                }
             }
 
             BeginDrawing();

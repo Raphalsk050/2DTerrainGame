@@ -5,7 +5,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 namespace {
 
@@ -259,6 +261,24 @@ PartyAt LayParty() {
     return at;
 }
 
+struct LoadingAt {
+    Rectangle bar;
+    Rectangle line;
+    Rectangle why;
+};
+
+LoadingAt LayLoading() {
+    LoadingAt at{};
+
+    const float wide = std::min(Wide() * 0.66f, 700.0f);
+
+    at.bar  = Middle(High() * 0.46f, wide, 26.0f);
+    at.line = Middle(High() * 0.46f - 34.0f, wide, 24.0f);
+    at.why  = Middle(High() * 0.46f + 46.0f, wide, 22.0f);
+
+    return at;
+}
+
 // Where a screen says the thing it cannot do yet.
 //
 // Said out loud, in the middle of the box that would hold it, rather than left as
@@ -408,6 +428,12 @@ menu::Wish menu::Menu::Update() {
         // somewhere honest rather than nowhere, and so the back arrow it is drawn
         // with is the same back arrow as everywhere else.
         if (back) Back();
+        break;
+    }
+
+    case Screen::Loading: {
+        // Nothing. The work is the loop's and the screen is a report on it — see
+        // Screen::Loading.
         break;
     }
 
@@ -575,6 +601,46 @@ void menu::Menu::Draw() const {
         break;
     }
 
+    case Screen::Loading: {
+        const LoadingAt at = LayLoading();
+
+        DrawHead("CREATING WORLD");
+
+        Label(made_, at.line, kBodyType, kInk);
+
+        // The bar, and the share it has reached. Drawn as its own ground and a fill
+        // inside it, so an empty bar is still a bar rather than a gap in the screen.
+        DrawRectangleRec(at.bar, kPanel);
+
+        const float share = std::clamp(share_, 0.0f, 1.0f);
+
+        if (share > 0.0f) {
+            DrawRectangleRec({at.bar.x + 3.0f, at.bar.y + 3.0f, (at.bar.width - 6.0f) * share, at.bar.height - 6.0f},
+                             kAccent);
+        }
+
+        DrawRectangleLinesEx(at.bar, 2.0f, kEdge);
+
+        // And why any of this takes a moment.
+        //
+        // Written out rather than left as a spinner because the honest answer is
+        // interesting and short: the ore in this world is measured rather than
+        // declared, so making one means sampling it. A player who knows that is
+        // waiting for something; one who does not is watching a program hang.
+        Label("ore is measured, not guessed: each seam is sampled across this world", at.why, 16, kFaint);
+
+        Label("so that the rarity in the table is the rarity you will dig for",
+              {at.why.x, at.why.y + 22.0f, at.why.width, at.why.height}, 16, kFaint);
+
+        break;
+    }
+
     case Screen::World: break;
     }
+}
+
+void menu::Menu::Working(const char *what, float share) {
+    std::snprintf(made_, sizeof(made_), "%s", (what != nullptr) ? what : "");
+
+    share_ = share;
 }

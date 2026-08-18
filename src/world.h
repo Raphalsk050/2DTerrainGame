@@ -58,20 +58,40 @@ public:
     // regenerates from the noise alone.
     void Reset();
 
-    // Puts a different country into the same object: new settings, measured
-    // again, and everything the old one left behind thrown away.
+    // What making a world is doing right now, for the screen that is waiting on it.
     //
-    // The alternative is building a second World and swapping it in, and it is
-    // worse than it looks. Every system in the loop holds a reference to this one
-    // — the wood, the fixtures, the editor, the light — so a swap is either a
-    // rebuild of all of them or a dangling reference nobody notices until a chunk
-    // is asked for. This is Reset with the seed allowed to move, and Reset is
-    // already the thing that says what a world forgets.
+    // A line of English rather than a percentage alone, because the wait is long
+    // enough to need explaining: the ore cutoffs are *measured* against this
+    // world's own noise, one seam at a time, and a bar with no words on it makes
+    // that look like the game having hung.
+    struct Making {
+        char what[96] = "";
+
+        float share = 0.0f; // 0 to 1
+        bool done   = true;
+    };
+
+    // Starts making a world and steps it, so that the frame keeps drawing while it
+    // happens.
     //
-    // The cutoffs are measured again because they must be: they are quantiles of
-    // this world's own noise, and a world generated against another one's is a
-    // world with no caves in it or one that is nothing but.
-    void Rebuild(const terrain::Settings &settings);
+    // Split in two rather than done in one call, and it is the difference between a
+    // loading screen and a frozen window. The measurement below is seconds of work;
+    // handed to the caller as one call it is seconds with nothing on screen, no way
+    // to say what is being waited for, and a window the desktop paints over as not
+    // responding.
+    //
+    // `budget` is how long a slice may take, in seconds. The work stops on the
+    // first row block past it, so a slice overruns by at most one block — a few
+    // milliseconds — and never by a material.
+    // Together they put a different country into the same object rather than
+    // building a second World and swapping it in, and that is not a convenience:
+    // every system in the loop holds a reference to this one — the wood, the
+    // fixtures, the editor, the light — so a swap is either a rebuild of all of
+    // them or a dangling reference nobody notices until a chunk is asked for. This
+    // is Reset with the seed allowed to move, and Reset is already the thing that
+    // says what a world forgets.
+    void BeginRebuild(const terrain::Settings &settings);
+    Making StepRebuild(float budget);
 
     // Rasterises the ground of every chunk the view needs and has not got.
     //
@@ -851,7 +871,39 @@ private:
 
     // Cutoff each generated material's noise has to clear, measured from the
     // noise itself so that `probability` in the element table means what it says.
+    // Runs the measurement to the end, which is what the constructor wants: at
+    // startup there is no frame to keep drawing yet.
     void CalibrateSpawn();
+
+    // Where the measurement has got to. Held rather than local because it is now
+    // spread over frames — see BeginRebuild.
+    struct Measuring {
+        bool running = false;
+
+        std::size_t material = 0; // which row of the element table is being measured
+        int perAxis           = 0; // its grid, and nought where none is open
+        int row               = 0; // the next row of that grid
+        float feature         = 0.0f;
+        float probability     = 0.0f;
+
+        int done  = 0; // materials measured
+        int total = 0; // and how many there are to measure
+
+        std::vector<float> values; // this material's samples, gathered
+        std::vector<std::vector<float>> rows; // one scratch row per worker in a block
+    };
+
+    Measuring measuring_{};
+
+    // Opens the material at `measuring_.material`, works out its grid, and empties
+    // the sample list. Skips straight past anything that is not measured.
+    void OpenMaterial();
+
+    // Takes the quantile the samples came out at and closes the material.
+    void CloseMaterial();
+
+    // And one slice of it. True when there is nothing left to measure.
+    bool StepCalibration(float budget);
 
     // The surface under a view, widened by `margin`, as the sky wants to be handed
     // it. Fills `surface_` and returns a view over it, so the caller holds nothing.

@@ -170,6 +170,237 @@ World::World(const terrain::Settings &settings, int spacing) : settings_(setting
     sky_.Configure(weather::Settings{}, settings_);
 }
 
+namespace {
+
+// The measurement's own numbers. Lifted out of the loop that used to hold them so
+// that opening a material, sampling it and closing it can be three calls made on
+// three different frames — see World::BeginRebuild.
+constexpr int kAboveCutoff = 60;
+constexpr int kMinPerAxis  = 48;
+constexpr int kMaxPerAxis  = 384;
+
+// Multiples of one feature the grid steps by, one per axis.
+//
+// Irrational, and this is not a detail. Perlin noise is built on a lattice and is
+// exactly zero at every corner of it, so a grid stepping a whole number of
+// features reads the same corner over and over: every sample comes back at the
+// midpoint of the field, the cutoff lands in the middle of the distribution
+// instead of its tail, and the world fills with ore. Stepping by an irrational
+// multiple lands each sample at a different phase, and using a different one per
+// axis stops the two from lining up with each other either.
+constexpr float kStrideX = 1.618f;
+constexpr float kStrideY = 1.303f;
+
+// Depth the grid starts at, far enough down to be in rock rather than straddling
+// the surface, where half the samples would be sky.
+constexpr float kSampledTop = 600.0f;
+
+// How many rows of one material's grid a slice takes before it looks at the clock.
+//
+// Sixteen, which at a full grid is a row per worker with a few to spare and about
+// three milliseconds of work — fine enough that a slice overruns its budget by
+// less than a frame, and coarse enough that the workers are not being woken for a
+// few microseconds at a time.
+constexpr int kRowBlock = 16;
+
+} // namespace
+
+void World::OpenMaterial() {
+    measuring_.perAxis = 0;
+    measuring_.row     = 0;
+
+    // Walks straight past anything that is not measured, setting its cutoff to one
+    // on the way: nothing clears that, which is the right answer for a material
+    // that is not generated from its own noise at all — the covers, which are
+    // measured from the surface, and the liquids, which stand at a level the
+    // aquifer settings give them.
+    while (measuring_.material < kElementCount) {
+        const ElementSpawn &spawn = kElements[measuring_.material].spawn;
+
+        spawnCutoff_[measuring_.material] = 1.0f;
+
+        if (spawn.generator != Generator::Vein) {
+            measuring_.material++;
+            continue;
+        }
+
+        const float probability = std::clamp(spawn.probability, 0.0f, 1.0f);
+
+        if (probability <= 0.0f) {
+            measuring_.material++;
+            continue;
+        }
+
+        measuring_.probability = probability;
+
+        // Enough samples that `kAboveCutoff` of them land above the cutoff, before
+        // the eligibility test throws any away.
+        measuring_.perAxis = std::clamp(static_cast<int>(std::ceil(std::sqrt(kAboveCutoff / probability))),
+                                        kMinPerAxis, kMaxPerAxis);
+
+        // More than one feature apart, so no two samples read the same hump.
+        measuring_.feature = terrain::kFeatureSpan / std::max(SpawnNoise(spawn).frequency, 0.01f);
+
+        measuring_.values.clear();
+        measuring_.values.reserve(static_cast<std::size_t>(measuring_.perAxis) * measuring_.perAxis);
+
+        return;
+    }
+}
+
+void World::CloseMaterial() {
+    if (!measuring_.values.empty()) {
+        const auto index =
+            static_cast<std::size_t>((1.0f - measuring_.probability) * (measuring_.values.size() - 1));
+
+        std::nth_element(measuring_.values.begin(), measuring_.values.begin() + index, measuring_.values.end());
+
+        spawnCutoff_[measuring_.material] = measuring_.values[index];
+    }
+
+    measuring_.material++;
+    measuring_.perAxis = 0;
+    measuring_.row     = 0;
+    measuring_.done++;
+}
+
+bool World::StepCalibration(float budget) {
+    const double until = GetTime() + budget;
+
+    while (measuring_.material < kElementCount) {
+        if (measuring_.perAxis == 0) OpenMaterial();
+        if (measuring_.material >= kElementCount) break;
+
+        const ElementSpawn &spawn = kElements[measuring_.material].spawn;
+
+        const int perAxis   = measuring_.perAxis;
+        const float feature = measuring_.feature;
+
+        while (measuring_.row < perAxis) {
+            const int first = measuring_.row;
+            const int block = std::min(kRowBlock, perAxis - first);
+
+            measuring_.rows.resize(static_cast<std::size_t>(kRowBlock));
+
+            // A row per worker, each writing into a list of its own. The samples are
+            // gathered on this side afterwards, so nothing is shared while the rows
+            // are being taken — and this is where the seconds went: the grid is up to
+            // three hundred and eighty-four squared samples of the surface, per ore,
+            // and it was walked one sample at a time on one core.
+            pool::For(
+                block,
+                [&](int k) {
+                    std::vector<float> &into = measuring_.rows[static_cast<std::size_t>(k)];
+                    into.clear();
+
+                    const int i = first + k;
+
+                    for (int j = 0; j < perAxis; j++) {
+                        const Vector2 p = {(i - perAxis / 2) * feature * kStrideX,
+                                           kSampledTop + j * feature * kStrideY};
+
+                        const terrain::Ground rock = terrain::SampleGround(p, settings_);
+                        if (!SpawnEligible(spawn, p, rock.density)) continue;
+
+                        // The wall lift is part of what the cutoff will be compared
+                        // against, so it has to be part of what the cutoff is measured
+                        // from. Measured without it, biasing a vein towards the cave
+                        // walls would not move the ore there — it would simply add
+                        // ore, and the probability in the table would quietly stop
+                        // being the share it says it is.
+                        into.push_back(terrain::Sample(p, SpawnNoise(spawn)) + WallLift(spawn, rock.solid));
+                    }
+                },
+                1, 1);
+
+            for (int k = 0; k < block; k++) {
+                const std::vector<float> &row = measuring_.rows[static_cast<std::size_t>(k)];
+
+                measuring_.values.insert(measuring_.values.end(), row.begin(), row.end());
+            }
+
+            measuring_.row += block;
+
+            // The clock is read between blocks and never inside one, so a slice
+            // overruns by at most a block. Gathering the quantile is left for the
+            // next slice rather than being squeezed in here: it is a partial sort of
+            // a hundred thousand floats, and it belongs to the material rather than
+            // to whichever slice happened to finish its last row.
+            if (GetTime() >= until) return false;
+        }
+
+        CloseMaterial();
+    }
+
+    measuring_.running = false;
+
+    return true;
+}
+
+void World::BeginRebuild(const terrain::Settings &settings) {
+    settings_ = settings;
+
+    // The same measurement the constructor takes and in the same order: everything
+    // below asks the generator where the ground is, and an uncalibrated one answers
+    // with a world that is not this one.
+    terrain::Calibrate(settings_);
+
+    // The sky is a function of the terrain as well as of the weather — it reads the
+    // skyline to know where the ground is — so it is told about the new country. Its
+    // own settings are kept: which weather blows is not a property of which world
+    // this is. Copied first, because Configure writes over the member it would
+    // otherwise be reading from.
+    const weather::Settings weather = sky_.Config();
+
+    sky_.Configure(weather, settings_);
+
+    Reset();
+
+    measuring_         = {};
+    measuring_.running = true;
+
+    for (std::size_t e = 0; e < kElementCount; e++) {
+        const ElementSpawn &spawn = kElements[e].spawn;
+
+        if (spawn.generator == Generator::Vein && spawn.probability > 0.0f) measuring_.total++;
+    }
+}
+
+World::Making World::StepRebuild(float budget) {
+    Making making;
+
+    if (!measuring_.running) return making;
+
+    making.done = StepCalibration(budget);
+
+    // Read after the slice and not before it. Before, the walk has not yet stepped
+    // past the materials that are *not* measured — the rock, the covers, the water
+    // — so the first line of the first world named the rock, which is the one
+    // material in the table this measurement has nothing to do with. After, it is
+    // whichever seam the next slice will spend itself on.
+    const char *name = (measuring_.material < kElementCount) ? StyleOf(static_cast<Element>(measuring_.material)).name
+                                                             : "the last of the seams";
+
+    if (making.done) {
+        making.share = 1.0f;
+        std::snprintf(making.what, sizeof(making.what), "%s", "the ground is measured");
+
+        return making;
+    }
+
+    // Materials finished, plus how far into the open one this is. A bar that only
+    // moved when a material finished would sit still for a second at a time, which
+    // is the thing a bar exists to stop.
+    const float within = (measuring_.perAxis > 0) ? static_cast<float>(measuring_.row) / measuring_.perAxis : 0.0f;
+    const float total  = static_cast<float>(std::max(measuring_.total, 1));
+
+    making.share = std::clamp((measuring_.done + within) / total, 0.0f, 1.0f);
+
+    std::snprintf(making.what, sizeof(making.what), "measuring how much %s this world holds", name);
+
+    return making;
+}
+
 void World::CalibrateSpawn() {
     // Each generated material's cutoff is measured rather than guessed: sample its
     // own noise where the material is allowed to be, and take the quantile that
@@ -202,75 +433,13 @@ void World::CalibrateSpawn() {
     // The ceiling is what bounds the cost of all this, and it is reached only by
     // the rarest ores: a fifth of a second at startup, once, against an ore that
     // silently does not generate.
-    constexpr int kAboveCutoff = 60;
-    constexpr int kMinPerAxis  = 48;
-    constexpr int kMaxPerAxis  = 384;
+    measuring_         = {};
+    measuring_.running = true;
 
-    // Multiples of one feature the grid steps by, one per axis.
-    //
-    // Irrational, and this is not a detail. Perlin noise is built on a lattice and
-    // is exactly zero at every corner of it, so a grid stepping a whole number of
-    // features reads the same corner over and over: every sample comes back at the
-    // midpoint of the field, the cutoff lands in the middle of the distribution
-    // instead of its tail, and the world fills with ore. Stepping by an irrational
-    // multiple lands each sample at a different phase, and using a different one
-    // per axis stops the two from lining up with each other either.
-    constexpr float kStrideX = 1.618f;
-    constexpr float kStrideY = 1.303f;
-
-    // Depth the grid starts at, far enough down to be in rock rather than straddling
-    // the surface, where half the samples would be sky.
-    constexpr float kSampledTop = 600.0f;
-
-    std::vector<float> values;
-    values.reserve(static_cast<std::size_t>(kMaxPerAxis) * kMaxPerAxis);
-
-    for (std::size_t e = 0; e < kElementCount; e++) {
-        const ElementSpawn &spawn = kElements[e].spawn;
-
-        // Nothing clears a cutoff of one, which is the right answer for a
-        // material that is not generated from its own noise at all — the covers,
-        // which are measured from the surface, and the liquids, which stand at a
-        // level the aquifer settings give them.
-        spawnCutoff_[e] = 1.0f;
-        if (spawn.generator != Generator::Vein) continue;
-
-        const float probability = std::clamp(spawn.probability, 0.0f, 1.0f);
-        if (probability <= 0.0f) continue;
-
-        // Enough samples that `kAboveCutoff` of them land above the cutoff, before
-        // the eligibility test throws any away.
-        const int perAxis = std::clamp(static_cast<int>(std::ceil(std::sqrt(kAboveCutoff / probability))), kMinPerAxis,
-                                       kMaxPerAxis);
-
-        // More than one feature apart, so no two samples read the same hump.
-        const float feature = terrain::kFeatureSpan / std::max(SpawnNoise(spawn).frequency, 0.01f);
-
-        values.clear();
-
-        for (int i = 0; i < perAxis; i++) {
-            for (int j = 0; j < perAxis; j++) {
-                const Vector2 p = {(i - perAxis / 2) * feature * kStrideX, kSampledTop + j * feature * kStrideY};
-
-                const terrain::Ground rock = terrain::SampleGround(p, settings_);
-                if (!SpawnEligible(spawn, p, rock.density)) continue;
-
-                // The wall lift is part of what the cutoff will be compared
-                // against, so it has to be part of what the cutoff is measured
-                // from. Measured without it, biasing a vein towards the cave walls
-                // would not move the ore there — it would simply add ore, and the
-                // probability in the table would quietly stop being the share it
-                // says it is.
-                values.push_back(terrain::Sample(p, SpawnNoise(spawn)) + WallLift(spawn, rock.solid));
-            }
-        }
-
-        if (values.empty()) continue;
-
-        const auto index = static_cast<std::size_t>((1.0f - probability) * (values.size() - 1));
-
-        std::nth_element(values.begin(), values.begin() + index, values.end());
-        spawnCutoff_[e] = values[index];
+    // Run to the end. There is no frame to keep drawing yet — the window has only
+    // just opened — so the budget is anything at all, and the work is the same work
+    // BeginRebuild spreads over frames when there is a screen waiting on it.
+    while (!StepCalibration(1e9f)) {
     }
 }
 
@@ -857,26 +1026,6 @@ void World::Reset() {
     // And what was outstanding about them. A world with nothing built in it has
     // no turned earth waiting to green over.
     sown_.clear();
-}
-
-void World::Rebuild(const terrain::Settings &settings) {
-    settings_ = settings;
-
-    // The same two measurements the constructor takes, in the same order and for
-    // the same reason: everything below asks the generator where the ground is,
-    // and an uncalibrated one answers with a world that is not this one.
-    terrain::Calibrate(settings_);
-    CalibrateSpawn();
-
-    // The sky is a function of the terrain as well as of the weather — it reads
-    // the skyline to know where the ground is — so it is told about the new
-    // country. Its own settings are kept: which weather blows is not a property
-    // of which world this is.
-    const weather::Settings weather = sky_.Config();
-
-    sky_.Configure(weather, settings_);
-
-    Reset();
 }
 
 int World::PinnedChunks() const {
