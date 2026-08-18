@@ -1296,7 +1296,8 @@ World::Stroke World::ApplyStroke(const Reach &reach, std::optional<Element> plac
             }
 
             // Digging is that same edit without its second half. Two materials
-            // never share a vertex, so placing is a replacement.
+            // never share a vertex -- which is why a cell already holding one is
+            // refused outright by PlaceCell rather than being cleared here.
             //
             // Only where there was something to dig. A brush swung through open
             // sky has not changed the world and must not be remembered as
@@ -1381,7 +1382,34 @@ bool World::CellClear(int cx, int cy, Rectangle keepClear) const {
     return !CheckCollisionRecs(CellBounds(cx, cy), keepClear);
 }
 
+bool World::CellVacant(int cx, int cy) const {
+    Yield holds{};
+
+    CellHolds(cx, cy, holds);
+
+    for (std::size_t e = 0; e < kElementCount; e++) {
+        if (kElements[e].rules.occupies && holds[e] > 0) return false;
+    }
+
+    return true;
+}
+
 World::Stroke World::PlaceCell(Element element, int cx, int cy, Rectangle keepClear) {
+    // Something is already there. Refused whole rather than replacing it -- see
+    // CellVacant, which is where the reasoning lives.
+    //
+    // Here and not only in the hand, so that no caller can be written later that
+    // quietly gets the old behaviour back. It is the same argument that puts the
+    // body's refusal below in the world rather than in the editor.
+    //
+    // Only for what *occupies*, and the two exceptions are the point rather than
+    // edge cases. A wall contests no vertex and its whole purpose is to stand behind
+    // a block (§11.2) -- refusing it where a block stands would make a wall
+    // impossible to put up anywhere it is wanted. A liquid is poured into a space
+    // rather than pressed into one and ApplyStroke already declines the vertices a
+    // solid fills, so it needs nothing here.
+    if (Def(element).rules.occupies && !CellVacant(cx, cy)) return {};
+
     // All of the cell, or none of it.
     //
     // This is where a cell and a brush have to part company, and it is the fault
@@ -1401,6 +1429,49 @@ World::Stroke World::PlaceCell(Element element, int cx, int cy, Rectangle keepCl
     // What stops a player with nothing left is the caller, which asks whether
     // there is a block to spend before it asks the world for anything.
     return ApplyStroke(CellReach(cx, cy), element, config::kBuildCellArea, keepClear);
+}
+
+void World::CellHolds(int cx, int cy, Yield &out) const {
+    const Reach reach = CellReach(cx, cy);
+    const float step  = static_cast<float>(spacing_);
+
+    bool front = false;
+
+    for (int i = reach.i0; i <= reach.i1; i++) {
+        for (int j = reach.j0; j <= reach.j1; j++) {
+            // Resolved once and then read ten times, rather than snapped, divided
+            // and looked up once per material — see World::Vertex. This runs every
+            // frame a player holds the button, over up to sixty-four cells.
+            const Vertex vertex = Resolve({static_cast<float>(i) * step, static_cast<float>(j) * step});
+
+            for (std::size_t e = 0; e < kElementCount; e++) {
+                const ElementDef &def = kElements[e];
+                if (!def.rules.occupies && !def.rules.flows) continue;
+
+                if (ValueAt(vertex, static_cast<Element>(e)) > def.threshold) {
+                    out[e]++;
+                    front = true;
+                }
+            }
+        }
+    }
+
+    // The wall only where the space in front of it is open, which is the order the
+    // spade takes them in.
+    if (front) return;
+
+    for (int i = reach.i0; i <= reach.i1; i++) {
+        for (int j = reach.j0; j <= reach.j1; j++) {
+            const Vertex vertex = Resolve({static_cast<float>(i) * step, static_cast<float>(j) * step});
+
+            for (std::size_t e = 0; e < kElementCount; e++) {
+                const ElementDef &def = kElements[e];
+                if (!def.rules.background) continue;
+
+                if (ValueAt(vertex, static_cast<Element>(e)) > def.threshold) out[e]++;
+            }
+        }
+    }
 }
 
 World::Stroke World::ExcavateCell(int cx, int cy) {

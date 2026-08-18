@@ -4252,7 +4252,20 @@ int main(int argc, char **argv) {
                                                       kAimedBlow * 2.0f, kAimedBlow * 2.0f}
                                           : player.AttackHitbox();
 
-            grove.Strike(swing, 1.0f, player.Centre(), world.Sky().Time());
+            // One blow's worth, in logs cut through.
+            //
+            // Chopping is hit-based and Minecraft's breaking is time-based, and this
+            // is where the two are reconciled: a held attack lands a blow every
+            // kAttackCooldown, a tree is flora::Settings::toughness logs thick, and
+            // a log costs flora::kLogSeconds by hand. So a blow is worth one
+            // cadence's share of one log, and a tree comes down in the time its own
+            // logs would take.
+            //
+            // Nothing about the swing changes when there is an axe. An axe is a
+            // ToolSpeed, and it divides the same seconds the ground's do.
+            constexpr float kChopBlow = player_config::kAttackCooldown / flora::kLogSeconds;
+
+            grove.Strike(swing, kChopBlow, player.Centre(), world.Sky().Time());
 
             // And whatever grass the same swing went through. A tuft gives up
             // fibre where a tree gives up wood, into the same pile on the ground.

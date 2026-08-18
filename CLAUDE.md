@@ -626,6 +626,35 @@ The two refusals are kept apart — `founded_` and `roomy_` in `Editor` — beca
 they ask the player for opposite things: one to build from something that holds,
 the other to get out of the way.
 
+### 10.5b Nothing is placed over anything
+
+`World::CellVacant`, checked by `PlaceCell`. A cell already holding an occupying
+material refuses a placement instead of replacing what is there.
+
+It used to replace, and the reasoning was sound in isolation: two occupying materials
+cannot share a vertex, so setting one into a cell has to clear whatever was there,
+and clearing it *and handing it back* is more generous than destroying it. What that
+misses is the economy. Once a block costs time to break (§13), a seam of diamond is
+fifteen seconds a cell — and right-clicking a cobblestone into it took the diamond
+out instantly and gave it to the player. The cheapest way to mine anything was to
+build over it, and every figure in the hardness table was a suggestion.
+
+Two exceptions, and they are the point rather than edge cases:
+
+- **A wall** contests no vertex and exists to stand *behind* a block (§11.2).
+  Refusing one where a block stands would make a wall impossible to put up anywhere
+  it is actually wanted. `--build` checks this end to end and would fail if the guard
+  were written against every material instead of against `occupies`.
+- **A liquid** is poured into a space rather than pressed into one, and `ApplyStroke`
+  already declines the vertices a solid fills.
+
+The refusal is in the world and not only in the hand, so that a caller written later
+cannot quietly get the old behaviour back — the same argument that puts the body's
+refusal there (§10.5). The hand asks a frame early as well, so the square goes red
+before the button is pressed, and it is `Editor::vacant_`: a third refusal kept apart
+from the other two because it asks the player for a third thing, which is to clear
+the space first.
+
 ### 10.6 The brush became square, and then it became the only shape
 
 `World::Place` and `World::Excavate` — the circular brush of an arbitrary radius
@@ -811,3 +840,141 @@ writing down so neither is "fixed" later:
 - **`grove.cpp`** — this is the profile the *scatter* stands trees on, and the
   scatter is deliberately blind to what has been dug or built. A plant the player
   puts down goes through `FootingUnder` instead.
+
+---
+
+## 13. Blocks resist, and the bar is the crack
+
+Digging used to be instantaneous: hold the button, sweep, and material came away as
+fast as the cursor moved. Now a block has to be worked at. Four things in it are
+decisions rather than tuning.
+
+### 13.1 The table holds Minecraft's hardness, not a time
+
+`ElementDef::hardness` is the wiki's own figure -- stone 1.5, cobble 2, dirt and sand
+0.5, planks 2, every ore 3 -- and the seconds are worked out from it. That is the
+right way round: a time is a *consequence* of the hardness, of whether what is held
+can harvest the block at all, and of the tool's speed.
+
+Minecraft computes damage per tick as `speed / hardness / divisor`, with the divisor
+**30** where the tool can harvest and **100** where it cannot. Twenty ticks to the
+second makes that `hardness x 1.5` seconds when it can and `hardness x 5` when it
+cannot -- `kHarvests` and `kRefuses`. Dirt drops to a fist, so a bare hand gets 1.5
+and dirt is three quarters of a second. Stone drops nothing without a pickaxe, so a
+bare hand gets 5, and 1.5 x 5 is the seven and a half seconds everybody who has
+punched stone remembers.
+
+`BreakSeconds` is the only place any of that happens.
+
+| ours | stands for | hardness | by hand |
+|---|---|---|---|
+| rock | Stone | 1.5 | 7.5 s |
+| soil | Dirt | 0.5 | 0.75 s |
+| sand | Sand | 0.5 | 0.75 s |
+| snow | Snow Block | 0.2 | 1.0 s |
+| wood plank, wood wall | Oak Planks | 2 | 3.0 s |
+| cobblestone | Cobblestone | 2 | 10 s |
+| coal, copper, iron, gold, diamond, emerald | the ores | 3 | 15 s |
+| water | -- | 0 | at a touch |
+
+Our grass is a band drawn on soil rather than a material, so Minecraft's grass block
+has nothing here to attach its 0.9 to.
+
+**The scale is not corrected and that is a decision to revisit.** A cell is 18 px and
+the character four of them tall, where a Minecraft player is under two blocks -- so a
+cell is about half a block on a side and a quarter of one by area, and clearing the
+same *volume* of stone costs four times what Minecraft charges. Dividing the whole
+table by four is the correction if that is wanted; nothing else would have to move.
+
+### 13.2 What a stroke costs, and why the brush size does not change the rate
+
+Charged per **vertex** actually standing there, over `kVerticesPerBlock` of them to
+the cell. A cell buried in a hillside costs the whole figure; one at a ragged contour
+edge holding two vertices of nine costs two ninths. So an edge comes away quickly
+instead of at the price of solid rock, and the time is the time to clear what is
+really there.
+
+It follows that digging runs at the same **vertices per second** whatever
+`Editor::span_` is set to. That is the same invariant the economy already keeps -- a
+cell costs one block to place and returns one to dig, whatever brush laid it -- and
+giving a wide brush a discount would make the span a power setting rather than a
+choice.
+
+### 13.2b The tool data is in the table and the tools are not
+
+`ElementDef::tool` says which of `Tool::{Hand, Pick, Shovel, Axe}` a material gives
+way to, and `ElementDef::needsTool` whether that tool is *required* to get anything
+out of it. The second is the difference between dirt and stone and is what makes the
+hand times above come out right.
+
+Nothing can be held that satisfies either yet: `ToolInHand()` returns `Tool::Hand`
+and `ToolSpeed` returns 1. Those two are the only lines that change when there is a
+pickaxe -- Minecraft's tiers run 2, 4, 6, 8, 12 for wood through netherite, and
+`BreakSeconds` already divides by whatever comes back.
+
+`Tool::Hand` in a row means **nothing in particular**, not "bare hands are right for
+it".
+
+### 13.2c A tree is its logs
+
+`flora::Settings::toughness` used to be "hits a mature tree takes", which is the same
+number in the wrong unit: a hit is a property of the swing, so the figure could not be
+set from anything or compared with anything. It is now **logs**, and an oak at five is
+five logs.
+
+Minecraft's oak log is hardness 2 and drops to a fist, so it costs the harvesting
+rate: `flora::kLogSeconds` is 3. Chopping here is a swing rather than a hold, so the
+two meet through the cadence -- `kChopBlow` in `main.cpp` is
+`kAttackCooldown / kLogSeconds`, one blow being one cadence's share of one log. A
+whole oak therefore takes about fifteen seconds by hand, which is what its logs would
+take, and is meant to be a reason to want an axe.
+
+An axe will be a `ToolSpeed` and will divide the same seconds the ground's does.
+Nothing about the swing changes.
+
+### 13.3 A bar, because there is no block to crack
+
+Minecraft cracks the block's own face. That cannot be done here and the reason is
+§5.5: a cell is drawn from a contour it shares with its neighbours, out of a
+chunk-wide texture that is cached and blitted. There is no per-cell picture to put a
+crack on, and giving each cell one would cost the whole texture cache.
+
+The bar sits over the block being worked, which is where the outline of that block is
+already drawn, so the eye is there anyway.
+
+### 13.4 Letting go gives the work back, and says so
+
+`Editor::LetGo` runs the bar back up to full while fading it out, over `kLetGo`.
+The two together are the message: the work is gone, the block is exactly as it was,
+and stopping cost the player nothing they had.
+
+The bite is thrown away whenever the aim leaves the block it was started against, or
+when that block's contents change under it. That is the mechanic and not a
+shortcoming of it — what makes breaking something feel like work is that it has to be
+worked *at* — and it is why the giving-back has to be legible.
+
+Two clocks are involved and only one is right. Both the bite and the ease run on
+`GetFrameTime()` and not on the weather clock, because how long a rock takes to break
+is a rule of the game: on the weather clock, F7 would break stone forty times faster.
+
+### 13.5 Ask the world what the cell holds, through the same walk the spade uses
+
+`World::CellHolds` counts per material over exactly the vertices `ExcavateCell` would
+take. **It must not be a point sample**, and this shipped as a bug that was worth the
+lesson.
+
+It was written to read each cell's middle, on the reasoning that the middle is where
+every question about a cell is asked -- which is true of what a cell *is* and false of
+whether there is anything in it. At a contour edge the middle is open sky while a
+corner still holds ground. That remnant is one vertex, so it draws almost nothing and
+reads as empty air; but a body collides with the square around every filled vertex, so
+it is solid; and a hand deciding from the middle refuses to dig it. Invisible,
+impassable and immovable at once -- which is one bug and not three, and it stranded
+the player.
+
+A cell holding only a wall counts as the wall, on `ExcavateCell`'s own order: the layer
+behind is taken only where nothing in front was found (§11.2). The background row is
+looked up rather than named, so a second wall material needs nothing edited.
+
+A stroke where no cell holds anything does not start a bite at all. The bar must not
+appear over open sky.

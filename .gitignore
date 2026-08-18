@@ -17,6 +17,10 @@ third_party/
 # experimentacao; os valores que valem viram padrao em TerrainGenerator.hpp.
 terrain.cfg
 
+# Pasta montada por `cmake --build build --target dist`: uma copia do executavel
+# e dos assets, pronta para zipar. Deriva inteiramente do build.
+dist/
+
 # Capturas de tela
 *.png
 

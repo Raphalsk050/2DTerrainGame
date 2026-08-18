@@ -364,7 +364,7 @@ float Stature(const flora::Plant &plant, flora::Stage stage) {
     const float full = def.height[flora::StageIndex(flora::Stage::Mature)];
     const float here = def.height[flora::StageIndex(stage)] * plant.scale;
 
-    return std::clamp(here / std::max(full, 1e-3f), 0.12f, 1.5f);
+    return std::clamp(here / std::max(full, 1e-3f), flora::kStatureLeast, flora::kStatureMost);
 }
 
 // How fast a plant grows, as a share of the way to maturity per second.

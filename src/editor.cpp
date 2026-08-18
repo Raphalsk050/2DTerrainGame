@@ -75,6 +75,11 @@ const char *Editor::Spend(World &world, Inventory &inventory, Drops &drops, Rect
         if (!founded_) return "nothing here to fix it to";
     }
 
+    // Asked of every material and not only of a built one, and after the two above:
+    // a player standing inside the cell is told to move before they are told to dig,
+    // because moving is what they have to do either way.
+    if (!vacant_) return "something is already there — dig it out first";
+
     World::Yield freed{};
 
     const int budget = held.count;
@@ -110,8 +115,9 @@ const char *Editor::Spend(World &world, Inventory &inventory, Drops &drops, Rect
 
     if (spent > 0) inventory.Take(inventory.Selected(), spent);
 
-    // Placing is a replacement, so a stroke pressed into a seam of ore hands the
-    // ore back rather than destroying it.
+    // A stroke can still free something even though placing no longer replaces
+    // anything: a liquid is displaced by a solid poured into it, and that liquid has
+    // to be handed back rather than destroyed.
     const Rectangle whole = World::CellBounds(x0, y0);
 
     Bank(freed, drops, {whole.x + whole.width * 0.5f, whole.y + whole.height * 0.5f}, away, now);
@@ -304,8 +310,65 @@ void DrawSpade(Vector2 at, float scale, float thick, Color color) {
     Outline(kSpadeHole, static_cast<int>(std::size(kSpadeHole)), at, scale, 0.0f, thick, color);
 }
 
+// The world rectangle a block of cells covers.
+Rectangle BlockBounds(int cx, int cy, int w, int h) {
+    const Rectangle from = World::CellBounds(cx, cy);
+    const Rectangle to   = World::CellBounds(cx + w - 1, cy + h - 1);
+
+    return {from.x, from.y, to.x + to.width - from.x, to.y + to.height - from.y};
+}
+
 } // namespace
 
+void Editor::LetGo() {
+    // Nothing was being broken, or nothing had been put into it yet. The second case
+    // matters: a click that lands and comes straight off must not flash a bar.
+    if (bite_.takes <= 0.0f || bite_.done <= 0.0f) {
+        bite_.takes = 0.0f;
+        bite_.done  = 0.0f;
+
+        return;
+    }
+
+    bite_.letFrom = 1.0f - std::clamp(bite_.done / bite_.takes, 0.0f, 1.0f);
+    bite_.let     = kLetGo;
+
+    bite_.letX = bite_.cx;
+    bite_.letY = bite_.cy;
+    bite_.letW = bite_.w;
+    bite_.letH = bite_.h;
+
+    bite_.takes = 0.0f;
+    bite_.done  = 0.0f;
+}
+
+Editor::Progress Editor::Biting() const {
+    Progress out;
+
+    // Being worked on now: the bar is the health left in the block.
+    if (bite_.takes > 0.0f && bite_.done > 0.0f) {
+        out.showing = true;
+        out.health  = 1.0f - std::clamp(bite_.done / bite_.takes, 0.0f, 1.0f);
+        out.ink     = 1.0f;
+        out.over    = BlockBounds(bite_.cx, bite_.cy, bite_.w, bite_.h);
+
+        return out;
+    }
+
+    // Let go of: the bar runs back up to full and fades as it goes. The two together
+    // are the whole message — the work is gone, the block is exactly as it was, and
+    // nothing was taken from the player for having stopped.
+    if (bite_.let > 0.0f) {
+        const float gone = 1.0f - bite_.let / kLetGo;
+
+        out.showing = true;
+        out.health  = bite_.letFrom + (1.0f - bite_.letFrom) * gone;
+        out.ink     = 1.0f - gone;
+        out.over    = BlockBounds(bite_.letX, bite_.letY, bite_.letW, bite_.letH);
+    }
+
+    return out;
+}
 
 const char *Editor::Update(World &world, Inventory &inventory, Grove &grove, fixture::Fixtures &fixtures,
                            const Camera2D &camera, Rectangle body, float now) {
@@ -330,7 +393,19 @@ const char *Editor::Update(World &world, Inventory &inventory, Grove &grove, fix
     // The latch comes off the moment the button does, wherever this frame returns
     // from. A mode that outlived its press would make the *next* click inherit the
     // last one's tool.
-    if (IsMouseButtonUp(MOUSE_BUTTON_LEFT)) left_ = Hand::Idle;
+    if (IsMouseButtonUp(MOUSE_BUTTON_LEFT)) {
+        left_ = Hand::Idle;
+
+        LetGo();
+    }
+
+    // The bar giving the work back, run here rather than in the draw: it has to keep
+    // running through every path below that returns early, and half of them are the
+    // reasons it started.
+    //
+    // On the frame clock and not the world's, because it is a message to the player
+    // rather than a thing happening in the world — F7 must not make it flash past.
+    if (bite_.let > 0.0f) bite_.let = std::max(bite_.let - GetFrameTime(), 0.0f);
 
     const Vector2 mouse = GetMousePosition();
 
@@ -338,6 +413,8 @@ const char *Editor::Update(World &world, Inventory &inventory, Grove &grove, fix
     // to the bar alone. The cursor is dropped as well, otherwise it would hang
     // over the slots as if they were something to dig.
     if (hotbar::Contains(mouse)) {
+        LetGo();
+
         under_.reset();
         reachable_ = false;
         timber_    = false;
@@ -380,7 +457,17 @@ const char *Editor::Update(World &world, Inventory &inventory, Grove &grove, fix
     roomy_   = building_
            && (!Def(hand.AsElement()).rules.blocksBodies || world.CellClear(cellX_, cellY_, body));
 
-    buildable_ = building_ && reachable_ && founded_ && roomy_;
+    // Asked a frame ahead so the square goes red before the button is pressed. The
+    // world asks it again and is the one that enforces it — see World::CellVacant.
+    //
+    // Of any material that occupies and not only of a building one: laying soil over
+    // a seam of ore was the same hole as setting a block into it, and it has to
+    // refuse and say so rather than quietly doing nothing.
+    const bool occupying = hand.holds == Holds::Material && hand.count > 0 && Def(hand.AsElement()).rules.occupies;
+
+    vacant_ = !occupying || world.CellVacant(cellX_, cellY_);
+
+    buildable_ = building_ && reachable_ && founded_ && roomy_ && vacant_;
 
 
     // Where the thing in hand would come to rest, if it is the kind of thing that
@@ -433,7 +520,11 @@ const char *Editor::Update(World &world, Inventory &inventory, Grove &grove, fix
 
     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) left_ = timber_ ? Hand::Chop : Hand::Dig;
 
-    if (!reachable_) return nullptr;
+    if (!reachable_) {
+        LetGo();
+
+        return nullptr;
+    }
 
     // The left hand digs only where this press was a dig. Where it was a chop the
     // swing belongs to the caller, and this must keep its hands off the ground —
@@ -441,7 +532,11 @@ const char *Editor::Update(World &world, Inventory &inventory, Grove &grove, fix
     const bool digging = left_ == Hand::Dig;
     const bool placing = IsMouseButtonDown(MOUSE_BUTTON_RIGHT);
 
-    if (!digging && !placing) return nullptr;
+    if (!digging && !placing) {
+        LetGo();
+
+        return nullptr;
+    }
 
     // Thrown away from the player rather than towards them, the same way the wood
     // off a felled tree goes.
@@ -463,6 +558,11 @@ const char *Editor::Update(World &world, Inventory &inventory, Grove &grove, fix
             fixture::Kind what = fixture::Kind::Torch;
 
             if (fixtures.Remove(cellX_, cellY_, what)) {
+                // No resistance and no bar. A torch is hung on a surface rather
+                // than being part of one, and Minecraft takes one instantly for the
+                // same reason.
+                LetGo();
+
                 const Rectangle where = World::CellBounds(cellX_, cellY_);
 
                 // On the ground like everything else taken off the world — see
@@ -475,6 +575,71 @@ const char *Editor::Update(World &world, Inventory &inventory, Grove &grove, fix
                 return nullptr;
             }
         }
+
+        // What the block holds, and what steady work against it costs.
+        //
+        // Asked of the world over the same vertices the spade would take, and not
+        // sampled at each cell's middle — see World::CellHolds. The middle is the
+        // right place to ask what a cell *is*, and the wrong place to ask whether
+        // there is anything in it: at a contour edge the middle is open sky while a
+        // corner still holds ground, and that one vertex is invisible, solid to a
+        // body, and — if the hand believed the middle — impossible to dig back out.
+        //
+        // Counted per vertex, so the time is the time to clear what is actually
+        // there. A cell standing in a hillside is nine vertices of it and a cell at
+        // its edge is two, and the second costs two ninths of the first, which is
+        // both fair and what makes a ragged edge come away quickly instead of at the
+        // price of solid rock.
+        World::Yield holds{};
+
+        for (int cx = x0; cx <= x1; cx++) {
+            for (int cy = y0; cy <= y1; cy++) world.CellHolds(cx, cy, holds);
+        }
+
+        float takes = 0.0f;
+        int filled  = 0;
+
+        for (std::size_t e = 0; e < kElementCount; e++) {
+            if (holds[e] <= 0) continue;
+
+            takes += BreakSeconds(static_cast<Element>(e), ToolInHand()) * holds[e] / kVerticesPerBlock;
+            filled += holds[e];
+        }
+
+        // Aimed at open sky. Not a bite that fails, a bite that never began — the bar
+        // must not appear over nothing.
+        if (filled == 0) {
+            LetGo();
+
+            return nullptr;
+        }
+
+        // A different block, or the same one holding something else than when the
+        // work started. Either way this is not what was being broken, and the work
+        // goes back rather than transferring to whatever is under the cursor now —
+        // which is the mechanic: a thing has to be worked *at*.
+        const bool same = bite_.takes > 0.0f && bite_.cx == x0 && bite_.cy == y0 && bite_.was == holds;
+
+        if (!same) {
+            LetGo();
+
+            bite_.cx   = x0;
+            bite_.cy   = y0;
+            bite_.w    = x1 - x0 + 1;
+            bite_.h    = y1 - y0 + 1;
+            bite_.was  = holds;
+            bite_.done = 0.0f;
+        }
+
+        bite_.takes = takes;
+
+        // The frame clock, not the world's: how long a rock takes to break is a rule
+        // of the game and must not run at forty times the rate under F7.
+        bite_.done += GetFrameTime();
+
+        // Zero hardness comes away on the first frame, which is what a liquid should
+        // do and what any row written at zero is asking for.
+        if (bite_.done < bite_.takes) return nullptr;
 
         World::Yield freed{};
 
@@ -489,6 +654,11 @@ const char *Editor::Update(World &world, Inventory &inventory, Grove &grove, fix
         const Rectangle at = World::CellBounds(x0, y0);
 
         Bank(freed, grove.Fallen(), {at.x + at.width * 0.5f, at.y + at.height * 0.5f}, away, now);
+
+        // Broken, so there is nothing to give back and no bar to fade: cleared
+        // outright rather than through LetGo. The next frame starts a fresh bite
+        // against whatever is behind it.
+        bite_ = {};
 
         return nullptr;
     }
@@ -564,10 +734,81 @@ const char *Editor::Update(World &world, Inventory &inventory, Grove &grove, fix
     return "that is not something to put down";
 }
 
+namespace {
+
+// Two colours mixed, for the bar's ramp. Local because it is three lines and the
+// one other Mix in this codebase is a static in weather.cpp.
+Color Mix(Color a, Color b, float t) {
+    const float s = std::clamp(t, 0.0f, 1.0f);
+
+    return {static_cast<unsigned char>(a.r + (b.r - a.r) * s),
+            static_cast<unsigned char>(a.g + (b.g - a.g) * s),
+            static_cast<unsigned char>(a.b + (b.b - a.b) * s), a.a};
+}
+
+// The block's health, over the block.
+//
+// Minecraft cracks the block itself, which cannot be done here: a cell is drawn from
+// a contour shared with its neighbours and out of a chunk-wide texture, so there is
+// no per-cell picture to crack and putting one there would cost the whole cache. A
+// bar over it says the same thing and says it in one place the eye is already
+// looking, since the outline of the block is drawn there too.
+//
+// Sized in screen pixels over the zoom, like every other mark the cursor makes: a
+// world-sized bar doubles with the view and is a slab at full zoom.
+void DrawHealth(const Editor::Progress &work, float zoom) {
+    if (!work.showing) return;
+
+    constexpr float kHeight = 5.0f;
+    constexpr float kLift   = 7.0f;
+
+    const float high = kHeight / zoom;
+    const float over = kLift / zoom;
+    const float edge = 1.0f / zoom;
+
+    const Rectangle bar = {work.over.x, work.over.y - over - high, work.over.width, high};
+
+    const auto fade = [&](Color colour) {
+        return Color{colour.r, colour.g, colour.b,
+                     static_cast<unsigned char>(colour.a * std::clamp(work.ink, 0.0f, 1.0f))};
+    };
+
+    // A ground of its own under the fill, so the bar reads against a hillside and
+    // against open sky alike. Without it the empty end of the bar is whatever
+    // happens to be behind it and the length stops being legible.
+    DrawRectangleRec(bar, fade({16, 18, 24, 190}));
+
+    const float left = std::clamp(work.health, 0.0f, 1.0f);
+
+    // Green through amber to red as it goes, which is the one thing about a health
+    // bar nobody has to be taught.
+    const Color full = {96, 210, 108, 235};
+    const Color half = {232, 184, 72, 235};
+    const Color gone = {224, 88, 72, 235};
+
+    const Color tone = (left > 0.5f) ? Mix(half, full, (left - 0.5f) * 2.0f) : Mix(gone, half, left * 2.0f);
+
+    if (left > 0.0f) {
+        DrawRectangleRec({bar.x + edge, bar.y + edge, (bar.width - edge * 2.0f) * left, bar.height - edge * 2.0f},
+                         fade(tone));
+    }
+
+    DrawRectangleLinesEx(bar, edge, fade({12, 14, 18, 220}));
+}
+
+} // namespace
+
 void Editor::DrawCursor(const Inventory &inventory, const Grove &grove, flora::Season season,
                         const Camera2D &camera) const {
     const Vector2 mouse = GetMousePosition();
     if (hotbar::Contains(mouse)) return;
+
+    // Before every early return below it, and outside the reach test. The bar is
+    // about a block that is *being* worked on, and the paths that give up on drawing
+    // a cursor — a hand over the axe, a cursor out of range — are exactly the paths
+    // where the work has just been let go of and the giving-back is what there is to
+    // show.
+    DrawHealth(Biting(), std::max(camera.zoom, 0.01f));
 
     const Vector2 target = GetScreenToWorld2D(mouse, camera);
 

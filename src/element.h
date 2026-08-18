@@ -547,6 +547,50 @@ struct ElementPaint {
 
 };
 
+// Which tool a material gives way to.
+//
+// There are no tools yet. This is the table entry they will read when there are,
+// and it is here now for the reason a hardness is: both are properties of the
+// material, both have to be written down once per row, and a row added later
+// without them is a row somebody has to come back to. The breaking already asks
+// this question every frame — it simply gets the same answer every time until
+// something can be held that changes it.
+//
+// `Hand` in a row means *nothing helps*: soil comes away at the same rate whatever
+// is in the hand. It is not "the hand is the right tool for it".
+//
+// They will work the way Minecraft's do — held in the hotbar and nothing else, no
+// mode and no equip step, which is the same argument editor.h already makes about
+// the two hands: what a hand does depends on what is in it.
+enum class Tool : std::uint8_t {
+    Hand,
+    Pick,
+    Shovel,
+    Axe,
+};
+
+// Minecraft's own two multipliers, and they are the whole of why a bare hand is
+// hopeless against stone and fine against dirt.
+//
+// The game computes damage per tick as `speed / hardness / divisor`, with the
+// divisor 30 where the tool can *harvest* the block and 100 where it cannot. At
+// twenty ticks to the second that is hardness x 1.5 seconds when it can and
+// hardness x 5 when it cannot. Dirt drops with anything, so a bare hand gets 1.5;
+// stone drops nothing without a pickaxe, so a bare hand gets 5 — and 1.5 hardness
+// times 5 is the seven and a half seconds everyone who has punched stone remembers.
+inline constexpr float kHarvests = 1.5f;
+inline constexpr float kRefuses  = 5.0f;
+
+// How fast a tool goes through what it is right for.
+//
+// One for the hand, and one for everything today because nothing can be held that
+// is a tool. Minecraft's tiers run 2, 4, 6, 8, 12 for wood through netherite, and
+// this is the function that will return them — the arithmetic above already divides
+// by it, so a tier arriving here changes nothing else.
+inline constexpr float ToolSpeed(Tool) {
+    return 1.0f;
+}
+
 struct ElementDef {
     const char *name;
 
@@ -595,6 +639,45 @@ struct ElementDef {
     // `Count` stands for "itself", because a row of a constexpr table cannot name
     // itself in its own initialiser. Read it through YieldOf and never directly.
     Element yields = Element::Count;
+
+    // Minecraft's own hardness for the block this stands for, unscaled.
+    //
+    // Written as the wiki writes it rather than as a number of seconds, because the
+    // seconds are a *consequence* — of the hardness, of whether the hand can harvest
+    // it at all, and of what is being swung. BreakSeconds does that arithmetic and is
+    // the only place that should.
+    //
+    // A cell and not a block-you-can-see, which is the figure to keep in mind when
+    // tuning: `config::kBuildCell` is eighteen pixels and the character is four of
+    // them tall, where a Minecraft block is half a player. So these run well under
+    // Minecraft's own numbers and should — a cell here is a smaller bite of world.
+    //
+    // The resulting time is charged per *vertex* actually standing there, over
+    // kVerticesPerBlock of them to the cell — so a cell buried in a hillside costs
+    // the whole figure and one at its ragged edge, holding two vertices of nine,
+    // costs two ninths. A contour edge comes away quickly rather than at the price of
+    // solid rock, and the time is the time to clear what is really there.
+    //
+    // It follows that **digging runs at the same vertices per second whatever the
+    // brush is set to**. That invariant is deliberate and it is the same one the
+    // economy already keeps: a cell costs one block to place and returns one to dig,
+    // whatever brush laid it. The span decides the *shape* of a stroke, never its
+    // rate.
+    //
+    // Zero means it comes away the instant it is touched, which is what a liquid
+    // does and what anything not really dug should do.
+    float hardness = 0.5f;
+
+    // Which tool it gives way to. `Tool::Hand` means none in particular.
+    Tool tool = Tool::Hand;
+
+    // Whether that tool is *required* to get anything out of it.
+    //
+    // The difference between dirt and stone, and it is the whole of why one is a
+    // moment and the other is seven and a half seconds — see kHarvests. Dirt asks for
+    // a shovel and gives its dirt up to a fist; stone asks for a pickaxe and gives a
+    // fist nothing at all, so the fist is charged the refusing rate.
+    bool needsTool = false;
 
     ElementRules rules;
     ElementSpawn spawn;
@@ -657,6 +740,10 @@ inline constexpr ElementDef kElements[] = {
         // Minecraft's arrangement and it is worth keeping for the same reason —
         // ground that was never dug looks different from ground that was.
         .yields = Element::Cobblestone,
+        // Stone: hardness 1.5, and a fist gets nothing out of it -- 7.5 s by hand.
+        .hardness  = 1.5f,
+        .tool      = Tool::Pick,
+        .needsTool = true,
 
         .rules = {.blocksBodies = true, .blocksLiquid = true, .occupies = true, .precedence = 0},
         .spawn   = {.generator = Generator::Terrain},
@@ -700,6 +787,9 @@ inline constexpr ElementDef kElements[] = {
                 "cdcddc",
             },
         .stack = 64,
+        // Dirt: hardness 0.5 -- 0.75 s by hand.
+        .hardness  = 0.5f,
+        .tool      = Tool::Shovel,
 
         .rules = {.blocksBodies = true, .blocksLiquid = true, .occupies = true, .precedence = 7},
         .spawn =
@@ -771,6 +861,9 @@ inline constexpr ElementDef kElements[] = {
                 "ccdccd",
             },
         .stack = 64,
+        // Sand: hardness 0.5 -- 0.75 s by hand.
+        .hardness  = 0.5f,
+        .tool      = Tool::Shovel,
 
         .rules = {.blocksBodies = true, .blocksLiquid = true, .occupies = true, .precedence = 8},
         .spawn =
@@ -844,6 +937,10 @@ inline constexpr ElementDef kElements[] = {
                 "ccdccd",
             },
         .stack = 64,
+        // Snow Block: hardness 0.2, and a fist gets nothing out of it -- 1 s by hand.
+        .hardness  = 0.2f,
+        .tool      = Tool::Shovel,
+        .needsTool = true,
 
         .rules     = {.blocksBodies = true, .blocksLiquid = true, .occupies = true, .precedence = 9},
         .spawn =
@@ -993,6 +1090,10 @@ inline constexpr ElementDef kElements[] = {
         // a snowbank replaces it rather than being swallowed by it. What it
         // displaces comes back to the player — see World::ApplyBrush, which pays
         // out whatever it cleared.
+        // Oak Planks: hardness 2 -- 3 s by hand.
+        .hardness  = 2.0f,
+        .tool      = Tool::Axe,
+
         .rules = {.blocksBodies = true, .blocksLiquid = true, .occupies = true, .precedence = 10},
         .spawn = {.generator = Generator::None},
 
@@ -1033,6 +1134,10 @@ inline constexpr ElementDef kElements[] = {
             },
         .stack  = 64,
         .laying = Laying::Cell,
+        // Cobblestone: hardness 2, and a fist gets nothing out of it -- 10 s by hand.
+        .hardness  = 2.0f,
+        .tool      = Tool::Pick,
+        .needsTool = true,
 
         .rules = {.blocksBodies = true, .blocksLiquid = true, .occupies = true, .precedence = 11},
         .spawn = {.generator = Generator::None},
@@ -1075,6 +1180,10 @@ inline constexpr ElementDef kElements[] = {
 
         // Behind everything and in the way of nothing. No precedence, because it
         // never enters the contest — see ElementRules::background.
+        // Oak Planks: hardness 2 -- 3 s by hand.
+        .hardness  = 2.0f,
+        .tool      = Tool::Axe,
+
         .rules = {.background = true},
         .spawn = {.generator = Generator::None},
 
@@ -1123,6 +1232,10 @@ inline constexpr ElementDef kElements[] = {
                 "cddddc",
             },
         .stack = 64,
+        // Coal Ore: hardness 3, and a fist gets nothing out of it -- 15 s by hand.
+        .hardness  = 3.0f,
+        .tool      = Tool::Pick,
+        .needsTool = true,
 
         .rules = {.blocksBodies = true, .blocksLiquid = true, .occupies = true, .precedence = 1},
         .spawn =
@@ -1171,6 +1284,10 @@ inline constexpr ElementDef kElements[] = {
                 "bcccdd",
             },
         .stack = 64,
+        // Copper Ore: hardness 3, and a fist gets nothing out of it -- 15 s by hand.
+        .hardness  = 3.0f,
+        .tool      = Tool::Pick,
+        .needsTool = true,
 
         .rules     = {.blocksBodies = true, .blocksLiquid = true, .occupies = true, .precedence = 2},
         .spawn =
@@ -1216,6 +1333,10 @@ inline constexpr ElementDef kElements[] = {
                 "cdcddd",
             },
         .stack = 64,
+        // Iron Ore: hardness 3, and a fist gets nothing out of it -- 15 s by hand.
+        .hardness  = 3.0f,
+        .tool      = Tool::Pick,
+        .needsTool = true,
 
         .rules     = {.blocksBodies = true, .blocksLiquid = true, .occupies = true, .precedence = 3},
         .spawn =
@@ -1258,6 +1379,10 @@ inline constexpr ElementDef kElements[] = {
                 "cccddd",
             },
         .stack = 64,
+        // Gold Ore: hardness 3, and a fist gets nothing out of it -- 15 s by hand.
+        .hardness  = 3.0f,
+        .tool      = Tool::Pick,
+        .needsTool = true,
 
         .rules     = {.blocksBodies = true, .blocksLiquid = true, .occupies = true, .precedence = 4},
         .spawn =
@@ -1300,6 +1425,10 @@ inline constexpr ElementDef kElements[] = {
                 "cddddc",
             },
         .stack = 64,
+        // Diamond Ore: hardness 3, and a fist gets nothing out of it -- 15 s by hand.
+        .hardness  = 3.0f,
+        .tool      = Tool::Pick,
+        .needsTool = true,
 
         .rules     = {.blocksBodies = true, .blocksLiquid = true, .occupies = true, .precedence = 5},
         .spawn =
@@ -1352,6 +1481,10 @@ inline constexpr ElementDef kElements[] = {
                 "cbccdc",
             },
         .stack = 64,
+        // Emerald Ore: hardness 3, and a fist gets nothing out of it -- 15 s by hand.
+        .hardness  = 3.0f,
+        .tool      = Tool::Pick,
+        .needsTool = true,
 
         .rules     = {.blocksBodies = true, .blocksLiquid = true, .occupies = true, .precedence = 6},
         .spawn =
@@ -1407,6 +1540,11 @@ inline constexpr ElementDef kElements[] = {
                 "ccdccd",
             },
         .stack = 64,
+
+        // Not dug. It comes away the instant it is touched, which is what a zero
+        // hardness is for.
+        .hardness  = 0.0f,
+        .tool      = Tool::Hand,
 
         .rules = {.flows = true, .buoyancy = 1.0f},
         // The only row whose extent this table does not describe.
@@ -1541,6 +1679,30 @@ inline constexpr Element YieldOf(Element element) {
     const Element what = Def(element).yields;
 
     return (what == Element::Count) ? element : what;
+}
+
+// Seconds to break one full cell of `element` with `with` in the hand.
+//
+// Minecraft's arithmetic, kept as arithmetic: the hardness is the material's, the
+// rate depends on whether what is held can harvest it, and the tool's speed divides
+// what is left. The one place any of that is decided, so tools arriving means a
+// ToolSpeed with more than one row in it and nothing else.
+inline constexpr float BreakSeconds(Element element, Tool with) {
+    const ElementDef &def = Def(element);
+
+    const bool harvests = !def.needsTool || (def.tool != Tool::Hand && with == def.tool);
+
+    return def.hardness * (harvests ? kHarvests : kRefuses) / ToolSpeed(with);
+}
+
+// What the player is holding, as a tool.
+//
+// Always Tool::Hand today: nothing in either table is a tool yet. It is a function
+// and not a constant so that the hand asks the question in the right shape from the
+// start — when there is a pick, this is the line that recognises it, and nothing
+// above it changes.
+inline constexpr Tool ToolInHand() {
+    return Tool::Hand;
 }
 
 // Vertical displacement of a band's two edges at a horizontal position.

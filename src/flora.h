@@ -232,10 +232,26 @@ struct SpeciesGrowth {
     float lightNeed = 0.5f;
     float waterNeed = 0.5f;
 
-    // Hits a mature tree takes before it comes down. Scaled by the stage, so a
-    // sapling goes in one.
+    // How much tree there is to cut through, in Minecraft logs. Scaled by the
+    // stage and by the specimen's own size, so a sapling goes in one and an
+    // unusually large one takes longer -- see kStatureMost.
+    //
+    // It was "hits", which is the same number and the wrong unit: a hit is a
+    // property of the swing and not of the tree, so the figure could not be
+    // compared with anything or set from anything. Read as logs it can: an oak at
+    // five is five logs, and Minecraft charges kLogSeconds for each of them.
     float toughness = 4.0f;
 };
+
+// The bounds Grove::Stature clamps a specimen's own scale to.
+//
+// Published rather than left where they are used, because the felling ceiling below
+// is worked out against kStatureMost: the longest any tree can take is the toughest
+// species at the largest a specimen of it grows, and a bound that did not know about
+// the scale would be a bound on the average and not on the worst case -- which is the
+// one a player meets and remembers.
+inline constexpr float kStatureLeast = 0.12f;
+inline constexpr float kStatureMost  = 1.5f;
 
 // What a species will root in, as the covers it accepts by name.
 //
@@ -801,6 +817,40 @@ inline constexpr SpeciesDef
 };
 
 static_assert(std::size(kSpecies) == kSpeciesCount, "every Species needs exactly one row in kSpecies");
+
+// The most tree there is to cut through anywhere in the table, in logs.
+//
+// The toughest species at the largest a specimen of it grows, because that is the
+// tree that decides how long felling can *ever* take, and it is what the ceiling has
+// to be held against.
+inline constexpr float Toughest() {
+    float most = 0.0f;
+
+    for (const SpeciesDef &def : kSpecies) {
+        if (def.growth.toughness > most) most = def.growth.toughness;
+    }
+
+    return most * kStatureMost;
+}
+
+// The longest a tree may take to fell by hand, in seconds. **This is the knob.**
+inline constexpr float kFellSeconds = 8.0f;
+
+// Seconds a bare hand takes over one log, worked back from that ceiling.
+//
+// Minecraft's own answer would be 3 -- an oak log is hardness 2 and drops to a fist,
+// so it costs the harvesting rate, 2 x 1.5. It is deliberately not used, and the
+// reason is a difference between the two games rather than taste. Minecraft spends
+// those seconds on five *separate* blocks, each breaking and dropping as it goes; a
+// tree here is one object that comes down whole, so the same fifteen seconds would be
+// spent in front of something that does not change until the last instant of it.
+// Fifteen seconds of nothing is not the same feature as five times three seconds of
+// something.
+//
+// Derived rather than written down, so a tougher species added to the table cannot
+// quietly walk past the ceiling. The species keep their differences among themselves;
+// what is fixed is the longest any of them may take.
+inline constexpr float kLogSeconds = kFellSeconds / Toughest();
 
 // The tree a sapling grows into, or nothing where the item is not a sapling.
 //

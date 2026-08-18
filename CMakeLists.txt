@@ -102,6 +102,27 @@ target_compile_features(${PROJECT_NAME} PRIVATE cxx_std_26)
 
 target_link_libraries(${PROJECT_NAME} PRIVATE raylib_cpp raylib)
 
+# O runtime do compilador vai dentro do executavel, nao ao lado dele.
+#
+# Sem isto o binario importa libstdc++-6.dll, libgcc_s_seh-1.dll e
+# libwinpthread-1.dll, que sao do MinGW-w64 e nao existem numa maquina que nunca
+# instalou o toolchain. O jogo abre aqui e nao abre na maquina de mais ninguem,
+# com uma caixa de erro sobre uma DLL ausente e nada que explique o que fazer.
+#
+# A raylib ja e estatica (libraylib.a), entao o que sobra depois disto sao apenas
+# DLLs do proprio Windows: kernel32, user32, gdi32, shell32, winmm, opengl32 e o
+# UCRT (api-ms-win-crt-*), que acompanha o Windows 10 em diante.
+#
+# Verificavel, e vale verificar depois de trocar de toolchain:
+#
+#     objdump -p build/CppGame.exe | grep "DLL Name"
+#
+# Se aparecer qualquer libgcc/libstdc++/libwinpthread nessa lista, o zip nao roda
+# na maquina do outro.
+if(MINGW)
+    target_link_options(${PROJECT_NAME} PRIVATE -static)
+endif()
+
 # A bank of scenes for testing the light, built on its own so that running it does
 # not mean starting the game and walking somewhere. Not part of the default build:
 # `cmake --build build --target LightScenes`, or tools/lightscenes.bat.
@@ -129,4 +150,24 @@ add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
             ${CMAKE_CURRENT_SOURCE_DIR}/assets
             $<TARGET_FILE_DIR:${PROJECT_NAME}>/assets
     COMMENT "Copying assets next to the executable"
+)
+
+# Uma pasta pronta para zipar: `cmake --build build --target dist`.
+#
+# Existe porque build/ nao serve para isso. Sao 430 MB, quase tudo _deps/ com o
+# codigo-fonte da raylib e os objetos intermediarios, e quem recebe o zip nao
+# precisa de nada disso. dist/ tem o executavel e os assets, e mais nada.
+#
+# Recriada a cada vez em vez de acumular: um asset renomeado deixaria a copia
+# antiga para tras, e o jogo carregaria a errada no computador de outra pessoa
+# sem carregar aqui.
+add_custom_target(dist
+    COMMAND ${CMAKE_COMMAND} -E rm -rf ${CMAKE_CURRENT_SOURCE_DIR}/dist
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_SOURCE_DIR}/dist
+    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:${PROJECT_NAME}> ${CMAKE_CURRENT_SOURCE_DIR}/dist/
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            ${CMAKE_CURRENT_SOURCE_DIR}/assets ${CMAKE_CURRENT_SOURCE_DIR}/dist/assets
+    DEPENDS ${PROJECT_NAME}
+    COMMENT "Montando dist/ para distribuicao"
+    VERBATIM
 )

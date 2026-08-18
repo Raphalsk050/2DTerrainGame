@@ -146,9 +146,9 @@ public:
     // kVerticesPerBlock. Nothing is charged where the cell already held the
     // material, which reports back as a `filled` of zero.
     //
-    // Placing is always a replacement, since two materials cannot share a vertex;
-    // a liquid is the exception and simply does not enter a vertex a solid already
-    // fills. `keepClear` is a region no material a body cannot walk through may be
+    // Placing is refused where anything already occupies the cell -- see CellVacant.
+    // A liquid and a wall are the two exceptions, and both for reasons of their own
+    // rather than as edge cases. `keepClear` is a region no material a body cannot walk through may be
     // laid in — the character's own body, in practice. Without it a player aiming
     // at their own feet walls themselves in, and the ground they built is the one
     // ground they cannot dig back out of, because a body already inside the rock
@@ -163,6 +163,48 @@ public:
     // square can go red before it is pressed rather than the press being
     // swallowed. PlaceCell asks it again and is the one that enforces it.
     bool CellClear(int cx, int cy, Rectangle keepClear) const;
+
+    // Whether a cell is free of anything a piece could be set into.
+    //
+    // Placing used to be a *replacement*: two occupying materials cannot share a
+    // vertex, so setting one into a cell cleared whatever was there and handed it
+    // back. That reads as generous and it is a hole through the whole game. A seam of
+    // diamond is fifteen seconds of work a cell; right-clicking a cobblestone into it
+    // took the diamond out instantly and gave it to the player, so the cheapest way
+    // to mine anything was to build over it. Every figure in element.h was a
+    // suggestion while that was true.
+    //
+    // So: something is already there, you dig it out first. Minecraft's rule and
+    // Terraria's, and the one that makes breaking a block mean anything.
+    //
+    // Only what *occupies*. A liquid does not stop a block -- it is displaced by one,
+    // which is what Minecraft does with water -- and a wall behind the cell is
+    // exactly what a block is meant to be built in front of, or a wall could never be
+    // covered up. See ElementRules::occupies and §11.2 of CLAUDE.md.
+    //
+    // Asked over every vertex of the cell and not at its middle. The middle is the
+    // right place to ask what a cell *is*; this is asking whether anything at all is
+    // in the way, and the answer has to be the same one ApplyStroke would act on, or
+    // there is a sliver of ore at a contour edge that a placement still eats.
+    bool CellVacant(int cx, int cy) const;
+
+    // What one cell of the build grid is holding, counted per material over the
+    // same vertices ExcavateCell would take out of it.
+    //
+    // The point of it is that it is the *same walk*. Anything asking "is there
+    // something here to break, and what is it" from a single point — the middle of
+    // the cell, say — is asking a different question than the spade answers, and the
+    // two part company exactly where it matters: at a contour edge, where the middle
+    // is open sky and a corner still holds ground. A remnant like that is one vertex,
+    // so it draws almost nothing and reads as empty air — but a body collides with
+    // the square around every filled vertex, so it is solid, and a hand that decided
+    // from the middle would refuse to dig it. Invisible, impassable and immovable at
+    // once, which is one bug and not three.
+    //
+    // Counted on the same rule ClearVertex counts by: one per material per vertex
+    // standing above its threshold. The layer behind is included only where nothing
+    // in front was found, which is ExcavateCell's own order — see §11.2 of CLAUDE.md.
+    void CellHolds(int cx, int cy, Yield &out) const;
 
     // Whether anything stands in the layer behind a cell.
     //

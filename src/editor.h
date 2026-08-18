@@ -230,6 +230,58 @@ private:
     // covers.
     void DrawGrid(const Stack &held, float zoom) const;
 
+    // How the ground gives way: not at once, but to steady work against one place.
+    //
+    // A bite is against the *stroke* — the block of cells the brush covers — and it
+    // costs the sum of what is in them, so digging runs at the same cells per second
+    // whatever the span is set to. See ElementDef::hardness.
+    //
+    // It is thrown away the moment the aim moves off the block it was started
+    // against, which is the mechanic and not a shortcoming of it: what makes
+    // breaking a thing feel like work is that it has to be worked at. `let` is what
+    // says so on screen — see Editor::Biting.
+    struct Bite {
+        int cx = 0;
+        int cy = 0;
+        int w  = 1;
+        int h  = 1;
+
+        // What the block held when the bite began. A cell that changed under the
+        // cursor — dug by something else, or flooded — is not the thing the player
+        // started on, and finishing the old bite would break something they never
+        // aimed at.
+        std::array<int, kElementCount> was{};
+
+        float done  = 0.0f;   // seconds of work put in
+        float takes = 0.0f;   // seconds the block needs; zero when there is nothing to break
+
+        // The bar letting go: seconds left of the ease, and the health it had when
+        // the player stopped. It refills to full and fades as it does, which is the
+        // whole message — the work is lost, the *block* is not.
+        float let     = 0.0f;
+        float letFrom = 0.0f;
+
+        int letX = 0;
+        int letY = 0;
+        int letW = 1;
+        int letH = 1;
+    };
+
+    // How long the bar takes to refill and fade after the player stops.
+    //
+    // Short. It is an answer to a question the player asked by letting go, and an
+    // answer still arriving a second later is being given to somebody who has
+    // already moved on.
+    static constexpr float kLetGo = 0.28f;
+
+    Bite bite_{};
+
+    // Gives the bite up, and starts the bar refilling from wherever it had got to.
+    // Called from every path where the player is not working this frame, and it is
+    // cheap and idempotent on purpose: a rule spread over a dozen early returns has
+    // to be safe to state a dozen times.
+    void LetGo();
+
     int span_ = 1;
 
     // Vertices of each material held over from earlier strokes, always less than
@@ -244,6 +296,25 @@ private:
 
     Hand left_ = Hand::Idle;
 
+    // How far into breaking the aimed block the player is, as the health left in
+    // it, and how much of that to draw.
+    //
+    // Two numbers because the bar has two lives: while the button is down it is the
+    // work done, and after it comes up it is an animation of that work being given
+    // back. Nothing outside needs to know which of the two it is looking at.
+public:
+    struct Progress {
+        bool showing = false;
+
+        float health = 1.0f;   // 1 is untouched, 0 is broken
+        float ink    = 1.0f;   // fades out as the bar refills
+
+        Rectangle over{};      // the block it belongs to
+    };
+
+    Progress Biting() const;
+
+private:
     // Whether the cursor is over something the axe would bite. Held from the last
     // update so the cursor and the click agree about which tool this is.
     bool timber_ = false;
@@ -264,11 +335,12 @@ private:
     int cellX_      = 0;
     int cellY_      = 0;
 
-    // The two ways a cell refuses, kept apart because they ask the player for
-    // opposite things: one to build from something that holds, the other to get
-    // out of the way.
+    // The three ways a cell refuses, kept apart because they ask the player for
+    // three different things: one to build from something that holds, one to get out
+    // of the way, and one to clear the space first.
     bool founded_ = false;
     bool roomy_   = false;
+    bool vacant_  = false;
 
 
     // The ground under the cursor, where the hand holds something that would be
