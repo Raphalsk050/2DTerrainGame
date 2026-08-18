@@ -64,20 +64,24 @@ add_executable(${PROJECT_NAME}
     src/noise_view.cpp
     src/debug_view.cpp
     src/canopy.cpp
+    src/commands.cpp
     src/drop.cpp
     src/editor.cpp
     src/fixture.cpp
     src/flora.cpp
     src/grove.cpp
     src/hotbar.cpp
+    src/hud.cpp
     src/inventory.cpp
     src/menu.cpp
     src/backdrop.cpp
     src/light.cpp
     src/picture.cpp
+    src/probes.cpp
     src/liquid_layer.cpp
     src/lit_layer.cpp
     src/player.cpp
+    src/render.cpp
     src/scuff.cpp
     src/console.cpp
     src/water.cpp

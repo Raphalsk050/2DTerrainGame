@@ -25,6 +25,19 @@ inline constexpr int kMinScreenHeight = 400;
 
 inline constexpr int kTargetFps = 320;
 
+// Liquid is simulated over a band wider than the view, so that what happens
+// just off screen has already settled by the time it scrolls in.
+//
+// Wider than a chunk, which is what the promise above actually requires and what
+// a hundred and twenty-eight pixels did not deliver: a chunk is a hundred and
+// ninety-two, so at the old figure a chunk could be created and scroll into view
+// without a single vertex of it ever having been stepped.
+//
+// It also has to stay inside the band World::Update generates, or StepWater reads
+// through to freshly generated noise for the parts outside it — see the reserve
+// there, which is sized against this.
+inline constexpr float kSimulationMargin = 256.0f;
+
 // How far the view may be pushed in, as whole multiples of one screen pixel per
 // world pixel. See ReadZoom for why nothing between them is offered.
 //

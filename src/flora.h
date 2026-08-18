@@ -63,6 +63,14 @@ inline constexpr std::size_t kSpeciesCount = static_cast<std::size_t>(Species::C
 inline constexpr std::size_t kStageCount   = static_cast<std::size_t>(Stage::Count);
 inline constexpr std::size_t kSeasonCount  = static_cast<std::size_t>(Season::Count);
 
+// What each is called, in the enum's own order.
+//
+// Here rather than beside whichever screen prints them: the console matches a typed
+// word against this, the head-up display shows which one F9 is holding, and a probe
+// labels its columns with it. Three copies of four words is three chances for one
+// of them to be wrong.
+inline constexpr const char *kSeasonNames[kSeasonCount] = {"spring", "summer", "autumn", "winter"};
+
 inline constexpr std::size_t LayerIndex(Layer layer) {
     return static_cast<std::size_t>(layer);
 }
