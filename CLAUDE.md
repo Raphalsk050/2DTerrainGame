@@ -1060,6 +1060,35 @@ is subtly not the one the seed names:
   felled tree in a country that never had one.
 - `Fixtures::Clear` and `Inventory::Clear`, for the same reason one step down.
 
+### 14.1b Making a world is measured work, and the screen says so
+
+Creating a world took **8.3 seconds** and the window was dead for all of it. All of
+it was `World::CalibrateSpawn`: each ore's cutoff is a quantile of its own noise,
+so making a world means sampling up to 384 x 384 positions of the *surface* per
+ore, and it walked them one at a time on one core.
+
+Two changes, and they are independent:
+
+- **The sampling runs on the pool**, a row per worker, gathered on the main side
+  afterwards so nothing is shared while the rows are taken. 8.3 s to **1.0 s**, and
+  `--sun` and `--column` are byte-identical across it — the samples land in a
+  different order in the list, and a quantile does not care.
+- **It is sliced.** `World::BeginRebuild` starts the measurement and
+  `World::StepRebuild(budget)` advances it by about a frame's worth, stopping on
+  the first row block past the budget. The loop drives it from the menu path, so
+  the loading screen keeps drawing and its bar keeps moving. The startup path still
+  runs it to the end in one call — there is no frame to keep alive before the
+  window is up.
+
+The screen names the seam being measured and says *why* it is slow, because the
+honest answer is short and interesting: ore is measured rather than declared, so
+the rarity in the table is the rarity you dig for. A bar with no words on it is
+indistinguishable from a program that has hung.
+
+**Each stage announces itself and acts on the next frame.** A stage that did its
+work first and then set the line would name what the player has already waited
+through, and the longest stage would be the one nobody ever saw a line for.
+
 ### 14.2 Two modes, three lines apart
 
 `Gamemode` lives in `src/mode.h` — a header of its own, tiny as it is, because the
@@ -1088,3 +1117,161 @@ nature — so a new row in either table has nothing to remember. A page is the g
 twenty-seven slots against twenty-three things in the world; if a table outgrows its
 page the tail stops being reachable, and the fix is another tab rather than a
 scrollbar.
+
+---
+
+## 15. Where the code lives, and why main.cpp is short now
+
+`main.cpp` was **4,719 lines**. It held the game loop, every command the console
+takes, every offline report, the whole draw order, the head-up display and the
+argument parsing. Nothing in it was wrong; the file was, because a reader looking
+for the loop had to walk past fifteen hundred lines of reporting to find it, and
+every new probe made the loop harder to see.
+
+It is **1,608 lines** now, and what it holds is the loop and the setup around it.
+The rest went to files named after the one thing they do:
+
+| file | what it is | lines |
+|---|---|---|
+| `probes.{h,cpp}` | the world measured rather than played — every `--` report, and the dispatch that chooses one | 2,300 |
+| `commands.{h,cpp}` | what a typed line means | 470 |
+| `render.{h,cpp}` | the order the world is drawn in | 260 |
+| `hud.{h,cpp}` | what is drawn in the frame's coordinates rather than the world's | 190 |
+| `menu.{h,cpp}` | the screens in front of the game, and the stack | 600 |
+| `view.h` | what the frame covers, in world units | 40 |
+| `mode.h` | which of the two sets of rules a world is played under | 30 |
+
+Three rules came out of doing it, and they are worth keeping:
+
+- **A shared constant belongs with the thing it describes, not with the first file
+  that printed it.** `kSeasonNames` went to `flora.h` beside `Season`;
+  `kSimulationMargin` went to `config.h`. Both were in main.cpp because that is
+  where they were first needed, and both were needed by three files by the end.
+
+- **A probe reports a verdict, so it has to be able to fail a build.** The first
+  cut of `probes::Run` returned a bool, which quietly threw away the exit status of
+  `--build` and `--sodcheck` — checks that answer *yes or no* and are meant to be
+  run in a loop. It returns `std::optional<int>` now: nothing where this run is not
+  a probe, and the status otherwise.
+
+- **The bar in section 2 is what makes a move like this safe.** Every step of it —
+  four files, one constant at a time — was checked with `--sun`, `--column`,
+  `--tones`, `--covers`, `--build` and a `--probe` picture, byte for byte. The one
+  step that moved anything moved a *warning line*, and that warning was the missing
+  exit status above. A refactor that cannot be checked is a rewrite.
+
+### 15.1 The clouds were eighteen per cent of the frame, and nobody could see it
+
+`DrawLitWorld` had **3.5 ms of self time** — time inside it that no zone accounted
+for. Section 4 says a profile with a hole in it is an instrument nobody can read,
+and this is what was in the hole: `Sky::DrawClouds`, at **2.96 ms**, the single
+most expensive thing the frame drew.
+
+Two changes, both of which leave the picture exactly as it was:
+
+- **The field is filled across the cores.** A few thousand samples of a three-octave
+  field, once a frame, on one core: **2.8 ms → 0.14 ms**. Safe by construction — a
+  worker writes only the column it was handed, and `ColumnAt` and `MarginAt` are
+  pure functions of the settings and the position.
+
+- **The shading walks rows of the world rather than cells of the grid.** It used to
+  walk cell by cell and, inside each, the squares whose centres fell in it. Same
+  squares, cut into a few hundred pieces — and the cut cost twice: a run of one
+  colour ended at every cell border, so the same cloud was submitted as far more
+  rectangles than it needed, and the work could not be shared because a worker
+  cannot draw. Whole rows can be: the band of every square is worked out across the
+  cores into one scratch buffer, and then this thread walks the rows once and draws
+  them. **2.07 ms → 0.73 ms.**
+
+  The arithmetic is written to land on the very same floats the cell walk did —
+  the interpolation is still measured from the cell's own corner — and it was
+  checked rather than argued: both walks were run side by side over **45.7 million
+  squares** and disagreed about none of them.
+
+The frame went from **15.9 ms to 13.9 ms** (63 to 72 fps) on `--profile`, which is
+the flight over the surface. There is no cloud underground, so there was nothing
+there to win.
+
+### 15.2 SIMD, and what it was worth here
+
+The default instruction set a compiler targets on x86-64 is the original one — SSE2,
+two float lanes. Both wider baselines were tried on the whole build, with
+`-ffp-contract=off` beside them so that FMA could not fuse `a * b + c` and change a
+number the reports are held to.
+
+- **`-march=x86-64-v3` (AVX2) crashes.** AVX wants its spills 32-byte aligned and
+  the Windows ABI promises 16, so GCC realigns the stack itself — and on MinGW that
+  does not survive being entered from a thread Windows created rather than the
+  runtime, which is every callback raylib makes. Measured: `--probe` segfaulted on
+  five runs out of six at v3, and on none at v2.
+
+- **`-march=x86-64-v2` (SSE4.2) is stable and buys nothing.** 15.87 ms against
+  15.77 ms, which is noise. The hot loops are memory-bound or branchy, and v2 is
+  the same 128-bit width as the default: what it adds is integer work and blends
+  that these loops do not do.
+
+So the flag is not in the build. **What the cores were worth, the threads had
+already taken**: the two cloud passes above, and `CalibrateSpawn` in section 14.1b,
+are between eight and twenty times faster for having been shared out, against a
+best case of two for the vector width. If AVX2 is ever wanted here it has to be
+reached for deliberately in one hot loop with an aligned buffer of its own, not
+switched on under a build that hands function pointers to the operating system.
+
+---
+
+## 16. Adding a block or an item
+
+The whole design is that this is a **row**, and everything else is derived from it.
+Where that has been true, adding a material has never needed a second file opened.
+Where it has not, the failure is always the same shape: the new thing works
+everywhere except the one place that was written as a list of names.
+
+### 16.1 A material
+
+One row in `kElements[]` in `element.h`, in the exclusion order the `precedence`
+field decides. What the row says and what falls out of it:
+
+| the row says | and this follows, with nothing else edited |
+|---|---|
+| `paint.tone`, `contour` | how it is drawn, at every zoom, and the colour of the dust off it and of its pickup |
+| `icon` | the picture in the bar, the panel, the tooltip and on the ground |
+| `rules.occupies`, `precedence` | where it sits in the exclusion order, and what the silhouette draws it against |
+| `rules.blocksBodies`, `blocksLiquid` | collision, and whether liquid can pass |
+| `rules.background` | that it stands *behind* the ground rather than in it (§11.2) |
+| `spawn` | where the generator puts it, and — for a vein — the cutoff measured at startup |
+| `hardness`, `tool`, `needsTool` | how long it takes to break, and with what (§13.1) |
+| `stack`, `laying` | how it is carried, and whether it goes down by the cell or under the brush |
+| `light.opacity`, `glow`, `strength` | what it does to the light, both as a shadow and as a source |
+| `loose` | what it throws up underfoot |
+
+That last one is the newest, and it is there as a lesson rather than a feature: it
+was a `switch` over material names in `scuff.cpp`, with a `default`. The switch was
+*defensible* — how much a ground kicks up is a fact about that ground and nothing
+else in the row implies it — and it was still wrong, because it put a question about
+a material in a file about footsteps, and answered it silently for anything added
+later. **A fact about a material goes on the material's row.**
+
+The creative palette, the hotbar, the drop table and the exclusion order all read
+the table rather than a list of their own, so a new material appears in all four.
+A `static_assert` in `inventory.h` fails the build if the table outgrows one page of
+the palette, because that failure would otherwise be silent: the palette would just
+stop listing whatever was added last.
+
+### 16.2 An item
+
+One row in `kItems[]` in `item.h`, and the head of that file says why an item is not
+an element: an element has a field over the lattice, a threshold, a rank and a
+generator, and an apple has none of those.
+
+`placement` is what decides what the right hand does with it — nothing, root it in
+the ground, or fix it to a surface — and it is also what sorts it into a tab of the
+creative palette. A sapling additionally needs its species in `flora::SpeciesOf`,
+and a fixture its kind in `fixture::KindOf`: both are one line, and both are the
+seam between two tables that deliberately do not know about each other.
+
+### 16.3 What to check after adding one
+
+- `--tones` — that its paint divides between form and texture the way the others do.
+- `--build --png` — that a wall of it is drawn on the same grid as everything else.
+- `--covers` or `--ore`, if it generates — that it appears at the rate its row claims.
+- The palette, in creative: it should be there without anything being told about it.
