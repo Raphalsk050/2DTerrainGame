@@ -869,6 +869,22 @@ private:
     // wants: most ranks describe nothing at all in a given chunk.
     const Chunk::Silhouette &Occupancy(const Chunk &chunk, int minPrecedence, bool groundOnly) const;
 
+    // The lattice region the light will solve over, for a given view.
+    //
+    // Asked by StepLight, which solves it, and by Update, which has to have
+    // generated chunks over all of it first. Two answers to that question is a
+    // medium filled from the noise along its edges — see LitRegion.
+    struct Lit {
+        int i0   = 0;
+        int j0   = 0;
+        int i1   = 0;
+        int j1   = 0;
+        int cols = 0;
+        int rows = 0;
+    };
+
+    Lit LitRegion(Rectangle view) const;
+
     // Cutoff each generated material's noise has to clear, measured from the
     // noise itself so that `probability` in the element table means what it says.
     // Runs the measurement to the end, which is what the constructor wants: at

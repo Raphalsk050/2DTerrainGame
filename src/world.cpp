@@ -7,7 +7,9 @@
 #include "rlgl.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <cstdio>
 #include <vector>
 
 namespace {
@@ -928,10 +930,32 @@ void World::Update(Rectangle view) {
     // Set too small this does not look wrong, it just runs. Measured at 64 cells of
     // margin against a region 512 cells across, the fill was **235 ms of a 279 ms
     // frame** while the solve it was feeding took 3.5, and nothing on screen said so.
-    const float reserve = static_cast<float>(spacing_) * (view.width / spacing_ * 0.5f + 64.0f);
+    //
+    // So it is not a margin any more. The light is asked where it will look — see
+    // LitRegion, which is the one place that rule lives — and the answer is covered
+    // whole, with a little over for the snap and for the region the medium is still
+    // holding on to from a wider view it has not shrunk back from yet.
+    const float step = static_cast<float>(spacing_);
 
-    const Rectangle covered = {view.x - reserve, view.y - reserve, view.width + 2.0f * reserve,
-                               view.height + 2.0f * reserve};
+    const Lit lit = LitRegion(view);
+
+    const float over = step * 4.0f;
+
+    float left  = std::min(view.x, static_cast<float>(lit.i0) * step) - over;
+    float top   = std::min(view.y, static_cast<float>(lit.j0) * step) - over;
+    float right = std::max(view.x + view.width, static_cast<float>(lit.i0 + lit.cols) * step) + over;
+    float low   = std::max(view.y + view.height, static_cast<float>(lit.j0 + lit.rows) * step) + over;
+
+    // And whatever the medium is standing on now, which the hysteresis in StepLight
+    // can hold wider than the view asks for.
+    if (medium_.cols > 0 && medium_.rows > 0) {
+        left  = std::min(left, medium_.origin.x - over);
+        top   = std::min(top, medium_.origin.y - over);
+        right = std::max(right, medium_.origin.x + static_cast<float>(medium_.cols) * step + over);
+        low   = std::max(low, medium_.origin.y + static_cast<float>(medium_.rows) * step + over);
+    }
+
+    const Rectangle covered = {left, top, right - left, low - top};
 
     int minCx = 0;
     int minCy = 0;
@@ -2002,14 +2026,24 @@ void World::AddLight(Vector2 world, light::Radiance radiance, float radius) {
     sparks_.push_back({world, radiance, radius});
 }
 
-void World::StepLight(Rectangle region) {
-    PROFILE_ZONE("StepLight");
+// How much of the world the light will ask about, given the view it is handed.
+//
+// **One rule, and it has to be one.** The region is not the view: the corner is
+// snapped, and the size is rounded up to a power of two, so it can reach up to a
+// whole view's width past the screen. World::Update has to generate chunks over all
+// of it, because a cell asked about outside a resident chunk is answered from the
+// noise at about a hundred times the cost — and it used to work that reach out for
+// itself, from a formula that only looked at the width.
+//
+// Measured, in a thousand-pixel window standing still: the light asked about 3,072
+// pixels across and the chunks covered 2,768, so **thirteen per cent of the region
+// was answered from the noise every frame** — a medium fill of **156 ms** against a
+// solve of 3, and nothing on screen to say why. Full screen it happened to fit,
+// which is why a flight at 1920 wide never saw it.
+World::Lit World::LitRegion(Rectangle view) const {
+    Lit lit;
 
-    int i0 = 0;
-    int j0 = 0;
-    int i1 = 0;
-    int j1 = 0;
-    LatticeRange(region, i0, j0, i1, j1);
+    LatticeRange(view, lit.i0, lit.j0, lit.i1, lit.j1);
 
     // The probe grid is half the medium each way and the cascades halve its columns
     // once per level, so both halves have to be powers of two -- and both, not just
@@ -2054,8 +2088,8 @@ void World::StepLight(Rectangle region) {
     // noise floor.
     constexpr int kSnap = 2;
 
-    i0 = FloorDiv(i0, kSnap) * kSnap;
-    j0 = FloorDiv(j0, kSnap) * kSnap;
+    lit.i0 = FloorDiv(lit.i0, kSnap) * kSnap;
+    lit.j0 = FloorDiv(lit.j0, kSnap) * kSnap;
 
     // Margin past the far edge, so a light just off screen still reaches in and the
     // snap has somewhere to give.
@@ -2065,8 +2099,22 @@ void World::StepLight(Rectangle region) {
         return roundUp(std::max(1, (span + kMargin + 1) / 2)) * 2;
     };
 
-    int cols = side(i1 - i0);
-    int rows = side(j1 - j0);
+    lit.cols = side(lit.i1 - lit.i0);
+    lit.rows = side(lit.j1 - lit.j0);
+
+    return lit;
+}
+
+void World::StepLight(Rectangle region) {
+    PROFILE_ZONE("StepLight");
+
+    const Lit lit = LitRegion(region);
+
+    int i0 = lit.i0;
+    int j0 = lit.j0;
+
+    int cols = lit.cols;
+    int rows = lit.rows;
 
     // And it does not shrink for a wobble.
     //
