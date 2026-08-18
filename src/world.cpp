@@ -594,6 +594,8 @@ World::Chunk &World::Settle(int cx, int cy, Chunk &&chunk) {
 }
 
 void World::Remember(Vector2 vertex, std::optional<Element> element, bool behind) {
+    // Which layer this is about, kept beside what was left there — see Edit::front.
+    // The flag and not the optional is what says the layer was touched at all.
     int cx = 0;
     int cy = 0;
     ToChunk(vertex, cx, cy);
@@ -622,17 +624,19 @@ void World::Remember(Vector2 vertex, std::optional<Element> element, bool behind
 
         if (behind) {
             edit.behind = element;
+            edit.back   = true;
         } else {
             edit.element = element;
+            edit.front   = true;
         }
 
         return;
     }
 
     if (behind) {
-        bucket.push_back({.i = i, .j = j, .behind = element});
+        bucket.push_back({.i = i, .j = j, .behind = element, .back = true});
     } else {
-        bucket.push_back({.i = i, .j = j, .element = element});
+        bucket.push_back({.i = i, .j = j, .element = element, .front = true});
     }
 }
 
@@ -680,31 +684,46 @@ void World::ApplyEdits(Chunk &chunk, int cx, int cy) const {
                 // replacement and digging is the same edit without its second
                 // half.
                 //
+                // **Only where the record speaks for this layer.** Which is what
+                // `front` is for, and leaving it out was a wall that ate the ground
+                // it was put up against: a record made by hanging a wall says
+                // nothing about the block in front of it, and an empty `element`
+                // was read as saying there is none — so the next time the chunk was
+                // built, the hillside the generator had put there was cleared and
+                // the wall was all that was left. It survived a session only
+                // because an edited chunk is pinned; walk far enough away to drop
+                // it, come back, and the hillside was gone.
+                //
                 // Solids only. Liquid is simulation rather than intent — it moves
                 // on its own, so where it was poured says nothing about where it
                 // is — and it has its own reason to keep a chunk resident.
-                for (std::size_t e = 0; e < kElementCount; e++) {
-                    if (!kElements[e].rules.occupies) continue;
+                if (edit.front) {
+                    for (std::size_t e = 0; e < kElementCount; e++) {
+                        if (!kElements[e].rules.occupies) continue;
 
-                    chunk.fields[e].SetValue(i, j, 0.0f);
+                        chunk.fields[e].SetValue(i, j, 0.0f);
+                    }
+
+                    if (edit.element.has_value()) {
+                        chunk.fields[ElementIndex(*edit.element)].SetValue(i, j, 1.0f);
+                    }
                 }
 
-                if (edit.element.has_value()) {
-                    chunk.fields[ElementIndex(*edit.element)].SetValue(i, j, 1.0f);
-                }
+                // The layer behind, cleared and refilled on its own terms and only
+                // where the record is about it. The generator never puts a wall
+                // anywhere — they are all hand-built — so a record that speaks for
+                // this layer and holds nothing is an empty wall, and there is
+                // nothing to fall back to.
+                if (edit.back) {
+                    for (std::size_t e = 0; e < kElementCount; e++) {
+                        if (!kElements[e].rules.background) continue;
 
-                // The layer behind, cleared and refilled on its own terms. The
-                // generator never puts a wall anywhere — they are all hand-built —
-                // so an empty record is an empty wall and there is nothing to fall
-                // back to.
-                for (std::size_t e = 0; e < kElementCount; e++) {
-                    if (!kElements[e].rules.background) continue;
+                        chunk.fields[e].SetValue(i, j, 0.0f);
+                    }
 
-                    chunk.fields[e].SetValue(i, j, 0.0f);
-                }
-
-                if (edit.behind.has_value()) {
-                    chunk.fields[ElementIndex(*edit.behind)].SetValue(i, j, 1.0f);
+                    if (edit.behind.has_value()) {
+                        chunk.fields[ElementIndex(*edit.behind)].SetValue(i, j, 1.0f);
+                    }
                 }
 
                 // So the rebuilt chunk is pinned exactly as the original was, and
@@ -838,6 +857,26 @@ void World::Reset() {
     // And what was outstanding about them. A world with nothing built in it has
     // no turned earth waiting to green over.
     sown_.clear();
+}
+
+void World::Rebuild(const terrain::Settings &settings) {
+    settings_ = settings;
+
+    // The same two measurements the constructor takes, in the same order and for
+    // the same reason: everything below asks the generator where the ground is,
+    // and an uncalibrated one answers with a world that is not this one.
+    terrain::Calibrate(settings_);
+    CalibrateSpawn();
+
+    // The sky is a function of the terrain as well as of the weather — it reads
+    // the skyline to know where the ground is — so it is told about the new
+    // country. Its own settings are kept: which weather blows is not a property
+    // of which world this is.
+    const weather::Settings weather = sky_.Config();
+
+    sky_.Configure(weather, settings_);
+
+    Reset();
 }
 
 int World::PinnedChunks() const {
@@ -3312,6 +3351,47 @@ void World::DrawTerrain(Rectangle view) const {
         }
     }
 
+    // Anything that neither flows nor claims its space: a wall, which contests no
+    // vertex and stands behind whatever does.
+    //
+    // **First of the fallbacks, and only where there is no picture.** Both halves of
+    // that were wrong and together they were one bug with a plain symptom: a wall put
+    // up against a hillside appeared *in front* of it, as though it had replaced the
+    // blocks it was meant to stand behind.
+    //
+    // This loop used to be the last thing DrawTerrain did — after the ground, after
+    // the grass — and it ran over every chunk whether or not the chunk had a picture.
+    // So a painted chunk, which already holds its walls laid down behind everything
+    // inside PaintChunk, had a second copy of them painted over the finished ground.
+    // The copy underneath was correct and invisible; the one on top was what the
+    // player saw.
+    //
+    // A wall may never cover what is in front of it. The most it may do is show
+    // through the gaps, which is what being behind means.
+    for (std::size_t e = 0; e < kElementCount; e++) {
+        const ElementDef &def = kElements[e];
+        if (def.rules.flows || def.rules.occupies) continue;
+
+        for (int cx = minCx; cx <= maxCx; cx++) {
+            for (int cy = minCy; cy <= maxCy; cy++) {
+                if (config::kPixelArt && PaintedFor(cx, cy) != nullptr) continue;
+
+                const Chunk *chunk = Find(cx, cy);
+                if (chunk == nullptr) continue;
+
+                if (config::kPixelArt) {
+                    marching_squares::DrawPainted(chunk->fields[e], def.threshold, paint_[e], Outline(def.contour),
+                                                  def.paint.texel, view);
+                } else {
+                    marching_squares::DrawFilled(chunk->fields[e], def.threshold, Body(def));
+                    if (config::kDrawContours) {
+                        marching_squares::DrawContour(chunk->fields[e], def.threshold, def.contour);
+                    }
+                }
+            }
+        }
+    }
+
     // And whatever had no picture made of it — a chunk that arrived after
     // PaintChunks ran, or one that found no slot free — drawn the long way, so
     // that the cache is a saving and never a condition for the ground being
@@ -3446,27 +3526,6 @@ void World::DrawTerrain(Rectangle view) const {
         }
     }
 
-    // Anything that neither flows nor claims its space has nothing to be drawn
-    // behind or in front of, so it is drawn plainly from its own field.
-    for (std::size_t e = 0; e < kElementCount; e++) {
-        const ElementDef &def = kElements[e];
-        if (def.rules.flows || def.rules.occupies) continue;
-
-        for (int cx = minCx; cx <= maxCx; cx++) {
-            for (int cy = minCy; cy <= maxCy; cy++) {
-                const Chunk *chunk = Find(cx, cy);
-                if (chunk == nullptr) continue;
-
-                if (config::kPixelArt) {
-                    marching_squares::DrawPainted(chunk->fields[e], def.threshold, paint_[e], Outline(def.contour),
-                                                  def.paint.texel, view);
-                } else {
-                    marching_squares::DrawFilled(chunk->fields[e], def.threshold, Body(def));
-                    if (config::kDrawContours) marching_squares::DrawContour(chunk->fields[e], def.threshold, def.contour);
-                }
-            }
-        }
-    }
 }
 
 void World::DrawLiquids(Rectangle view) const {

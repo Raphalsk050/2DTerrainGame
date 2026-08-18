@@ -62,7 +62,8 @@ void Editor::Bank(const World::Yield &freed, Drops &drops, Vector2 at, float awa
     }
 }
 
-const char *Editor::Spend(World &world, Inventory &inventory, Drops &drops, Rectangle body, float away, float now) {
+const char *Editor::Spend(World &world, Inventory &inventory, Drops &drops, Rectangle body, Gamemode mode,
+                          float away, float now) {
     const Stack &held = inventory.Held();
 
     if (held.Empty()) return "nothing in hand";
@@ -123,14 +124,22 @@ const char *Editor::Spend(World &world, Inventory &inventory, Drops &drops, Rect
         }
     }
 
-    if (spent > 0) inventory.Take(inventory.Selected(), spent);
+    // Charged in survival and not in creative, which is the whole of what infinite
+    // blocks means: the slot is never drawn down, so it never empties, so the mode
+    // never has to be asked about anywhere else.
+    if (spent > 0 && mode == Gamemode::Survival) inventory.Take(inventory.Selected(), spent);
 
     // A stroke can still free something even though placing no longer replaces
     // anything: a liquid is displaced by a solid poured into it, and that liquid has
     // to be handed back rather than destroyed.
     const Rectangle whole = World::CellBounds(x0, y0);
 
-    Bank(freed, drops, {whole.x + whole.width * 0.5f, whole.y + whole.height * 0.5f}, away, now);
+    // And nothing is handed back either. A creative hand that poured out the water
+    // it displaced would be making buckets out of nothing, and the ground under a
+    // player building in it would fill with pickups nobody wants.
+    if (mode == Gamemode::Survival) {
+        Bank(freed, drops, {whole.x + whole.width * 0.5f, whole.y + whole.height * 0.5f}, away, now);
+    }
 
     if (spent == 0 && refused) return "no room — you are standing there";
 
@@ -381,7 +390,7 @@ Editor::Progress Editor::Biting() const {
 }
 
 const char *Editor::Update(World &world, Inventory &inventory, Grove &grove, fixture::Fixtures &fixtures,
-                           const Camera2D &camera, Rectangle body, float now) {
+                           const Camera2D &camera, Rectangle body, Gamemode mode, float now) {
     // Where the character is, for the reach and for which side a spilled block
     // is thrown out on. The middle of the body, which is where the arm is.
     const Vector2 player = {body.x + body.width / 2.0f, body.y + body.height / 2.0f};
@@ -651,7 +660,15 @@ const char *Editor::Update(World &world, Inventory &inventory, Grove &grove, fix
         for (std::size_t e = 0; e < kElementCount; e++) {
             if (holds[e] <= 0) continue;
 
-            takes += BreakSeconds(static_cast<Element>(e), ToolInHand()) * holds[e] / kVerticesPerBlock;
+            // Creative pays nothing for the block, and it is written as a cost of
+            // zero rather than as a branch around the bite: a bite that takes no
+            // time comes away on the frame it started, which is the path a liquid
+            // already takes and the bar already knows not to draw. Minecraft's
+            // creative hand is the same thing — instant, and still a hand.
+            if (mode == Gamemode::Survival) {
+                takes += BreakSeconds(static_cast<Element>(e), ToolInHand()) * holds[e] / kVerticesPerBlock;
+            }
+
             filled += holds[e];
         }
 
@@ -702,7 +719,12 @@ const char *Editor::Update(World &world, Inventory &inventory, Grove &grove, fix
 
         const Rectangle at = World::CellBounds(x0, y0);
 
-        Bank(freed, grove.Fallen(), {at.x + at.width * 0.5f, at.y + at.height * 0.5f}, away, now);
+        // Nothing comes off a block broken in creative. What digging is *for* in
+        // that mode is the shape of the hole, and a player clearing a hillside does
+        // not want a hillside's worth of stone lying at their feet.
+        if (mode == Gamemode::Survival) {
+            Bank(freed, grove.Fallen(), {at.x + at.width * 0.5f, at.y + at.height * 0.5f}, away, now);
+        }
 
         // Broken, so there is nothing to give back and no bar to fade: cleared
         // outright rather than through LetGo. The next frame starts a fresh bite
@@ -724,7 +746,7 @@ const char *Editor::Update(World &world, Inventory &inventory, Grove &grove, fix
     // press test but the cell itself: a cell that already holds the material gains
     // nothing, is charged nothing, and a cursor resting on one spends nothing
     // however long the button is down.
-    if (held.holds == Holds::Material) return Spend(world, inventory, grove.Fallen(), body, away, now);
+    if (held.holds == Holds::Material) return Spend(world, inventory, grove.Fallen(), body, mode, away, now);
 
     // Everything past here answers the press rather than the hold. A brush lays
     // material for as long as the button is down because a stroke is a continuous
@@ -748,7 +770,7 @@ const char *Editor::Update(World &world, Inventory &inventory, Grove &grove, fix
 
         if (!fixtures.Place(*kind, cellX_, cellY_)) return "there is already something here";
 
-        inventory.Take(inventory.Selected(), 1);
+        if (mode == Gamemode::Survival) inventory.Take(inventory.Selected(), 1);
 
         return nullptr;
     }
@@ -775,7 +797,7 @@ const char *Editor::Update(World &world, Inventory &inventory, Grove &grove, fix
             return "no room here — something is already growing";
         }
 
-        inventory.Take(inventory.Selected(), 1);
+        if (mode == Gamemode::Survival) inventory.Take(inventory.Selected(), 1);
 
         return nullptr;
     }

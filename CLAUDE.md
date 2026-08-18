@@ -735,6 +735,35 @@ would make a wall impossible to keep; one that took neither would make it
 impossible to remove.
 
 `--build` checks all of it, including walking the chunk out of residency and back.
+It did not catch either of the two faults below, and it is worth knowing why: it
+counts the exchange — blocks in, blocks out — and a wall that covers the hillside
+or erases it costs nothing and balances perfectly.
+
+**A wall must never cover what is in front of it.** The most it may do is show
+through the gaps. Two separate faults broke that, and they looked like one bug:
+
+- **It was drawn twice, and the second copy was in front.** The last loop in
+  `DrawTerrain` draws "anything that neither flows nor claims its space" from its
+  own field — which is the wall and nothing else — and it ran *after* the ground
+  and the grass, over every chunk, painted or not. So a painted chunk, which
+  already holds its walls behind everything, got a second copy laid over the
+  finished picture. The copy underneath was right and invisible. That loop is now
+  the **first** of the fallbacks and skips any chunk with a picture, which is the
+  same shape as every other fallback in the function.
+- **The journal cleared a layer the record was not about.** `Edit` held
+  `std::optional<Element> element` and read an empty one as *dug out* — but a
+  record made by hanging a wall has an empty `element` because it says nothing
+  about the front layer at all. `ApplyEdits` cleared it anyway, so the next time
+  the chunk was built the generated hillside behind the wall was gone. `Edit` now
+  carries `front` and `back`: the flag says whether the record speaks for that
+  layer, and the optional says what was left there. **`std::optional` cannot mean
+  both "nothing" and "not asked" at once**, which is the general form of this and
+  the thing to watch for the next time a record grows a field.
+
+  It survives a session either way, because an edited chunk is pinned — so the
+  repro is to walk far enough away to drop it and come back. That is what
+  `--probe`'s wall check does by updating the world forty thousand pixels away and
+  then back again.
 
 ### 11.3 A torch is a third table, and three is the right number
 
@@ -978,3 +1007,84 @@ looked up rather than named, so a second wall material needs nothing edited.
 
 A stroke where no cell holds anything does not start a bite at all. The bar must not
 appear over open sky.
+
+---
+
+## 14. The menu is a stack, and the world is one of its screens
+
+`src/menu.h` holds one idea and the rest falls out of it. A screen is pushed when
+the player goes into it and popped when they come back, so **back is one operation
+that works from anywhere** and no screen has to know what is under it. New world is
+reached from saves today and will be reached from a world list tomorrow; neither of
+them says so anywhere.
+
+`Screen::World` is on that stack too, and it is what makes pausing free:
+
+| stack | what the player sees |
+|---|---|
+| `{Title}` | a fresh start, no way back, no arrow drawn |
+| `{Title, Saves, NewWorld}` | three screens deep, back pops one |
+| `{World}` | playing |
+| `{World, Title}` | paused — back pops to the game |
+
+So the loop asks one question, `menu.Playing()`, instead of keeping a paused flag
+beside the stack that can disagree with it. Everything below that test in the loop
+is the game — the simulation, the hand, the light, the draw — and none of it runs
+while a screen is in front.
+
+**Escape is read before the panel toggle, against the panel as it stands.** The
+toggle clears `packOpen` in the same frame, so the test written after it sees a shut
+panel and pauses the game on the very press that closed one.
+
+**Every screen is laid out by a pure function of the window size**, called again in
+the draw rather than remembered from the input pass. A layout held between the two
+is a button drawn where it can no longer be clicked, which is the editor cursor's
+rule one frame further out.
+
+### 14.1 Making a world replaces the one in the object
+
+`World::Rebuild` puts a different country into the same `World`, and it is not a
+convenience: every system in the loop holds a reference to that object — the wood,
+the fixtures, the editor, the light — so building a second world and swapping it in
+is either a rebuild of all of them or a dangling reference nobody finds until a
+chunk is asked for. It is `Reset` with the seed allowed to move.
+
+Three things have to happen around it, and leaving any of them out is a world that
+is subtly not the one the seed names:
+
+- `terrain::Calibrate` on **main's copy** of the settings as well as on the world's.
+  The cutoffs are quantiles of this world's own noise; the copy in `main` is what the
+  wood is configured against and what the character's landing height is read from.
+- `Grove::Clear`. Its records are keyed on the cell a plant grows in, and a cell
+  means something else under a different seed — a record kept across a rebuild is a
+  felled tree in a country that never had one.
+- `Fixtures::Clear` and `Inventory::Clear`, for the same reason one step down.
+
+### 14.2 Two modes, three lines apart
+
+`Gamemode` lives in `src/mode.h` — a header of its own, tiny as it is, because the
+editor, the inventory and the menu all have to agree on it and none of the three
+should have to include either of the others.
+
+Everything about the world is the same in both. What differs is the hand:
+
+- **Breaking** — creative writes a cost of zero into the bite rather than branching
+  around it. A bite that takes no time comes away on the frame it started, which is
+  the path a liquid already takes and the path the progress bar already knows not to
+  draw.
+- **Spending** — the slot is not drawn down, so it never empties. That is the whole
+  of what "blocks do not run out" means, and it is why no other module has to ask
+  about the mode.
+- **Yielding** — nothing comes off a block broken in creative. What digging is for in
+  that mode is the shape of the hole, and a player clearing a hillside does not want a
+  hillside's worth of stone at their feet.
+
+The creative inventory is the **same panel** with the grid replaced by a page of the
+palette and a row of tabs over it, not a second panel: the bar, the cursor, the tips
+and the layout cannot drift apart between two modes if there is only one of them.
+Which page a thing lands on is derived rather than written into the tables — a
+material is a block, an item that fixes to a surface is gear, everything else is
+nature — so a new row in either table has nothing to remember. A page is the grid's
+twenty-seven slots against twenty-three things in the world; if a table outgrows its
+page the tail stops being reachable, and the fix is another tab rather than a
+scrollbar.

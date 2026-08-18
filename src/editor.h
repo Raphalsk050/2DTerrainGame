@@ -4,6 +4,7 @@
 #include "fixture.h"
 #include "grove.h"
 #include "inventory.h"
+#include "mode.h"
 #include "raylib.h"
 #include "stack.h"
 #include "world.h"
@@ -55,8 +56,14 @@ public:
     // Returns what the world had to say back, or nothing. A refusal that is
     // never spoken is the same to a player as a button that is broken, and the
     // caller is where the notice is already kept.
+    // `mode` is the whole of what separates the two ways of playing, and it is
+    // three lines inside: a block comes away at a touch instead of at its
+    // hardness, nothing is charged for what is put down, and nothing is handed
+    // back for what is taken up. Everything else about the hand is the same in
+    // both, which is the point of passing a mode rather than writing a second
+    // editor.
     const char *Update(World &world, Inventory &inventory, Grove &grove, fixture::Fixtures &fixtures,
-                       const Camera2D &camera, Rectangle body, float now);
+                       const Camera2D &camera, Rectangle body, Gamemode mode, float now);
 
     // Outline of the area the next click affects, drawn in world space so it
     // sits over the material it is about to change.
@@ -209,7 +216,8 @@ private:
     // Nothing is charged where a cell already held the material, which is what
     // lets the button be held down and dragged along a wall without the stack
     // draining while the cursor sits still.
-    const char *Spend(World &world, Inventory &inventory, Drops &drops, Rectangle body, float away, float now);
+    const char *Spend(World &world, Inventory &inventory, Drops &drops, Rectangle body, Gamemode mode, float away,
+                      float now);
 
     // Whether the cell holds something that was built rather than generated.
     static bool Built(const World &world, int cx, int cy);

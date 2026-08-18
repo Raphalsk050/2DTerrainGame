@@ -71,6 +71,7 @@ add_executable(${PROJECT_NAME}
     src/grove.cpp
     src/hotbar.cpp
     src/inventory.cpp
+    src/menu.cpp
     src/backdrop.cpp
     src/light.cpp
     src/picture.cpp

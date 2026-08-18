@@ -5,6 +5,13 @@
 // Project-wide configuration constants.
 namespace config {
 
+// What the game is called, in the one place that decides it.
+//
+// The window bar and the title screen say the same thing because they read the
+// same constant. Two spellings of a name is the sort of thing nobody notices
+// until it is on a screenshot somebody else took.
+inline constexpr const char *kGameName = "CppGame";
+
 // Size the window opens at. The window is resizable, so this is a starting point
 // and not a bound: anything that needs to know how large the frame is now asks
 // raylib rather than reading these.
@@ -155,8 +162,8 @@ inline constexpr bool kDrawContours = false;
 //
 // Adjustable while the game runs, with the keys below, so the balance can be
 // settled by walking around at each setting rather than by argument.
-inline constexpr float kLanternStrength = 0.0f;
-inline constexpr float kLanternRadius   = 2.0f;
+inline constexpr float kLanternStrength = 0.2f;
+inline constexpr float kLanternRadius   = 1.0f;
 inline constexpr Color kLanternGlow     = {255, 206, 150, 255};
 
 // How much one press changes it, and how far it can be pushed either way.

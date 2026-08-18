@@ -58,6 +58,21 @@ public:
     // regenerates from the noise alone.
     void Reset();
 
+    // Puts a different country into the same object: new settings, measured
+    // again, and everything the old one left behind thrown away.
+    //
+    // The alternative is building a second World and swapping it in, and it is
+    // worse than it looks. Every system in the loop holds a reference to this one
+    // — the wood, the fixtures, the editor, the light — so a swap is either a
+    // rebuild of all of them or a dangling reference nobody notices until a chunk
+    // is asked for. This is Reset with the seed allowed to move, and Reset is
+    // already the thing that says what a world forgets.
+    //
+    // The cutoffs are measured again because they must be: they are quantiles of
+    // this world's own noise, and a world generated against another one's is a
+    // world with no caves in it or one that is nothing but.
+    void Rebuild(const terrain::Settings &settings);
+
     // Rasterises the ground of every chunk the view needs and has not got.
     //
     // Opens a render target of its own, so it has to run outside a frame — a
@@ -612,6 +627,17 @@ private:
         // what keeps a wall from being forgotten when the block over it is dug,
         // which is exactly the case the player will hit first.
         std::optional<Element> behind;
+
+        // Whether the record speaks for that layer at all.
+        //
+        // Two bits, and they carry the one distinction `std::optional` cannot: an
+        // empty `element` means *dug out*, and a record that was never about the
+        // front layer also has an empty one. Read as the same thing, hanging a wall
+        // behind a hillside erased the hillside — the replay cleared a layer the
+        // player had never touched and refilled it from a record that had nothing
+        // to say about it. See World::ApplyEdits.
+        bool front = false;
+        bool back  = false;
     };
 
     // Two indices packed into one, for the maps keyed by a pair of them. Named

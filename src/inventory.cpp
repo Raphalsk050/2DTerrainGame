@@ -18,6 +18,24 @@ constexpr Color kEdge  = {96, 104, 120, 255};
 constexpr Color kTip   = {18, 20, 26, 235};
 constexpr Color kCount = {255, 214, 110, 255};
 
+// The tabs' own metrics: how tall the strip over the panel is and how wide one
+// tab is. Written here rather than shared with the slots, because a tab is a
+// label and a slot is a picture and nothing is gained by making them the same
+// size.
+constexpr float kTabHigh = 30.0f;
+constexpr float kTabWide = 104.0f;
+
+const char *NameOf(Inventory::Tab tab) {
+    switch (tab) {
+    case Inventory::Tab::Blocks: return "blocks";
+    case Inventory::Tab::Nature: return "nature";
+    case Inventory::Tab::Gear: return "gear";
+    case Inventory::Tab::Count: break;
+    }
+
+    return "";
+}
+
 // The name of what the cursor is over, beside the cursor.
 void DrawTip(const Stack &stack, Vector2 mouse) {
     const char *text = (stack.count > 1) ? TextFormat("%s  x%d", stack.Name(), stack.count) : stack.Name();
@@ -269,7 +287,51 @@ bool Inventory::Contains(Vector2 screen) {
     return CheckCollisionPointRec(screen, Bounds());
 }
 
-Inventory::Gesture Inventory::Update() {
+Rectangle Inventory::TabBounds(int tab) {
+    const Rectangle panel = Bounds();
+
+    // Sitting on the panel's top edge and overlapping it by a hair, so the one in
+    // front reads as part of the panel rather than as a button floating over it.
+    return {panel.x + static_cast<float>(tab) * (kTabWide + 4.0f), panel.y - kTabHigh + 2.0f, kTabWide, kTabHigh};
+}
+
+Inventory::Page Inventory::PageOf(Tab tab) {
+    Page page;
+
+    const auto add = [&page](Stack stack) {
+        if (page.count >= static_cast<int>(page.at.size())) return;
+
+        page.at[static_cast<std::size_t>(page.count)] = stack;
+        page.count++;
+    };
+
+    if (tab == Tab::Blocks) {
+        // Every material there is, in the table's own order — the same run Stock
+        // hands out and for the same reason. Filtering it to the ones that occupy a
+        // cell reads sensibly and quietly drops the water, which a hand can already
+        // pour in survival: a palette that offers less than the debug key does is a
+        // palette with a hole in it.
+        for (std::size_t e = 0; e < kElementCount; e++) {
+            add(BlocksOf(static_cast<Element>(e), kElements[e].stack));
+        }
+
+        return page;
+    }
+
+    for (std::size_t i = 0; i < kItemCount; i++) {
+        const auto item      = static_cast<Item>(i);
+        const bool gear      = Def(item).placement == Placement::Fixture;
+        const Tab belongs    = gear ? Tab::Gear : Tab::Nature;
+
+        if (belongs != tab) continue;
+
+        add(ItemsOf(item, Def(item).stack));
+    }
+
+    return page;
+}
+
+Inventory::Gesture Inventory::Update(Gamemode mode) {
     Gesture gesture{};
 
     const bool left  = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
@@ -278,6 +340,17 @@ Inventory::Gesture Inventory::Update() {
     if (!left && !right) return gesture;
 
     const Vector2 mouse = GetMousePosition();
+
+    // The tabs stand outside the panel's own rectangle, so they are asked about
+    // before the test that decides a click was aimed at the world.
+    if (mode == Gamemode::Creative && left) {
+        for (int tab = 0; tab < kTabs; tab++) {
+            if (!CheckCollisionPointRec(mouse, TabBounds(tab))) continue;
+
+            tab_ = static_cast<Tab>(tab);
+            return gesture;
+        }
+    }
 
     if (!Contains(mouse)) {
         // Outside the panel. With a full hand that is a throw and the panel
@@ -312,6 +385,25 @@ Inventory::Gesture Inventory::Update() {
     // it either.
     if (over < 0) return gesture;
 
+    // The palette, which is a shelf and not a bag: a click takes a copy of what is
+    // on it, and a hand already holding something puts that thing back on the shelf
+    // — which is to say it is gone, because the shelf has one of everything
+    // already. Minecraft's creative panel does exactly this, and it is what makes
+    // the palette a place to throw away as well as a place to take from.
+    if (mode == Gamemode::Creative && !OnHand(over)) {
+        if (!carried_.Empty()) {
+            carried_ = {};
+            return gesture;
+        }
+
+        const Page page = PageOf(tab_);
+        const int index = over - kOnHand;
+
+        if (index < page.count) carried_ = page.at[static_cast<std::size_t>(index)];
+
+        return gesture;
+    }
+
     Stack &into = slots_[static_cast<std::size_t>(over)];
 
     if (left) {
@@ -345,14 +437,46 @@ Inventory::Gesture Inventory::Update() {
     return gesture;
 }
 
-void Inventory::Draw() const {
+void Inventory::Draw(Gamemode mode) const {
     const Rectangle panel = Bounds();
+
+    const bool creative = mode == Gamemode::Creative;
 
     DrawRectangleRec(panel, kPanel);
     DrawRectangleLinesEx(panel, 2.0f, kEdge);
 
+    if (creative) {
+        // The tabs first, so the panel's own border is drawn over their bottom edge
+        // and the page reads as hanging from the one in front.
+        for (int tab = 0; tab < kTabs; tab++) {
+            const Rectangle at   = TabBounds(tab);
+            const bool showing   = static_cast<Tab>(tab) == tab_;
+            const Color face     = showing ? kPanel : Color{18, 20, 26, 245};
+
+            DrawRectangleRec(at, face);
+            DrawRectangleLinesEx(at, 2.0f, kEdge);
+
+            const char *name = NameOf(static_cast<Tab>(tab));
+            const int wide   = MeasureText(name, 14);
+
+            DrawText(name, static_cast<int>(at.x + (at.width - static_cast<float>(wide)) / 2.0f),
+                     static_cast<int>(at.y + 8.0f), 14, showing ? RAYWHITE : Color{150, 158, 172, 255});
+        }
+    }
+
+    // The grid: the player's own slots in survival, and the page of the palette in
+    // creative. One loop, because they are the same twenty-seven squares in the
+    // same places and only what stands in them differs.
+    const Page page = creative ? PageOf(tab_) : Page{};
+
     for (int slot = kOnHand; slot < kSlots; slot++) {
-        hotbar::DrawSlot(slots_[static_cast<std::size_t>(slot)], SlotBounds(slot), false);
+        const int index = slot - kOnHand;
+
+        const Stack &stack = creative
+                               ? ((index < page.count) ? page.at[static_cast<std::size_t>(index)] : Stack{})
+                               : slots_[static_cast<std::size_t>(slot)];
+
+        hotbar::DrawSlot(stack, SlotBounds(slot), false);
     }
 
     // The bar keeps its ring while the panel is open, so that putting something
@@ -370,7 +494,12 @@ void Inventory::Draw() const {
         for (int slot = 0; slot < kSlots; slot++) {
             if (!CheckCollisionPointRec(mouse, SlotBounds(slot))) continue;
 
-            const Stack &stack = slots_[static_cast<std::size_t>(slot)];
+            const int index = slot - kOnHand;
+
+            const Stack &stack = (creative && !OnHand(slot))
+                                   ? ((index < page.count) ? page.at[static_cast<std::size_t>(index)] : Stack{})
+                                   : slots_[static_cast<std::size_t>(slot)];
+
             if (!stack.Empty()) DrawTip(stack, mouse);
 
             break;

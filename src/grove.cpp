@@ -552,6 +552,15 @@ void Grove::Configure(const flora::Settings &settings, const terrain::Settings &
     sheet_.Create();
 }
 
+void Grove::Clear() {
+    remembered_.clear();
+    plants_.clear();
+    undergrowth_.clear();
+    drops_.Clear();
+
+    nextPlanted_ = 0;
+}
+
 void Grove::Unload() {
     sheet_.Unload();
 }

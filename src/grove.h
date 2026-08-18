@@ -70,6 +70,16 @@ public:
     void Configure(const flora::Settings &settings, const terrain::Settings &terrain, const weather::Sky &sky);
     void Unload();
 
+    // Forgets every plant, every blow struck against one, and everything lying on
+    // the ground.
+    //
+    // For a world being replaced rather than for one being tidied. The records are
+    // keyed on the cell a plant grows in, and a cell means something different in
+    // a world with a different seed — so a record kept across a rebuild is a felled
+    // tree in a place that never had one, which is exactly the shape of bug that
+    // takes a day to find.
+    void Clear();
+
     // Grows the plants covering `view` plus the margin a canopy can hang over,
     // then runs what has been done to them: trees finishing their fall give up
     // their wood, pickups fall and are gathered into `into`, and records with

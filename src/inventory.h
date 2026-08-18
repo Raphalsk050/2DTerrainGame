@@ -1,5 +1,6 @@
 #pragma once
 
+#include "mode.h"
 #include "stack.h"
 
 #include <array>
@@ -46,12 +47,51 @@ public:
         bool close = false;
     };
 
+    // The pages of the creative palette, and the tabs along the top of the panel
+    // that choose between them.
+    //
+    // Three, and which page a thing lands on is *derived* rather than written into
+    // the tables: a material is a block, an item that fixes to a surface is gear,
+    // and everything else a plant leaves behind is nature. Deriving it is what
+    // keeps a new row in either table from having to remember to name its tab —
+    // and if a fourth page is ever wanted, it is a rule here and not a field on
+    // twenty-three rows.
+    enum class Tab { Blocks, Nature, Gear, Count };
+
+    static constexpr int kTabs = static_cast<int>(Tab::Count);
+
     // Reads the mouse over the open panel: picking a stack up onto the cursor,
     // putting it down, splitting it, sweeping it between the grid and the bar,
     // and throwing it away.
-    Gesture Update();
+    //
+    // In creative the grid is not the player's own slots but the palette — see
+    // Draw — so a click on one of them copies rather than moves. Everything the
+    // bar does is the same in both modes, which is what lets one panel serve them.
+    Gesture Update(Gamemode mode);
 
-    void Draw() const;
+    // In survival, the player's own thirty-six slots.
+    //
+    // In creative, the same panel with the grid replaced by a page of every
+    // material in the game and a row of tabs over it — Minecraft's arrangement,
+    // and it is the same panel rather than a second one so that the bar, the
+    // cursor, the tips and the layout cannot drift apart between the two modes.
+    void Draw(Gamemode mode) const;
+
+    // Where the tabs sit, above the panel's top edge.
+    static Rectangle TabBounds(int tab);
+
+    // What is on one page, in the order the tables give it.
+    //
+    // A page is the twenty-seven slots of the grid and there are twenty-three
+    // things in the world, so nothing is cut off today. If either table outgrows
+    // its page the tail of it stops being reachable, and the fix is another tab
+    // rather than a scrollbar.
+    struct Page {
+        std::array<Stack, kColumns * kRows> at{};
+        int count = 0;
+    };
+
+    static Page PageOf(Tab tab);
 
     // Where the panel is on screen this frame, and whether a point is on it.
     static Rectangle Bounds();
@@ -136,6 +176,11 @@ private:
     void Sweep(int slot);
 
     std::array<Stack, kSlots> slots_{};
+
+    // Which page of the palette is up. Held here rather than in the loop for the
+    // reason `selected_` is: it is a thing the player set and expects to find as
+    // they left it, and the panel is what they set it on.
+    Tab tab_ = Tab::Blocks;
 
     // What the cursor is holding.
     //

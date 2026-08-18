@@ -8,6 +8,7 @@
 #include "hotbar.h"
 #include "liquid_layer.h"
 #include "lit_layer.h"
+#include "menu.h"
 #include "player.h"
 #include "profile.h"
 #include "console.h"
@@ -2506,9 +2507,9 @@ void DrawHud(const World &world, const Grove &grove, const Player &player, const
     DrawLabel("A/D: move  |  shift: run  |  space: jump  |  S: crouch  |  mouse: aim  |  F: fly  |"
               "  pg up/dn or ctrl+wheel: zoom",
               10, 10, ink);
-    DrawLabel("left: swing — dig, chop, cut grass  |  right: place what is held  |"
+    DrawLabel("left: swing - dig, chop, cut grass  |  right: place what is held  |"
               "  planks and cobble build on the grid  |"
-              "  1-9 or wheel: slot  |  tab: inventory  |  - / +: brush size  |  R: regenerate",
+              "  1-9 or wheel: slot  |  tab: inventory  |  esc: menu  |  - / +: brush size  |  R: regenerate",
               10, 28, ink);
     DrawLabel(TextFormat("V: vertices  |  B: bounce %s  |  L: light limits  |  F3: chunks  |  F4: height grid  |"
                          "  F5: light field  |"
@@ -2670,7 +2671,7 @@ int main(int argc, char **argv) {
     // capped at.
     const int targetFps = profiling ? 0 : config::kTargetFps;
 
-    InitWindow(config::kScreenWidth, config::kScreenHeight, "marching squares");
+    InitWindow(config::kScreenWidth, config::kScreenHeight, config::kGameName);
     SetWindowMinSize(config::kMinScreenWidth, config::kMinScreenHeight);
     SetTargetFPS(targetFps);
 
@@ -3457,6 +3458,49 @@ int main(int argc, char **argv) {
         return (wrong == 0) ? 0 : 1;
     }
 
+    // TEMP-TIME
+    if (argc >= 2 && TextIsEqual(argv[1], "--timecreate")) {
+        const auto tick = [](const char *what, double from) {
+            const double now = GetTime();
+            std::printf("%-22s %7.1f ms%c", what, (now - from) * 1000.0, 10);
+            return now;
+        };
+
+        double at = GetTime();
+
+        settings.seed = 12345;
+        terrain::Calibrate(settings);
+        at = tick("terrain::Calibrate", at);
+
+        world.Rebuild(settings);
+        at = tick("World::Rebuild", at);
+
+        world.SetWeather(sky);
+        at = tick("SetWeather", at);
+
+        grove.Clear();
+        at = tick("Grove::Clear", at);
+
+        grove.Configure({.seed = settings.seed}, settings, world.Sky());
+        at = tick("Grove::Configure", at);
+
+        const float top = terrain::Height(0.0f, settings);
+        const Rectangle view = {-620.0f, top - 500.0f, 1240.0f, 1000.0f};
+
+        world.Update(view);
+        at = tick("first World::Update", at);
+
+        world.PaintChunks(view);
+        at = tick("PaintChunks", at);
+
+        world.StepLight(view);
+        at = tick("first StepLight", at);
+
+        CloseWindow();
+        return 0;
+    }
+    // TEMP-TIME-END
+
     if (argc >= 2 && TextIsEqual(argv[1], "--build")) {
         // Sets a run of cells into open sky, digs the same run back out, and
         // checks that the world gave back exactly what it was given.
@@ -3681,14 +3725,83 @@ int main(int argc, char **argv) {
 
         const bool wallAfter = second.freed[ElementIndex(Element::WoodWall)] > 0 && !world.WalledAt(wx, cy);
 
-        const bool layered = together && kept && blockFirst && wallAfter;
+        // And the same pair where the block in front was never placed by anybody —
+        // a wall put up against a hillside the generator made.
+        //
+        // The case above cannot catch this one, and the difference is the whole of
+        // what a journal record means. There the front layer has a record of its
+        // own, so replaying it is right; here it has none, and the wall's record
+        // says nothing about it. Read as saying the front is *empty* — which is
+        // what an absent `std::optional` was taken to mean — the hillside behind
+        // the wall was cleared the next time the chunk was built. It survives in
+        // memory either way, because an edited chunk is pinned, so the only way to
+        // see it is to drop the chunk and build it again.
+        const float groundX = static_cast<float>(wx + 8) * config::kBuildCell;
+
+        world.Update({groundX - 500.0f, terrain::Height(groundX, settings) - 300.0f, 1000.0f, 900.0f});
+
+        int gx = 0;
+        int gy = 0;
+        World::ToCell({groundX, terrain::Height(groundX, settings) + 3.0f * config::kBuildCell}, gx, gy);
+
+        World::Yield before{};
+        world.CellHolds(gx, gy, before);
+
+        world.PlaceCell(Element::WoodWall, gx, gy);
+
+        World::Yield after{};
+        world.CellHolds(gx, gy, after);
+
+        // Walked out of residency and back, which is what replays the journal.
+        world.Update({groundX + 12000.0f, 0.0f, 1000.0f, 600.0f});
+        world.Update({groundX - 500.0f, terrain::Height(groundX, settings) - 300.0f, 1000.0f, 900.0f});
+
+        World::Yield rebuilt{};
+        world.CellHolds(gx, gy, rebuilt);
+
+        // A cell of hillside to begin with, or the check is testing open sky and
+        // would pass whatever happened.
+        int held = 0;
+        for (std::size_t k = 0; k < kElementCount; k++) held += before[k];
+
+        const bool standing = held > 0 && after == before && rebuilt == before;
+
+        const bool layered = together && kept && blockFirst && wallAfter && standing;
 
         if (!together) std::printf("WRONG: a plank set in front of a wall did not leave both standing\n");
         if (!kept) std::printf("WRONG: the pair did not survive the chunk being dropped and rebuilt\n");
         if (!blockFirst) std::printf("WRONG: digging took the wall before the block in front of it\n");
         if (!wallAfter) std::printf("WRONG: digging the open cell did not take the wall\n");
 
-        if (layered) std::printf("layered: a wall keeps its cell under a block, and is dug out after it\n");
+        // What a cell holds, as materials rather than as a total: the fault this
+        // catches leaves the *count* alone and changes what is being counted — the
+        // ground goes, and the wall behind it is what the same walk finds instead.
+        const auto say = [](const char *when, const World::Yield &yield) {
+            std::printf("  %s:", when);
+
+            for (std::size_t k = 0; k < kElementCount; k++) {
+                if (yield[k] > 0) std::printf(" %s=%d", StyleOf(static_cast<Element>(k)).name, yield[k]);
+            }
+
+            std::putchar(10);
+        };
+
+        if (held <= 0) {
+            std::printf("WRONG: the hillside check found no ground at cell %d,%d to stand a wall behind\n", gx, gy);
+        } else if (after != before) {
+            std::printf("WRONG: putting a wall up changed the ground in front of it\n");
+            say("was", before);
+            say("now", after);
+        } else if (rebuilt != before) {
+            std::printf("WRONG: the ground behind a wall did not survive the chunk being rebuilt\n");
+            say("was", before);
+            say("now", rebuilt);
+        }
+
+        if (layered) {
+            std::printf("layered: a wall keeps its cell under a block, is dug out after it, and takes nothing from "
+                        "the hillside it is put up against\n");
+        }
 
         if (whole && even && square && steady && layered) {
             std::printf("\nexact: %d cells cost %.0f blocks and gave back %.0f\n", laid, cost, back);
@@ -3966,6 +4079,23 @@ int main(int argc, char **argv) {
     // hole in whatever was behind it.
     bool holdOff = false;
 
+    // The screens in front of the game, and how the world being played was made.
+    //
+    // The mode is held out here with the other things a session is rather than
+    // inside the world, and the reason is that it is not a property of the world
+    // at all: the same seed played twice is the same country, and which of the two
+    // sets of rules a player is under is a fact about the sitting rather than about
+    // the ground. When there are saves it will be written beside the seed in one of
+    // them, which is a line in that file and nothing here.
+    menu::Menu menu;
+
+    Gamemode mode = Gamemode::Survival;
+
+    // Straight into the world when nobody is at the keys. A profile of the title
+    // screen is a profile of four rectangles, and the report is about the frame the
+    // game actually costs.
+    if (profiling) menu.Play();
+
     // The chat line and its log.
     //
     // Held out here with the other things that are states of the screen. Everything
@@ -4020,6 +4150,66 @@ int main(int argc, char **argv) {
 
         const float dt = GetFrameTime();
 
+        // A menu is up, and it has the frame to itself.
+        //
+        // Everything below this is the game: the simulation, the hand, the light and
+        // the draw. None of it runs while a screen is in front, which is what makes
+        // the title screen a screen rather than a picture hung over a world that is
+        // still stepping behind it — and it is why the loop asks the stack rather
+        // than keeping a paused flag of its own.
+        if (!menu.Playing()) {
+            const menu::Wish wish = menu.Update();
+
+            if (wish.quit) break;
+
+            if (wish.create) {
+                // A new country in the object every other system already points at
+                // — see World::Rebuild for why it is done this way round and not by
+                // building a second world.
+                settings.seed = wish.seed;
+
+                // Measured again here as well as inside the world, and for the
+                // reason the startup path gives: this copy is what the wood is
+                // configured against and what the character's landing height is read
+                // from, and an uncalibrated copy is a different world.
+                terrain::Calibrate(settings);
+
+                world.Rebuild(settings);
+                world.SetWeather(sky);
+
+                // And everything that remembers the world that is gone. The wood
+                // keeps records keyed on the cell a tree grows in, the fixtures
+                // stand in cells, and both would otherwise turn up in a country
+                // that never had them.
+                grove.Clear();
+                grove.Configure({.seed = settings.seed}, settings, world.Sky());
+
+                fixtures.Clear();
+                inventory.Clear();
+
+                mode = wish.mode;
+
+                // Dropped in above the ground at the origin, as at startup: the
+                // surface there is wherever this seed's relief put it.
+                player = Player({0.0f, terrain::Height(0.0f, settings) - 96.0f});
+
+                camera.target = player.Centre();
+
+                packOpen = false;
+                holdOff  = true;
+
+                chat.Say(TextFormat("world %d, %s", settings.seed, NameOf(mode)), console::Tone::Done);
+
+                menu.Play();
+            }
+
+            BeginDrawing();
+            menu.Draw();
+            EndDrawing();
+
+            continue;
+        }
+
         // The wall clock rather than the weather's, so a line stays readable for as
         // long as it takes to read whatever F7 is doing to the sky.
         chat.Step(dt);
@@ -4058,6 +4248,14 @@ int main(int argc, char **argv) {
         // would quietly destroy the liquid that flowed there.
         const Rectangle active = Expand(ViewBounds(camera), kSimulationMargin);
 
+        // Escape, and what it means depends on what is in front of the world.
+        //
+        // Asked before the panel toggle below and against the panel as it stands
+        // now, which is the whole of the ordering: the toggle clears `packOpen` in
+        // this same frame, so a test written after it would see a shut panel and
+        // pause the game on the very press that closed one.
+        if (!typing && IsKeyPressed(KEY_ESCAPE) && !packOpen) menu.Open(menu::Screen::Title);
+
         // Read before the gate below, since it is the one key that has to work on
         // both sides of it. Escape closes the panel as well, which it can only do
         // because the exit key was cleared at startup — see SetExitKey.
@@ -4086,7 +4284,7 @@ int main(int argc, char **argv) {
         world.Update(active);
 
         if (packOpen) {
-            const Inventory::Gesture gesture = inventory.Update();
+            const Inventory::Gesture gesture = inventory.Update(mode);
 
             if (!gesture.thrown.Empty()) {
                 grove.Fallen().Toss(gesture.thrown, player.Centre(), GetScreenToWorld2D(GetMousePosition(), camera),
@@ -4133,7 +4331,8 @@ int main(int argc, char **argv) {
                 // ninety-six, and a block laid into where the body is about to be
                 // is a block the body is stopped by rather than buried in.
                 const char *said =
-                    editor.Update(world, inventory, grove, fixtures, camera, player.Bounds(), world.Sky().Time());
+                    editor.Update(world, inventory, grove, fixtures, camera, player.Bounds(), mode,
+                                  world.Sky().Time());
 
                 if (said != nullptr) {
                     notice    = said;
@@ -4414,7 +4613,7 @@ int main(int argc, char **argv) {
 
             // The panel replaces the bar rather than sitting over it, since it draws
             // those same nine slots as its own bottom row.
-            if (packOpen) inventory.Draw();
+            if (packOpen) inventory.Draw(mode);
             else hotbar::Draw(inventory);
 
             // Over everything, panel and bar included: an answer that arrived behind the
