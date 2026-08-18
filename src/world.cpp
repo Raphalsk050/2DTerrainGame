@@ -143,6 +143,19 @@ World::World(const terrain::Settings &settings, int spacing) : settings_(setting
 
     for (std::size_t e = 0; e < kElementCount; e++) {
         paint_[e] = soil::For(kElements[e], settings_.seed + static_cast<int>(e) * kPaintStride);
+
+        // And the same material standing behind the ground, which is that painter
+        // with the light taken out of it — see behind_. The ramp is scaled rather
+        // than the four authored tones, which comes to the same thing because Build
+        // interpolates them linearly, and saves authoring a second set of tones for
+        // every material in the table.
+        behind_[e] = paint_[e];
+
+        for (Color &tone : behind_[e].ramp.tone) {
+            tone.r = static_cast<unsigned char>(tone.r * kBehindShare);
+            tone.g = static_cast<unsigned char>(tone.g * kBehindShare);
+            tone.b = static_cast<unsigned char>(tone.b * kBehindShare);
+        }
     }
 
 
@@ -2955,6 +2968,92 @@ void World::UnloadPainted() {
     paintedOf_.clear();
 }
 
+void World::PaintBackdrop(Rectangle own) const {
+    const float pixel = config::kPixelSize;
+
+    // Squares anchored to the world rather than to the chunk, exactly as
+    // marching_squares::DrawPainted anchors them: the backdrop and the ground in
+    // front of it have to fall on one grid, or the grain behind a cut is half a
+    // texel out from the grain either side of it and the join is what the eye
+    // finds first.
+    const int m0 = static_cast<int>(std::floor(own.x / pixel));
+    const int m1 = static_cast<int>(std::ceil((own.x + own.width) / pixel));
+    const int n0 = static_cast<int>(std::floor(own.y / pixel));
+    const int n1 = static_cast<int>(std::ceil((own.y + own.height) / pixel));
+
+    // No face, and so no form — which is the whole of what makes this read as the
+    // inside of something. A depth past soil::kRimReach leaves the rim term at
+    // nothing and the texture alone, and the normal is then never consulted. See
+    // soil::Shading.
+    constexpr float kDeep = 1e9f;
+
+    for (int m = m0; m <= m1; m++) {
+        // The middle of the square, since that is where DrawPainted samples the
+        // ground's own fields and the two have to be answering about one place.
+        const float x = (static_cast<float>(m) + 0.5f) * pixel;
+
+        // And the middle is also what says whose square this is — see the note on
+        // the margin beside this function's declaration. The square itself may hang
+        // over the border by nearly its own width, which is what the margin is for.
+        if (x < own.x || x >= own.x + own.width) continue;
+
+        // Once for the column, which is what a column is for: the surface costs
+        // eight octaves and the climate two fields more, and every square below
+        // this one wants the same two answers.
+        const float ground             = terrain::Height(x, settings_);
+        const terrain::Climate climate = terrain::ClimateAt(x, settings_);
+
+        // What each cover is worth here, in pixels of slab. Asked of the very
+        // function the generator asks — a second rule for how deep the soil goes
+        // would be a backdrop that stops agreeing with the ground the first time
+        // either is touched.
+        std::array<float, kElementCount> slab{};
+
+        for (std::size_t e = 0; e < kElementCount; e++) {
+            const ElementSpawn &spawn = kElements[e].spawn;
+            if (spawn.generator != Generator::Cover) continue;
+
+            slab[e] = CoverThickness(spawn, x, ground, climate.temperature, climate.humidity);
+        }
+
+        const float top = ground + kBehindSink;
+
+        for (int n = n0; n <= n1; n++) {
+            const float y = (static_cast<float>(n) + 0.5f) * pixel;
+
+            if (y < own.y || y >= own.y + own.height) continue;
+
+            // Above the land there is sky, and the sky is drawn behind this whole
+            // layer already. Nothing here may cover it.
+            if (y <= top) continue;
+
+            // Which material, by the rule the generator uses: the cover with the
+            // strongest claim that still reaches this deep, and the rock under all
+            // of them. The depth is measured from the true surface rather than from
+            // where the painting starts, so a slab written as four pixels of soil is
+            // four pixels of soil here too.
+            const float depth = y - ground;
+
+            std::size_t what = ElementIndex(Element::Rock);
+            int strongest    = -1;
+
+            for (std::size_t e = 0; e < kElementCount; e++) {
+                if (slab[e] <= depth) continue;
+
+                const int precedence = kElements[e].rules.precedence;
+                if (precedence <= strongest) continue;
+
+                strongest = precedence;
+                what      = e;
+            }
+
+            const Vector2 at = {static_cast<float>(m) * pixel, static_cast<float>(n) * pixel};
+
+            DrawRectangleV(at, {pixel, pixel}, behind_[what]({at, kDeep, {0.0f, -1.0f}}));
+        }
+    }
+}
+
 void World::PaintChunk(Painted &slot, int cx, int cy) {
     const float span = ChunkSpan();
 
@@ -2979,6 +3078,15 @@ void World::PaintChunk(Painted &slot, int cx, int cy) {
     ClearBackground(BLANK);
 
     BeginMode2D(frame);
+
+    // The country behind the ground, under everything — including under a wall,
+    // which is a thing the player put up in front of it. Drawn whether or not this
+    // chunk has been generated: what stands behind the world is a property of the
+    // world's own noise, and a chunk that has not arrived yet has no say in it.
+    //
+    // The chunk's own span and not `covered`: the margin belongs to the neighbour
+    // that owns the squares in it.
+    PaintBackdrop({static_cast<float>(cx) * span, static_cast<float>(cy) * span, span, span});
 
     const Chunk *chunk = Find(cx, cy);
 
@@ -3117,23 +3225,13 @@ void World::PaintChunks(Rectangle view) {
 }
 
 void World::DrawUnderground(Rectangle view) const {
-    // How far below the surface the backdrop starts.
+    // The deep rock as the backdrop paints it, with the texture taken off.
     //
-    // The land is described one lattice column at a time and the ground is drawn
-    // from a contour that crosses half a step out from the last filled vertex, so
-    // the two do not agree to the pixel. A backdrop that started a pixel high
-    // would show as a comb of dark teeth along every hilltop -- not against the
-    // sky, which is the same colour, but against the sky *under a cloud*, where
-    // the backdrop is darkened by the multiply and the sky beside it is not.
-    //
-    // Erring the other way is free: the run this sinks past is inside the ground,
-    // and the ground is drawn over it opaquely.
-    constexpr float kSink = 4.0f;
-
-    // The air over the whole view, exactly as the sky drew it into the frame --
-    // so that whatever survives below is the same colour it has always been, and
-    // a cave mouth still catches the blue of the day it opens onto.
-    sky_.DrawAtmosphere(view);
+    // The middle of the ramp, which is where a texel with no face and no drift
+    // lands — see soil::kBase. So this is the average of the wall the chunk
+    // textures are about to draw over it, and the seam between the two is a change
+    // of grain rather than a change of colour.
+    const Color deep = behind_[ElementIndex(Element::Rock)].ramp.tone[kElementRamp / 2];
 
     const float step = static_cast<float>(spacing_);
 
@@ -3142,39 +3240,30 @@ void World::DrawUnderground(Rectangle view) const {
 
     const float floorY = view.y + view.height;
 
-    // Taken back off, rather than laid down only where it is wanted: the air is a
-    // stack of bands and drawing it per column would be that stack once for every
-    // column on screen. One fill and one rectangle per column is the same picture
-    // for two hundredths of the work.
+    // Opaque, and that is the whole of what it has to be: the alpha in this layer
+    // is how much of the sky a pixel covers, and below the land the answer is all
+    // of it. See LitLayer::Capture.
     //
-    // Colour and alpha both to zero, which is what puts the layer back to the
-    // empty it was cleared to -- see LitLayer::Capture for why the alpha is half
-    // the answer here.
-    rlSetBlendFactorsSeparate(RL_ZERO, RL_ZERO, RL_ZERO, RL_ZERO, RL_FUNC_ADD, RL_FUNC_ADD);
-    BeginBlendMode(BLEND_CUSTOM_SEPARATE);
-
     // Carried along the row, since the right-hand end of one column is the
-    // left-hand end of the next and the surface is dear enough to be worth
-    // asking about once.
+    // left-hand end of the next and the surface is dear enough to be worth asking
+    // about once.
     float left = terrain::Height(first * step, settings_);
 
     for (int column = first; column <= last; column++) {
         const float x0    = column * step;
         const float right = terrain::Height(x0 + step, settings_);
 
-        // The lower of the two ends, since the contour between them can be as
-        // deep as either and the erase has to clear whichever it is.
-        const float surface = std::max(left, right) + kSink;
+        // The lower of the two ends, since the contour between them can stand as
+        // high as either and this must never be seen above the ground it is behind.
+        const float surface = std::max(left, right) + kBehindSink;
 
         left = right;
 
-        const float cut = std::min(surface, floorY);
-        if (cut <= view.y) continue;
+        const float from = std::max(surface, view.y);
+        if (from >= floorY) continue;
 
-        DrawRectangleRec({x0, view.y, step, cut - view.y}, WHITE);
+        DrawRectangleRec({x0, from, step, floorY - from}, deep);
     }
-
-    EndBlendMode();
 }
 
 void World::DrawTerrain(Rectangle view) const {

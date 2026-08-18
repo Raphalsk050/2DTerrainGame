@@ -421,7 +421,10 @@ private:
         float wind = 0.0f;
     };
 
-    void Spray(const flora::Plant &plant, flora::Season season, const Burst &burst) const;
+    // `stage` is how far along the tree is, and it is handed in rather than looked
+    // up because the caller is already holding the record it comes out of. A burst
+    // has to be thrown off the crown the plant has now — see Spray.
+    void Spray(const flora::Plant &plant, flora::Stage stage, flora::Season season, const Burst &burst) const;
 
     // The averages the off-screen rate is credited at. Measured from the sky once,
     // at Configure.

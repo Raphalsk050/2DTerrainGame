@@ -181,7 +181,7 @@ layer's contents and runs beside the other captures, before `BeginDrawing`.
 
 ```
 lit.Capture()                 // cleared to BLANK, layer blend set
-  DrawUnderground             // the sky behind the ground -- see below
+  DrawUnderground             // the country behind the ground -- see below
   DrawClouds
   terrain, plants, player, rain, mist, liquids
   ComposeLight                // multiplies only what is in this target
@@ -221,26 +221,64 @@ and should darken at dusk and glow at noon. Only the blue behind them comes out.
    it was multiplied down to black and nobody ever saw it. Taken out of the layer,
    an unlit cavern came out the pale blue of a bright afternoon.
 
-   So the same air is laid down a second time inside the layer and then **erased**
-   everywhere the land is not standing behind it — one full-frame fill and one
-   rectangle per lattice column, with colour and alpha both taken to zero. What is
-   left is opaque under the ground and gone above it, which is exactly the mask the
-   composite needs.
+   The first fix was to lay the same air down a second time inside the layer and
+   erase it everywhere the land was not standing behind it. It worked and it read
+   wrong, and the reason is worth keeping: what it left behind a hillside was the
+   *sky*, dimmed. Below the horizon `AirAt` gives the thickest air there is, which
+   is the pale wash of the horizon itself — so every hole dug at the surface had a
+   flat panel of grey in it that matched nothing around it, and at midday, when the
+   light multiply barely darkens anything, it matched nothing most of all.
 
-   The land it erases against is `terrain::Height` — the *generator's* country, on
-   §8's rule for the covers. Not `Skyline`, which follows the sky down into a shaft
-   and would have let daylight into the cave the shaft opens onto; and not
-   `SurfaceProfile`, which lets what has been built raise the surface and would turn
-   the whole sky under a mid-air platform into cave. A hole somebody dug is a hole
-   into rock.
+   What is behind a cave is the rock the cave was cut out of, and it is now drawn as
+   that. `World::PaintBackdrop` paints the generator's own country — the rock and
+   the covers over it, and nothing else — into the chunk texture, first, so it is
+   behind the walls and behind the ground and the frame pays one blit that was
+   happening anyway. Measured at **+0.1 ms** on `--profile`, all of it in
+   `PaintChunks` and all of it paid once per chunk.
 
-   `kSink` in `world.cpp` puts the backdrop four pixels below the surface. The
-   contour crosses half a lattice step out from the last filled vertex, so the two
-   descriptions of the ground do not agree to the pixel, and a backdrop that started
-   a pixel high would read as a comb of dark teeth along every hilltop — invisible
-   against clear sky, which is the same colour, and obvious against sky *under a
-   cloud*, where one is multiplied and the other is not. Sinking is free: the run it
-   sinks past is inside the ground, and the ground is drawn over it opaquely.
+   Three things are deliberately left out of it, and they are what separates a
+   backdrop from a second copy of the world: no ore, because a seam is a thing to
+   find by digging and a backdrop full of them is a map of where to dig; no water,
+   because a level is a thing that moves and this is a picture that does not; and no
+   caves, because a cave drawn behind a cave is a hole with a hole behind it.
+
+   It is drawn at `kBehindShare`, a little over half its own brightness — Minecraft's
+   figure, and settled by the same argument. Seamless is not the aim and cannot be:
+   the backdrop is lit by the same daylight as the hillside in front of it, so at the
+   same tone a pit dug at noon would be a hole nobody could see. Darkening is also
+   the house rule for reading as *behind* — it is what separates the wood wall from
+   the planks it is made of — and it is not a fade, because §5.5 of CLAUDE.md needs
+   every colour the ground is drawn in to be opaque.
+
+   `DrawUnderground` is what is left of the old pass: one flat rectangle per lattice
+   column in the deep rock's own dark, over the whole view below the skyline. It is
+   the floor under the backdrop, for the stretches no chunk has a picture of yet — so
+   a chunk arriving late shows as a patch of plain rock rather than as a window onto
+   the sky. Opaque, because the alpha in this layer is how much of the sky a pixel
+   covers and below the land the answer is all of it.
+
+   The land both of them measure against is `terrain::Height` — the *generator's*
+   country, on §8's rule for the covers. Not `Skyline`, which follows the sky down
+   into a shaft and would have let daylight into the cave the shaft opens onto; and
+   not `SurfaceProfile`, which lets what has been built raise the surface and would
+   turn the whole sky under a mid-air platform into cave. A hole somebody dug is a
+   hole into rock.
+
+   `kBehindSink` puts both four pixels below that line. The contour crosses half a
+   lattice step out from the last filled vertex, so the two descriptions of the
+   ground do not agree to the pixel, and a backdrop that started a pixel high would
+   read as a comb of dark teeth along every hilltop. What sinking costs is four
+   pixels at the lip of a fresh surface cut where neither the ground nor the backdrop
+   is drawn and the sky shows through — which is the sky it is continuous with, four
+   pixels lower than it should be, and the far cheaper of the two faults.
+
+   And the backdrop is painted over the chunk's **own span**, never into its margin.
+   The ground gets away with painting into the margin because its squares are
+   disjoint — a square belongs to whichever chunk its middle falls in, so a neighbour
+   drawing over the same strip has nothing there to draw. A backdrop fills every
+   square it is given, so a margin painted by both is the second chunk laying plain
+   rock over the first one's ground: a dark band down every chunk border, the width
+   of two margins, which is exactly what the first build of it did.
 
 4. **The night went with it.** `Sky::AirAt` says in its own comment that it gives
    *colour only* — "how bright the sky is belongs to the light layer the whole scene

@@ -423,13 +423,40 @@ void Player::Draw() const {
         DrawRectangleLinesEx(halo, 2.0f, {235, 220, 255, 255});
     }
 
-    // Aim indicator, readable while there is no sprite to carry the pose.
+    // The arm: where the hand is pointing, and the swing it makes getting there.
+    //
+    // Placeholder art, and it is doing two jobs while there is no sprite to carry
+    // the pose. The line is the aim; the arc is the blow.
+    //
+    // What used to say a blow had been struck was the strike box, drawn in
+    // translucent orange — a debug overlay doing an animation's job, and one that
+    // stopped being true the moment the blow started landing where the cursor is
+    // rather than in front of the body. It is still drawn by the overlay that owns
+    // it, under the collider toggle, where a box belongs.
     const Vector2 centre = Centre();
-    const Vector2 muzzle = {centre.x + aimDirection_.x * player_config::kAttackReach,
-                            centre.y + aimDirection_.y * player_config::kAttackReach};
+
+    // How far through the swing the arm is, in [0,1], and nought when nothing is
+    // being swung — so the same two lines draw the still arm and the swinging one.
+    const float through = (attackTimer_ > 0.0f)
+                            ? 1.0f - std::clamp(attackTimer_ / player_config::kAttackDuration, 0.0f, 1.0f)
+                            : 1.0f;
+
+    // Raised behind and brought down through the aim. Which way *behind* is depends
+    // on which way the hand is pointing: Y grows downward, so the arm is lifted by
+    // turning it towards the top of the screen, and that is one way round aiming
+    // right and the other aiming left.
+    const float side = (aimDirection_.x >= 0.0f) ? -1.0f : 1.0f;
+    const float turn = (1.0f - through) * player_config::kSwingArc * side;
+
+    const float sine   = std::sin(turn);
+    const float cosine = std::cos(turn);
+
+    const Vector2 arm = {aimDirection_.x * cosine - aimDirection_.y * sine,
+                         aimDirection_.x * sine + aimDirection_.y * cosine};
+
+    const Vector2 muzzle = {centre.x + arm.x * player_config::kAttackReach,
+                            centre.y + arm.y * player_config::kAttackReach};
 
     DrawLineEx(centre, muzzle, 2.0f, DARKBROWN);
     DrawCircleV(muzzle, 2.0f, DARKBROWN);
-
-    if (attackTimer_ > 0.0f) DrawRectangleRec(AttackHitbox(), Fade(ORANGE, 0.6f));
 }

@@ -27,6 +27,16 @@ constexpr Color kFarColor = {150, 156, 168, 255};
 // already means something growing.
 constexpr Color kPlantColor = {150, 214, 120, 255};
 
+// And the line laid under the cursor's own, one screen pixel outside it.
+//
+// Near black, because what it is for is being a colour no material is. A single
+// hairline in one colour disappears into whatever it is drawn over — the digging
+// red over red sandstone, the grey over rock — and a selected block the player
+// cannot find is a block they believe is not selected. Two lines cannot both be
+// lost, whatever is behind them. The same reasoning as DrawLabel's outline, and
+// the same trick.
+constexpr Color kEdgeColor = {12, 14, 18, 205};
+
 } // namespace
 
 void Editor::Bank(const World::Yield &freed, Drops &drops, Vector2 at, float away, float now) {
@@ -418,6 +428,7 @@ const char *Editor::Update(World &world, Inventory &inventory, Grove &grove, fix
         under_.reset();
         reachable_ = false;
         timber_    = false;
+        holding_   = false;
         building_  = false;
         buildable_ = false;
         onCell_    = false;
@@ -442,6 +453,44 @@ const char *Editor::Update(World &world, Inventory &inventory, Grove &grove, fix
     // sees and the click that follows it have to be one answer.
     World::ToCell(target, cellX_, cellY_);
     onCell_ = true;
+
+    // Whether there is anything in the block to break — see holding_. Worked out
+    // before the reach test below returns, because the cursor is drawn out there
+    // too and has the same thing to say about it.
+    holding_ = false;
+
+    {
+        int hx0 = 0;
+        int hy0 = 0;
+        int hx1 = 0;
+        int hy1 = 0;
+
+        if (Block(hx0, hy0, hx1, hy1)) {
+            for (int cx = hx0; cx <= hx1 && !holding_; cx++) {
+                for (int cy = hy0; cy <= hy1 && !holding_; cy++) {
+                    // A torch is something the click takes, and it is the one thing
+                    // in a cell that the ground knows nothing about. Asked first and
+                    // cheaply, for the same reason the dig takes it first: it is in
+                    // front of the wall, so it is what a cursor over the wall means.
+                    if (fixtures.At(cx, cy).has_value()) {
+                        holding_ = true;
+                        break;
+                    }
+
+                    World::Yield holds{};
+
+                    world.CellHolds(cx, cy, holds);
+
+                    for (std::size_t e = 0; e < kElementCount; e++) {
+                        if (holds[e] <= 0) continue;
+
+                        holding_ = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
 
     // `building_` does not ask whether the cursor is in reach. The grid is how the
     // player finds out where the reach ends, so it has to be drawn out there too —
@@ -885,6 +934,11 @@ void Editor::DrawCursor(const Inventory &inventory, const Grove &grove, flora::S
         }
     }
 
+    // Nothing in the block to take apart, so nothing is claimed. The mark says what
+    // the next click will do, and over open air the honest answer is that it does
+    // nothing — see holding_.
+    if (!holding_) return;
+
     // The block carries what the hands can do here, exactly as the ring used to.
     // Out of reach it goes grey and says neither of them can; in reach it takes
     // the colour of whatever the right hand would put down, or the digging colour
@@ -911,7 +965,15 @@ void Editor::DrawCursor(const Inventory &inventory, const Grove &grove, flora::S
 
     const Rectangle at = {from.x, from.y, to.x + to.width - from.x, to.y + to.height - from.y};
 
-    DrawRectangleLinesEx(at, 1.0f / zoom, color);
+    // Two lines, the darker one a screen pixel outside — see kEdgeColor. Both in
+    // screen pixels over the zoom, like every other mark the cursor makes, so the
+    // outline is the same weight however far the view is pushed in.
+    const float hair = 1.0f / zoom;
+
+    DrawRectangleLinesEx({at.x - hair, at.y - hair, at.width + hair * 2.0f, at.height + hair * 2.0f}, hair,
+                         kEdgeColor);
+
+    DrawRectangleLinesEx(at, hair, color);
 
     // The block says how much comes away and the spade says what the hand is; the
     // two are different questions and the outline cannot answer the second, which

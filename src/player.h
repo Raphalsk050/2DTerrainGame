@@ -131,6 +131,14 @@ inline constexpr float kFlyAccel      = 6000.0f;
 inline constexpr float kAttackReach = 22.0f;
 inline constexpr float kAttackSize  = 18.0f;
 
+// How far back the arm is raised at the top of a swing, in radians.
+//
+// A little over a third of a turn, which is enough to read as a swing at this
+// size and short of the arm ending up behind the body. It comes down through the
+// aim over kAttackDuration and stops there, rather than swinging back up: a chop
+// lands, it does not wave.
+inline constexpr float kSwingArc = 2.2f;
+
 } // namespace player_config
 
 // Per-frame input snapshot. Keeping Player independent of the keyboard allows

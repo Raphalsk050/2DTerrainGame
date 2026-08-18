@@ -566,7 +566,7 @@ Rectangle Expand(Rectangle rect, float margin) {
     return {rect.x - margin, rect.y - margin, rect.width + 2.0f * margin, rect.height + 2.0f * margin};
 }
 
-PlayerInput ReadPlayerInput(const Camera2D &camera, bool chopping) {
+PlayerInput ReadPlayerInput(const Camera2D &camera, bool swinging) {
     PlayerInput input;
 
     if (IsKeyDown(KEY_A) || IsKeyDown(KEY_LEFT)) input.moveX -= 1.0f;
@@ -575,11 +575,23 @@ PlayerInput ReadPlayerInput(const Camera2D &camera, bool chopping) {
     input.jumpPressed   = IsKeyPressed(KEY_SPACE) || IsKeyPressed(KEY_W);
     input.jumpHeld      = IsKeyDown(KEY_SPACE) || IsKeyDown(KEY_W);
     input.crouchHeld    = IsKeyDown(KEY_S) || IsKeyDown(KEY_DOWN);
-    // The key remains, and the mouse is the other way in. `chopping` is the left
-    // button held over a trunk — held rather than pressed, so laying into a tree is
-    // one held button and not a drumroll; what stops it becoming one blow a frame is
-    // the swing's own cooldown, which is where that rule already lived.
-    input.attackPressed = IsKeyPressed(KEY_J) || chopping;
+
+    // The left button, whatever the hand became: an axe in a trunk, a spade in the
+    // hillside, a fist through the grass. The arm swings for all three, because to
+    // the player they are one action — point at a thing and hit it — and it was
+    // only ever the code that thought digging and chopping were different enough to
+    // need different controls.
+    //
+    // There was a key here as well, and it has gone. What it did was land a blow in
+    // front of the character while the cursor was pointing somewhere else, which is
+    // two aims for one arm: a player who has just learnt that the mouse says where
+    // the hand works has to unlearn it for this one action. Every blow now lands
+    // where the cursor is.
+    //
+    // Held rather than pressed, so laying into a tree or a seam is one held button
+    // and not a drumroll. What stops it becoming one blow a frame is the swing's own
+    // cooldown, which is where that rule already lived.
+    input.attackPressed = swinging;
 
     // The vertical axis is the same two keys as jump and crouch. Only flight
     // reads it, and while flying neither of those actions applies, so there is
@@ -2491,10 +2503,11 @@ void DrawHud(const World &world, const Grove &grove, const Player &player, const
     // And the wet lines keep their meaning by going pale blue rather than dark.
     const Color wet = {152, 206, 255, 255};
 
-    DrawLabel("A/D: move  |  shift: run  |  space: jump  |  S: crouch  |  J: chop  |  mouse: aim  |  F: fly  |"
+    DrawLabel("A/D: move  |  shift: run  |  space: jump  |  S: crouch  |  mouse: aim  |  F: fly  |"
               "  pg up/dn or ctrl+wheel: zoom",
               10, 10, ink);
-    DrawLabel("left: dig  |  right: place what is held  |  planks and cobble build on the grid  |"
+    DrawLabel("left: swing — dig, chop, cut grass  |  right: place what is held  |"
+              "  planks and cobble build on the grid  |"
               "  1-9 or wheel: slot  |  tab: inventory  |  - / +: brush size  |  R: regenerate",
               10, 28, ink);
     DrawLabel(TextFormat("V: vertices  |  B: bounce %s  |  L: light limits  |  F3: chunks  |  F4: height grid  |"
@@ -4225,7 +4238,7 @@ int main(int argc, char **argv) {
                                      .flyToggled = (played == kWarmup / 2),
                                      .sprintHeld = true}
                 : typing ? PlayerInput{}
-                         : ReadPlayerInput(camera, !packOpen && !holdOff && editor.Left() == Editor::Hand::Chop
+                         : ReadPlayerInput(camera, !packOpen && !holdOff && editor.Left() != Editor::Hand::Idle
                                                        && IsMouseButtonDown(MOUSE_BUTTON_LEFT));
 
             PROFILE_ZONE("player");
@@ -4240,46 +4253,54 @@ int main(int argc, char **argv) {
         // Only on the frame the swing began. The strike box is live for the whole
         // window, so reading that instead lands nine blows per swing.
         if (!packOpen && !typing && player.AttackStarted()) {
-            // Where the blow lands. A swing off the mouse lands where the cursor is,
-            // because that is what the player aimed at and the cursor has already
-            // been told it is over something choppable; a swing off the key lands in
-            // front of the character, which is all a key can mean. Both are bounded
-            // by the same reach — the mouse one by the editor, which refuses to
-            // choose the axe out of range at all.
-            const bool aimed = editor.Left() == Editor::Hand::Chop;
+            // Where the blow lands: where the cursor is, whichever tool the hand
+            // became. The arm follows the aim, because a blow landing in front of
+            // the character while the cursor points elsewhere is a second, invisible
+            // cursor for the player to keep track of.
+            const Rectangle swing = {editor.Aim().x - kAimedBlow, editor.Aim().y - kAimedBlow, kAimedBlow * 2.0f,
+                                     kAimedBlow * 2.0f};
 
-            const Rectangle swing = aimed ? Rectangle{editor.Aim().x - kAimedBlow, editor.Aim().y - kAimedBlow,
-                                                      kAimedBlow * 2.0f, kAimedBlow * 2.0f}
-                                          : player.AttackHitbox();
+            // Bounded by the editor's own reach, which is the reach the ground is
+            // dug at. The arm still swings out there — a swing at nothing is a swing
+            // — and nothing it passes through is touched.
+            if (editor.Reachable()) {
+                // One blow's worth, in logs cut through.
+                //
+                // Chopping is hit-based and Minecraft's breaking is time-based, and
+                // this is where the two are reconciled: a held attack lands a blow
+                // every kAttackCooldown, a tree is flora::Settings::toughness logs
+                // thick, and a log costs flora::kLogSeconds by hand. So a blow is
+                // worth one cadence's share of one log, and a tree comes down in the
+                // time its own logs would take.
+                //
+                // Nothing about the swing changes when there is an axe. An axe is a
+                // ToolSpeed, and it divides the same seconds the ground's do.
+                constexpr float kChopBlow = player_config::kAttackCooldown / flora::kLogSeconds;
 
-            // One blow's worth, in logs cut through.
-            //
-            // Chopping is hit-based and Minecraft's breaking is time-based, and this
-            // is where the two are reconciled: a held attack lands a blow every
-            // kAttackCooldown, a tree is flora::Settings::toughness logs thick, and
-            // a log costs flora::kLogSeconds by hand. So a blow is worth one
-            // cadence's share of one log, and a tree comes down in the time its own
-            // logs would take.
-            //
-            // Nothing about the swing changes when there is an axe. An axe is a
-            // ToolSpeed, and it divides the same seconds the ground's do.
-            constexpr float kChopBlow = player_config::kAttackCooldown / flora::kLogSeconds;
+                // Wood only where the press decided this hand was an axe — see
+                // Editor::Hand. The latch is what keeps a player digging out from
+                // under a tree from felling it the moment the cursor wanders onto
+                // the trunk, and a swing that struck whatever it happened to be over
+                // would undo it.
+                if (editor.Left() == Editor::Hand::Chop) {
+                    grove.Strike(swing, kChopBlow, player.Centre(), world.Sky().Time());
+                }
 
-            grove.Strike(swing, kChopBlow, player.Centre(), world.Sky().Time());
+                // And whatever grass the same swing went through, whichever tool it
+                // was: a handful of grass comes away from a spade as readily as from
+                // an axe. A tuft gives up fibre where a tree gives up wood, into the
+                // same pile on the ground.
+                const int mown = world.MowGrass(swing, world.Sky().Time());
 
-            // And whatever grass the same swing went through. A tuft gives up
-            // fibre where a tree gives up wood, into the same pile on the ground.
+                if (mown > 0) {
+                    const Vector2 from = {swing.x + swing.width * 0.5f, swing.y + swing.height * 0.5f};
 
-            const int mown = world.MowGrass(swing, world.Sky().Time());
+                    // Thrown away from the player rather than towards them, which is
+                    // the side the blow came from and the way the wood already goes.
+                    const float away = (from.x < player.Centre().x) ? -1.0f : 1.0f;
 
-            if (mown > 0) {
-                const Vector2 from = {swing.x + swing.width * 0.5f, swing.y + swing.height * 0.5f};
-
-                // Thrown away from the player rather than towards them, which is
-                // the side the blow came from and the way the wood already goes.
-                const float away = (from.x < player.Centre().x) ? -1.0f : 1.0f;
-
-                grove.Fallen().Scatter(ItemsOf(Item::Fibre, mown), from, away, world.Sky().Time());
+                    grove.Fallen().Scatter(ItemsOf(Item::Fibre, mown), from, away, world.Sky().Time());
+                }
             }
         }
 

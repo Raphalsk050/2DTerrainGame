@@ -1648,13 +1648,21 @@ void Grove::DrawLeaves(const weather::Sky &sky, flora::Season season, Rectangle 
     DrawBurst(sky, season, now);
 }
 
-void Grove::Spray(const flora::Plant &plant, flora::Season season, const Burst &burst) const {
+void Grove::Spray(const flora::Plant &plant, flora::Stage stage, flora::Season season, const Burst &burst) const {
     const flora::SpeciesDef &def = flora::Def(plant.species);
 
-    const std::size_t mature = flora::StageIndex(flora::Stage::Mature);
+    // The crown it has, and not the one it is going to have.
+    //
+    // This read the mature row whatever the plant was — the same fault StrikeRect
+    // and the drifting field both had, and the plainest of the three to watch: a
+    // young oak is seventy-eight pixels of tree under a hundred and thirty pixel
+    // crown box, so every leaf a blow knocked off it came out of fifty pixels of
+    // empty sky above the leaves, spread half again as wide as the tree. A burst
+    // hanging over a sapling is not a burst at all.
+    const std::size_t grown = flora::StageIndex(stage);
 
-    const float height = def.height[mature] * plant.scale;
-    const float width  = def.canopyWidth[mature] * plant.scale;
+    const float height = def.height[grown] * plant.scale;
+    const float width  = def.canopyWidth[grown] * plant.scale;
 
     // The crown alone, which is what sheds. Nothing comes off the bare trunk
     // under it however hard it is hit.
@@ -1670,6 +1678,14 @@ void Grove::Spray(const flora::Plant &plant, flora::Season season, const Burst &
     const float cosine = std::cos(turn);
 
     const flora::SpeciesPalette &palette = def.palette[flora::SeasonIndex(season)];
+
+    // How hard they leave, against the size of the thing they left. kBurstOut and
+    // kBurstUp are written for a full-grown crown, and a small tree throwing its
+    // leaves those distances scatters them clear of itself — thirty pixels out of a
+    // crown twenty pixels wide reads as something passing over the tree rather than
+    // as leaves coming off it. The same measure the axe and the drop table take, so
+    // a plant that is drawn small is small to all three. See Stature.
+    const float force = burst.vigour * Stature(plant, stage);
 
     const float pixel = config::kFloraPixel;
 
@@ -1692,8 +1708,8 @@ void Grove::Spray(const flora::Plant &plant, flora::Season season, const Burst &
         // of it.
         const float side = (ax >= 0.0f) ? 1.0f : -1.0f;
 
-        const float out = kBurstOut * burst.vigour * (0.35f + 0.65f * Chance(plant.id, salt + 4, settings_.seed));
-        const float up  = kBurstUp * burst.vigour * (0.25f + 0.75f * Chance(plant.id, salt + 5, settings_.seed));
+        const float out = kBurstOut * force * (0.35f + 0.65f * Chance(plant.id, salt + 4, settings_.seed));
+        const float up  = kBurstUp * force * (0.25f + 0.75f * Chance(plant.id, salt + 5, settings_.seed));
 
         // Thrown, and then gravity. Light enough that the arc is shallow and most
         // of what is seen is the flutter across it.
@@ -1799,7 +1815,7 @@ void Grove::DrawBurst(const weather::Sky &sky, flora::Season season, float now) 
                 // air, and a gust arriving between them should carry the second one
                 // further — sampling once for the tree would put both in whatever is
                 // blowing now and quietly drag the older one sideways with it.
-                Spray(plant, season,
+                Spray(plant, StageOf(state.growth), season,
                       {.since = now - blow, .salt = 500 + slot * 131, .wind = sky.WindAt(plant.base.x, blow)});
             }
 
@@ -1808,7 +1824,11 @@ void Grove::DrawBurst(const weather::Sky &sky, flora::Season season, float now) 
             if (state.struckAt >= 0.0f) {
                 const flora::SpeciesDef &def = flora::Def(plant.species);
 
-                const float height = def.height[flora::StageIndex(flora::Stage::Mature)] * plant.scale;
+                // Halfway up the clear stretch of *this* trunk. Off the mature row
+                // it was halfway up the tree's grown height, which on anything short
+                // of full-grown is a point in the air above the crown — so a young
+                // tree threw its chips out of the sky over itself.
+                const float height = def.height[flora::StageIndex(StageOf(state.growth))] * plant.scale;
 
                 Chips(plant, {plant.base.x, plant.base.y - height * def.shape.clearance * 0.5f}, now - state.struckAt,
                       700, sky.WindAt(plant.base.x, state.struckAt));
@@ -1841,7 +1861,7 @@ void Grove::DrawBurst(const weather::Sky &sky, flora::Season season, float now) 
 
         if (landed <= 0.0f || landed >= spent) continue;
 
-        Spray(plant, season,
+        Spray(plant, StageOf(state.growth), season,
               {.since  = landed,
                .rounds = kImpactBurst,
                .salt   = 900,

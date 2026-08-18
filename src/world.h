@@ -454,21 +454,25 @@ public:
     // How many tufts the world can no longer describe on its own.
     int MownTufts() const { return static_cast<int>(mown_.size()); }
 
-    // What stands behind the ground: the air of a cave, and the far wall of one.
+    // The floor under everything that is drawn behind the ground.
     //
-    // The frame draws the sky twice, and this is the second of them. The first is
-    // drawn straight into the frame and is never multiplied by the light, because
-    // it is the *source* — a cloud's shadow falls through the sky and not onto it.
-    // That is right for every pixel of sky the player can actually see and wrong
-    // for every pixel below the land, where what is behind a cave is not sky at
-    // all but the rock the cave was cut out of. Left alone, an unlit cavern came
-    // out the colour of a bright afternoon.
+    // The frame used to draw the sky twice: once into itself as the source of the
+    // light, and once again inside the lit layer, erased everywhere the land was
+    // not standing behind it — so that a cave came out dark instead of the colour
+    // of a bright afternoon. It worked and it read wrong. What was left behind a
+    // dug hillside was the *sky*, dimmed: a flat wash of horizon colour that
+    // matches nothing around it, so every hole in the ground had a pane of pale
+    // grey in it where there should have been more ground.
     //
-    // So the same air is laid down again inside the lit layer and then taken back
-    // off everywhere the land is not standing behind it. What is left is opaque
-    // under the ground and gone above it: the multiply darkens the first to the
-    // black a cave should be, and the sky drawn behind the layer shows through the
-    // second untouched.
+    // What is behind a cave is the rock the cave was cut out of, and it is now
+    // drawn as that — see PaintBackdrop, which paints it into the same chunk
+    // texture as the ground and so costs the frame nothing.
+    //
+    // This is the backstop under that: one flat rectangle per column, in the deep
+    // rock's own dark, over the whole view below the generator's own skyline. It
+    // is what covers the stretches no chunk has a picture of yet, and it is why a
+    // chunk arriving late shows as a patch of plain rock rather than as a window
+    // onto the sky.
     //
     // The land here is the *generator's* land and not the world's, on the rule §8
     // of CLAUDE.md states for the covers: what is behind a cave is a property of
@@ -922,6 +926,19 @@ private:
     // done to arrive back where it started.
     std::array<soil::Paint, kElementCount> paint_{};
 
+    // And how it colours one standing *behind* the ground rather than in it.
+    //
+    // The same painter with its ramp taken down towards the dark, which is the
+    // house rule for reading as behind — it is what separates the wood wall from
+    // the planks it is made of, and the reasoning is written beside that material's
+    // tones in element.h. Not a fade: §5.5 of CLAUDE.md needs every colour the
+    // ground is drawn in to be opaque, and the backdrop goes into the very texture
+    // that rule is about.
+    //
+    // Same grain, same bedding, same seed, so the wall of a shaft is the rock beside
+    // it and not a second material that happens to be a similar colour.
+    std::array<soil::Paint, kElementCount> behind_{};
+
 
     // The grass over the ground now in play, one entry per lattice column.
     //
@@ -1035,6 +1052,55 @@ private:
     mutable std::vector<Grid> sodGrids_;
 
     long long paintedAge_ = 0;
+
+    // How much of its own light a material keeps when it is standing behind the
+    // ground rather than in it.
+    //
+    // A little over half, which is Minecraft's figure for the same job and is
+    // settled by the same argument. Seamless is not the aim and cannot be: the
+    // backdrop is lit by the same daylight as the hillside in front of it, so at
+    // the same tone a pit dug at noon would be a hole nobody could see. Far
+    // enough down that the eye reads depth, near enough that it is plainly the
+    // same rock.
+    static constexpr float kBehindShare = 0.55f;
+
+    // How far below the generator's skyline the backdrop starts.
+    //
+    // The land is described one lattice column at a time and the ground is drawn
+    // from a contour that crosses half a step out from the last filled vertex, so
+    // the two do not agree to the pixel. A backdrop that started a pixel high
+    // would show as a comb of dark teeth along every hilltop, against the sky it
+    // is meant never to be seen against.
+    //
+    // Erring the other way is nearly free: the run this sinks past is inside the
+    // ground, which is drawn over it opaquely, and the few pixels of it that a
+    // fresh cut exposes are covered by the flat fill DrawUnderground lays down
+    // in the same colour.
+    static constexpr float kBehindSink = 4.0f;
+
+    // Paints the country behind the ground over `covered`: the land as the
+    // generator would have it with nothing dug out of it.
+    //
+    // The generator's land and only part of it — the rock and whatever covers lie
+    // on it, and nothing else. No ore, because a seam is a thing to find by
+    // digging and a backdrop full of them is a map of where to dig; no water,
+    // because a level is a thing that moves and this is a picture that does not;
+    // and no caves, because a cave drawn behind a cave is a hole with a hole
+    // behind it. What is behind the world is the plain country, which is exactly
+    // what a wall of rock is.
+    //
+    // Drawn into the chunk texture, first, so it is behind the walls and behind
+    // the ground and costs the frame one blit that was happening anyway.
+    //
+    // `own` is the chunk's own span **without** the margin, and that is the whole
+    // of what keeps two neighbours from fighting over the strip between them. The
+    // ground gets away with painting into the margin because its squares are
+    // disjoint — a square belongs to whichever chunk its middle falls in, so a
+    // neighbour drawing over the same strip has nothing there to draw. A backdrop
+    // fills every square it is given, so a margin painted by both is the second
+    // chunk laying plain rock over the first one's ground: measured, a dark band
+    // down every chunk border, the width of two margins.
+    void PaintBackdrop(Rectangle own) const;
 
     // Rasterises one chunk into a slot.
     void PaintChunk(Painted &slot, int cx, int cy);

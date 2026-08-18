@@ -319,6 +319,20 @@ private:
     // update so the cursor and the click agree about which tool this is.
     bool timber_ = false;
 
+    // And whether the block under it holds anything at all to break.
+    //
+    // What the cursor is *for*: the mark is a promise about what the next click
+    // does, so over open air there must not be one. Minecraft's rule, and it is
+    // the difference between a cursor that says which block is selected and a
+    // square that follows the mouse across the sky saying nothing.
+    //
+    // Asked of the world through the same walk the spade uses, and not of the
+    // cell's middle — see CLAUDE.md §13.5. At a contour edge the middle is open
+    // sky while a corner still holds ground, and a cursor that went blank there
+    // would be blank over ground that is solid to a body and diggable by the
+    // spade.
+    bool holding_ = false;
+
     std::optional<Element> under_;
     Vector2 aim_{};
 
