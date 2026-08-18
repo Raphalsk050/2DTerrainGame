@@ -1,5 +1,7 @@
 #pragma once
 
+#include "element.h"
+#include "item.h"
 #include "mode.h"
 #include "stack.h"
 
@@ -92,6 +94,15 @@ public:
     };
 
     static Page PageOf(Tab tab);
+
+    // A page is the grid, and everything in the game has to fit on one.
+    //
+    // Checked here rather than left to be noticed, because the failure is silent:
+    // the palette would simply stop listing whatever was added last, and the row
+    // would look fine in the table it was added to. When this fires, the fix is
+    // another tab — see Tab, where the rule that sorts things into them lives.
+    static_assert(kElementCount <= kColumns * kRows, "the blocks no longer fit on one page of the palette");
+    static_assert(kItemCount <= kColumns * kRows, "the items no longer fit on one page of the palette");
 
     // Where the panel is on screen this frame, and whether a point is on it.
     static Rectangle Bounds();

@@ -78,32 +78,13 @@ constexpr float kBurstLinger = 1.7f;
 // spray of chips.
 constexpr float kBillow = 0.55f;
 
-// What each material is worth underfoot, as a share of a full puff.
+// What each material is worth underfoot — read from the row that describes it.
 //
-// Written per material rather than derived, for the reason the mood table is: how
-// much a ground throws up when it is trodden on is a fact about that ground, and
-// nothing else in the element table implies it. Rock is nearly silent, the loose
-// grounds are the whole point of the feature, and an ore seam is rock with
-// something in it.
+// It was a switch here, over material names. See ElementDef::loose for why it is a
+// field now: a fact about a ground belongs on the ground's own row, where the next
+// material added cannot miss it.
 constexpr float Loose(Element element) {
-    switch (element) {
-    case Element::Sand: return 1.00f;
-    case Element::Snow: return 0.95f;
-    case Element::Soil: return 0.70f;
-    case Element::Rock: return 0.22f;
-
-    // Cobble is the rock it came out of, and gives up as little underfoot.
-    case Element::Cobblestone: return 0.22f;
-
-    // A plank floor is swept, and water is dealt with by the caller — a foot in
-    // it is a splash and this is dust. Both are silent here for the same reason:
-    // a puff of dust off a board would say the player had trodden in something,
-    // and the whole of a built floor is that they have not.
-    case Element::WoodPlank:
-    case Element::Water: return 0.0f;
-
-    default: return 0.28f;
-    }
+    return StyleOf(element).loose;
 }
 
 // The two tones a speck is drawn in: the material's own, one light and one dark.

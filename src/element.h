@@ -671,6 +671,20 @@ struct ElementDef {
     // Which tool it gives way to. `Tool::Hand` means none in particular.
     Tool tool = Tool::Hand;
 
+    // What it throws up underfoot, as a share of a full puff of dust.
+    //
+    // Here rather than in scuff.cpp, where it was a switch over material names. The
+    // switch was defensible — how much a ground kicks up is a fact about that ground
+    // and nothing else in this row implies it — and it was still the wrong place:
+    // adding a material meant remembering to go and edit a file about *footsteps*,
+    // and forgetting was silent, because the switch had a default.
+    //
+    // A field here cannot be forgotten in the same way. It is the row you are
+    // already writing, with the question next to the answer: how loose is this stuff
+    // to walk on? The default is what the switch's default was, so a row that says
+    // nothing behaves exactly as it did.
+    float loose = 0.28f;
+
     // Whether that tool is *required* to get anything out of it.
     //
     // The difference between dirt and stone, and it is the whole of why one is a
@@ -743,6 +757,7 @@ inline constexpr ElementDef kElements[] = {
         // Stone: hardness 1.5, and a fist gets nothing out of it -- 7.5 s by hand.
         .hardness  = 1.5f,
         .tool      = Tool::Pick,
+        .loose     = 0.22f,
         .needsTool = true,
 
         .rules = {.blocksBodies = true, .blocksLiquid = true, .occupies = true, .precedence = 0},
@@ -790,6 +805,7 @@ inline constexpr ElementDef kElements[] = {
         // Dirt: hardness 0.5 -- 0.75 s by hand.
         .hardness  = 0.5f,
         .tool      = Tool::Shovel,
+        .loose     = 0.70f,
 
         .rules = {.blocksBodies = true, .blocksLiquid = true, .occupies = true, .precedence = 7},
         .spawn =
@@ -864,6 +880,7 @@ inline constexpr ElementDef kElements[] = {
         // Sand: hardness 0.5 -- 0.75 s by hand.
         .hardness  = 0.5f,
         .tool      = Tool::Shovel,
+        .loose     = 1.00f,
 
         .rules = {.blocksBodies = true, .blocksLiquid = true, .occupies = true, .precedence = 8},
         .spawn =
@@ -940,6 +957,7 @@ inline constexpr ElementDef kElements[] = {
         // Snow Block: hardness 0.2, and a fist gets nothing out of it -- 1 s by hand.
         .hardness  = 0.2f,
         .tool      = Tool::Shovel,
+        .loose     = 0.95f,
         .needsTool = true,
 
         .rules     = {.blocksBodies = true, .blocksLiquid = true, .occupies = true, .precedence = 9},
@@ -1093,6 +1111,7 @@ inline constexpr ElementDef kElements[] = {
         // Oak Planks: hardness 2 -- 3 s by hand.
         .hardness  = 2.0f,
         .tool      = Tool::Axe,
+        .loose     = 0.00f,
 
         .rules = {.blocksBodies = true, .blocksLiquid = true, .occupies = true, .precedence = 10},
         .spawn = {.generator = Generator::None},
@@ -1137,6 +1156,7 @@ inline constexpr ElementDef kElements[] = {
         // Cobblestone: hardness 2, and a fist gets nothing out of it -- 10 s by hand.
         .hardness  = 2.0f,
         .tool      = Tool::Pick,
+        .loose     = 0.22f,
         .needsTool = true,
 
         .rules = {.blocksBodies = true, .blocksLiquid = true, .occupies = true, .precedence = 11},
@@ -1545,6 +1565,7 @@ inline constexpr ElementDef kElements[] = {
         // hardness is for.
         .hardness  = 0.0f,
         .tool      = Tool::Hand,
+        .loose     = 0.00f,
 
         .rules = {.flows = true, .buoyancy = 1.0f},
         // The only row whose extent this table does not describe.
