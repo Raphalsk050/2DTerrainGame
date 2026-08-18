@@ -1504,6 +1504,13 @@ private:
     // same everywhere, so nothing else has cause to.
     void Reckon();
 
+    // The band each square of the cloud falls in, kept between frames.
+    //
+    // Scratch and not state: it is filled and read inside one call to DrawShaded and
+    // says nothing about the sky between them. A member so that drawing a sky costs
+    // no allocation, which is the same reason World keeps its own surface buffer.
+    mutable std::vector<std::int8_t> shaded_;
+
     Settings settings_{};
     terrain::Settings terrain_{};
 

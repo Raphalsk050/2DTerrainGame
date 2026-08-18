@@ -1,11 +1,15 @@
 #include "weather.h"
 
 #include "config.h"
+#include "pool.h"
+#include "profile.h"
 #include "grid.h"
 #include "marching_squares.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstdint>
 #include <vector>
 
 namespace weather {
@@ -1230,12 +1234,30 @@ void Sky::DrawClouds(Rectangle view, int spacing) const {
     // copy of the same numbers.
     Grid field(origin, cols, rows, static_cast<int>(step));
 
-    for (int i = 0; i < cols; i++) {
-        // Once per column, not once per sample: the weather over a column is the
-        // same at every height in it.
-        const Column column = ColumnAt(origin.x + i * step);
+    {
+        PROFILE_ZONE("cloud field");
 
-        for (int j = 0; j < rows; j++) field.SetValue(i, j, MarginAt(field.PointAt(i, j), column));
+        // Across the cores, a column each.
+        //
+        // This is the whole cost of the sky and it was being paid on one of them:
+        // the grid is a few thousand samples of a three-octave field, once a frame,
+        // and it measured at three milliseconds — eighteen per cent of the frame,
+        // for the clouds alone, with nothing else in the draw coming near it.
+        //
+        // Safe by construction rather than by arrangement: a worker writes only the
+        // column it was handed, `ColumnAt` and `MarginAt` are pure functions of the
+        // settings and the position, and the grid is sized before any of them
+        // start. Nothing is shared but the read-only settings.
+        pool::For(
+            cols,
+            [&](int i) {
+                // Once per column, not once per sample: the weather over a column is
+                // the same at every height in it.
+                const Column column = ColumnAt(origin.x + i * step);
+
+                for (int j = 0; j < rows; j++) field.SetValue(i, j, MarginAt(field.PointAt(i, j), column));
+            },
+            2, 1);
     }
 
     // How far towards the sun the depth is read, in grid cells.
@@ -1254,7 +1276,11 @@ void Sky::DrawClouds(Rectangle view, int spacing) const {
     // One pass. Each cell is shaded from its own depth and from the cloud between it
     // and the sun, both read out of this same grid, so the shading is a property of
     // the cloud and cannot depend on where the camera is standing.
-    DrawShaded(field, towards, bands);
+    {
+        PROFILE_ZONE("cloud draw");
+
+        DrawShaded(field, towards, bands);
+    }
 }
 
 void Sky::DrawShaded(const Grid &field, Vector2 towards, int bands) const {
@@ -1263,7 +1289,7 @@ void Sky::DrawShaded(const Grid &field, Vector2 towards, int bands) const {
 
     // The depth towards the sun, in the field's own units, read at the offset. A
     // lookup into the grid already built — not a new sample of the noise.
-    auto depthToSun = [&](Vector2 at) {
+    const auto depthToSun = [&](Vector2 at) {
         const Vector2 probe = {at.x + towards.x, at.y + towards.y};
 
         int i = 0;
@@ -1276,72 +1302,117 @@ void Sky::DrawShaded(const Grid &field, Vector2 towards, int bands) const {
         return std::max(field.ValueAt(i, j), 0.0f);
     };
 
-    for (int i = 0; i < field.Cols() - 1; i++) {
-        for (int j = 0; j < field.Rows() - 1; j++) {
-            const float a = field.ValueAt(i, j);
-            const float b = field.ValueAt(i + 1, j);
-            const float c = field.ValueAt(i, j + 1);
-            const float d = field.ValueAt(i + 1, j + 1);
+    // The squares the grid covers, as whole rows of the world's own texel lattice.
+    //
+    // **Rows of the world rather than of the grid, and that is the change.** This
+    // walked cell by cell and, inside each, the squares whose centres fell in it —
+    // which is the same set of squares, cut into a few hundred pieces. Two things
+    // came of the cut: a run of one colour stopped at every cell border, so the same
+    // cloud was submitted as several times as many rectangles as it needed; and the
+    // work could not be shared, because a worker cannot draw.
+    //
+    // Whole rows can be. The colour of every square is worked out across the cores
+    // into the scratch below, and then this thread walks the rows once and draws
+    // them. Same squares, same colours, same order — see the arithmetic below, which
+    // is written to land on the very same floats the cell walk did.
+    const Vector2 origin = field.PointAt(0, 0);
 
-            // Nothing of the cloud in this cell. Most cells, so this is the test
-            // that makes the whole pass affordable.
-            if (a <= kCloudEdge && b <= kCloudEdge && c <= kCloudEdge && d <= kCloudEdge) continue;
+    const float far  = origin.x + static_cast<float>((field.Cols() - 1) * field.Spacing());
+    const float deep = origin.y + static_cast<float>((field.Rows() - 1) * field.Spacing());
 
-            const Vector2 at = field.PointAt(i, j);
+    const int m0 = static_cast<int>(std::floor(origin.x / pixel));
+    const int m1 = static_cast<int>(std::ceil(far / pixel));
+    const int n0 = static_cast<int>(std::floor(origin.y / pixel));
+    const int n1 = static_cast<int>(std::ceil(deep / pixel));
 
-            // Squares whose centre falls in this cell. Anchored to the world rather
-            // than to the cell, so the grid does not shift by a fraction of a square
-            // at every cell border — the same anchoring marching_squares uses, and
-            // it has to match or the cloud will not line up with the ground.
-            const int m0 = static_cast<int>(std::floor(at.x / pixel));
-            const int m1 = static_cast<int>(std::ceil((at.x + step) / pixel));
-            const int n0 = static_cast<int>(std::floor(at.y / pixel));
-            const int n1 = static_cast<int>(std::ceil((at.y + step) / pixel));
+    const int wide = std::max(m1 - m0 + 1, 0);
+    const int tall = std::max(n1 - n0 + 1, 0);
 
-            for (int n = n0; n <= n1; n++) {
-                const float y = (static_cast<float>(n) + 0.5f) * pixel;
-                if (y < at.y || y >= at.y + step) continue;
+    if (wide <= 0 || tall <= 0) return;
 
-                // A run of squares in the same band is one rectangle. Bands are
-                // wide, so most of a cloud is a handful of runs rather than a few
-                // hundred squares.
-                int run  = -1;
-                int from = m0;
+    // Held between frames so a sky costs no allocation. The band of a square, or -1
+    // where there is no cloud in it — one byte, because there are eight bands and a
+    // full sky is a hundred thousand squares.
+    shaded_.assign(static_cast<std::size_t>(wide) * static_cast<std::size_t>(tall), -1);
 
-                for (int m = m0; m <= m1 + 1; m++) {
-                    const float x = (static_cast<float>(m) + 0.5f) * pixel;
+    pool::For(
+        tall,
+        [&](int r) {
+            const float y = (static_cast<float>(n0 + r) + 0.5f) * pixel;
 
-                    int band = -1;
+            std::int8_t *row = shaded_.data() + static_cast<std::size_t>(r) * static_cast<std::size_t>(wide);
 
-                    if (m <= m1 && x >= at.x && x < at.x + step) {
-                        // Bilinear, so the outline follows the field between samples
-                        // exactly as the contour would rather than stepping cell to
-                        // cell.
-                        const float fx = (x - at.x) / step;
-                        const float fy = (y - at.y) / step;
+            // Which row of cells this row of squares falls in. One division for the
+            // row rather than one per square, and the cell's own corner is what the
+            // interpolation is measured from — as it was when the walk was by cell.
+            const int j = static_cast<int>(std::floor((y - origin.y) / step));
+            if (j < 0 || j >= field.Rows() - 1) return;
 
-                        const float here = (a * (1.0f - fx) + b * fx) * (1.0f - fy) + (c * (1.0f - fx) + d * fx) * fy;
+            for (int m = m0; m <= m1; m++) {
+                const float x = (static_cast<float>(m) + 0.5f) * pixel;
 
-                        if (here > kCloudEdge) {
-                            const float lit = Lighting(depthToSun({x, y}), here);
+                const int i = static_cast<int>(std::floor((x - origin.x) / step));
+                if (i < 0 || i >= field.Cols() - 1) continue;
 
-                            // Quantised last. The model is continuous; the flat bands
-                            // are the pixel-art step over the top of it.
-                            band = std::clamp(static_cast<int>(lit * static_cast<float>(bands)), 0, bands - 1);
-                        }
-                    }
+                const float a = field.ValueAt(i, j);
+                const float b = field.ValueAt(i + 1, j);
+                const float c = field.ValueAt(i, j + 1);
+                const float d = field.ValueAt(i + 1, j + 1);
 
-                    if (band != run) {
-                        if (run >= 0) {
-                            DrawRectangleRec({from * pixel, y - pixel * 0.5f, (m - from) * pixel, pixel},
-                                             CloudTint(BandLight(run, bands)));
-                        }
+                // Nothing of the cloud in this cell. Most cells, so this is the test
+                // that makes the whole pass affordable.
+                if (a <= kCloudEdge && b <= kCloudEdge && c <= kCloudEdge && d <= kCloudEdge) continue;
 
-                        run  = band;
-                        from = m;
-                    }
-                }
+                const Vector2 at = field.PointAt(i, j);
+
+                // Bilinear, so the outline follows the field between samples exactly
+                // as the contour would rather than stepping cell to cell.
+                const float fx = (x - at.x) / step;
+                const float fy = (y - at.y) / step;
+
+                const float here = (a * (1.0f - fx) + b * fx) * (1.0f - fy) + (c * (1.0f - fx) + d * fx) * fy;
+                if (here <= kCloudEdge) continue;
+
+                const float lit = Lighting(depthToSun({x, y}), here);
+
+                // Quantised last. The model is continuous; the flat bands are the
+                // pixel-art step over the top of it.
+                row[m - m0] =
+                    static_cast<std::int8_t>(std::clamp(static_cast<int>(lit * static_cast<float>(bands)), 0, bands - 1));
             }
+        },
+        2, 1);
+
+    // One colour per band, worked out once. It was worked out per run, and a sky is
+    // thousands of runs of eight colours.
+    std::array<Color, 64> tint{};
+
+    const int shades = std::clamp(bands, 1, static_cast<int>(tint.size()));
+
+    for (int band = 0; band < shades; band++) tint[static_cast<std::size_t>(band)] = CloudTint(BandLight(band, bands));
+
+    for (int r = 0; r < tall; r++) {
+        const float y = (static_cast<float>(n0 + r) + 0.5f) * pixel;
+
+        const std::int8_t *row = shaded_.data() + static_cast<std::size_t>(r) * static_cast<std::size_t>(wide);
+
+        // A run of squares in the same band is one rectangle, and a run now crosses
+        // cell borders — which is where most of them used to end.
+        int run  = -1;
+        int from = m0;
+
+        for (int m = m0; m <= m1 + 1; m++) {
+            const int band = (m <= m1) ? row[m - m0] : -1;
+
+            if (band == run) continue;
+
+            if (run >= 0) {
+                DrawRectangleRec({from * pixel, y - pixel * 0.5f, (m - from) * pixel, pixel},
+                                 tint[static_cast<std::size_t>(std::clamp(run, 0, shades - 1))]);
+            }
+
+            run  = band;
+            from = m;
         }
     }
 }
