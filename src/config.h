@@ -16,7 +16,7 @@ inline constexpr int kScreenHeight = 600;
 inline constexpr int kMinScreenWidth  = 640;
 inline constexpr int kMinScreenHeight = 400;
 
-inline constexpr int kTargetFps = 60;
+inline constexpr int kTargetFps = 320;
 
 // How far the view may be pushed in, as whole multiples of one screen pixel per
 // world pixel. See ReadZoom for why nothing between them is offered.

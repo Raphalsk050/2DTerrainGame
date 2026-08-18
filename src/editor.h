@@ -154,7 +154,7 @@ private:
     // Written against kBlockSide rather than as a number of pixels, because what
     // it means is a number of blocks and the pixels are how this world happens to
     // measure one.
-    static constexpr float kReach = 6.0f * kBlockSide;
+    static constexpr float kReach = 8.0f * kBlockSide;
 
     // Half-side of the square the cursor asks the wood about, in world pixels.
     //
