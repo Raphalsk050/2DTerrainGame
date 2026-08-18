@@ -176,14 +176,26 @@ private:
     static constexpr int kMinSpan = 1;
     static constexpr int kMaxSpan = 8;
 
-    // Turns a vertex yield into whole blocks and puts them away, keeping the
-    // fraction for the next stroke. Whatever will not fit is thrown on the
-    // ground at `at`.
+    // Turns a vertex yield into whole blocks and throws them on the ground at
+    // `at`, keeping the fraction for the next stroke.
+    //
+    // On the ground, and never into the bag, however much room the bag has. What
+    // was dug becomes an object in the world that the player walks over to pick
+    // up — Minecraft's rule — and what it buys is that digging *happens
+    // somewhere* rather than being a number changing in a corner of the screen. A
+    // misfired stroke is also recoverable for the first time: material thrown out
+    // of a seam is lying where it fell until somebody collects it.
+    //
+    // This is not a new path. It is the one a full bag already took, promoted to
+    // the only one: `Drops::Update` drifts a settled pickup to a nearby player and
+    // collects it, and leaves it lying when there is no room. So a full bag
+    // behaves exactly as it did, an empty one now goes through the same code, and
+    // there is no longer a branch where the two differ.
     //
     // The fraction still matters even though a placed cell is exactly one block:
     // digging a cell out of a *hillside* frees however many of its nine vertices
     // the ground happened to fill, and the surface crosses cells at every angle.
-    void Bank(const World::Yield &freed, Inventory &inventory, Drops &drops, Vector2 at, float away, float now);
+    void Bank(const World::Yield &freed, Drops &drops, Vector2 at, float away, float now);
 
     // Fills the block of cells under the cursor with the material in hand, one
     // block of it per cell, and stops when the stack runs out.

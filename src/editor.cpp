@@ -29,7 +29,7 @@ constexpr Color kPlantColor = {150, 214, 120, 255};
 
 } // namespace
 
-void Editor::Bank(const World::Yield &freed, Inventory &inventory, Drops &drops, Vector2 at, float away, float now) {
+void Editor::Bank(const World::Yield &freed, Drops &drops, Vector2 at, float away, float now) {
     for (std::size_t e = 0; e < kElementCount; e++) {
         if (freed[e] <= 0) continue;
 
@@ -46,13 +46,9 @@ void Editor::Bank(const World::Yield &freed, Inventory &inventory, Drops &drops,
         // pour their remainders into one another.
         const Stack dug = BlocksOf(YieldOf(static_cast<Element>(e)), blocks);
 
-        const int refused = inventory.Add(dug);
-        if (refused <= 0) continue;
-
-        // A full bag does not stop the pick. What there was no room for lands at
-        // the cursor and waits, which is what Minecraft does and the only answer
-        // that does not either destroy the material or refuse the swing.
-        drops.Scatter({.holds = dug.holds, .what = dug.what, .count = refused}, at, away, now);
+        // Straight onto the ground. One object per block, since Scatter divides a
+        // stack one piece per unit up to its bound and a cell yields one.
+        drops.Scatter(dug, at, away, now);
     }
 }
 
@@ -118,7 +114,7 @@ const char *Editor::Spend(World &world, Inventory &inventory, Drops &drops, Rect
     // ore back rather than destroying it.
     const Rectangle whole = World::CellBounds(x0, y0);
 
-    Bank(freed, inventory, drops, {whole.x + whole.width * 0.5f, whole.y + whole.height * 0.5f}, away, now);
+    Bank(freed, drops, {whole.x + whole.width * 0.5f, whole.y + whole.height * 0.5f}, away, now);
 
     if (spent == 0 && refused) return "no room — you are standing there";
 
@@ -469,10 +465,12 @@ const char *Editor::Update(World &world, Inventory &inventory, Grove &grove, fix
             if (fixtures.Remove(cellX_, cellY_, what)) {
                 const Rectangle where = World::CellBounds(cellX_, cellY_);
 
-                if (inventory.Add(ItemsOf(Item::Torch, 1)) > 0) {
-                    grove.Fallen().Scatter(ItemsOf(Item::Torch, 1),
-                                           {where.x + where.width * 0.5f, where.y + where.height * 0.5f}, away, now);
-                }
+                // On the ground like everything else taken off the world — see
+                // Bank. A torch is the one of these that is an item rather than a
+                // material, and there is no reason for it to be the one thing that
+                // teleports into the bag.
+                grove.Fallen().Scatter(ItemsOf(Item::Torch, 1),
+                                       {where.x + where.width * 0.5f, where.y + where.height * 0.5f}, away, now);
 
                 return nullptr;
             }
@@ -490,7 +488,7 @@ const char *Editor::Update(World &world, Inventory &inventory, Grove &grove, fix
 
         const Rectangle at = World::CellBounds(x0, y0);
 
-        Bank(freed, inventory, grove.Fallen(), {at.x + at.width * 0.5f, at.y + at.height * 0.5f}, away, now);
+        Bank(freed, grove.Fallen(), {at.x + at.width * 0.5f, at.y + at.height * 0.5f}, away, now);
 
         return nullptr;
     }
