@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <vector>
 #include <cmath>
+#include <cstdio>
 
 namespace cave {
 namespace {
@@ -149,7 +150,22 @@ System Build(std::int64_t cellX, std::int64_t cellY, const Settings &s, int seed
     // put its nodes between two consecutive nodes of the trunk — and the segments
     // are built from consecutive nodes, which would draw a passage from the end
     // of the branch back to wherever the trunk had got to.
-    const auto dig = [&](const Pending &start) {
+    // **By value, and it has to be.** A branch is queued from inside this, and
+    // `queue` is a vector: a push_back that grows it moves everything in it, and a
+    // reference handed in from `queue[i]` is left pointing at freed memory. The walk
+    // then reads its own step count out of whatever the allocator has since put
+    // there — measured at 1065353216, which is the bit pattern of the float 1.0f
+    // lying in the recycled block — and asks for a path of a billion nodes.
+    //
+    // It shows as either of two things and neither points here: the reserve throws
+    // `std::length_error` and the game dies, or the reserve succeeds and a walk that
+    // should take two hundred steps takes four hundred million, which is a window
+    // that stops answering. Which of the two happens depends on the allocator, so it
+    // is a bug that comes and goes.
+    //
+    // A Pending is forty bytes. Copying it is cheaper than one node of the path it
+    // is about to dig.
+    const auto dig = [&](Pending start) {
         std::vector<Node> path;
         path.reserve(static_cast<std::size_t>(start.steps));
 
@@ -284,6 +300,7 @@ System Build(std::int64_t cellX, std::int64_t cellY, const Settings &s, int seed
         // of steps short of the mark is a dead end where a route was promised.
         const float far   = std::fabs(meet.x - origin.x) + std::fabs(meet.y - origin.y);
         const int steps   = static_cast<int>(far / std::max(s.stepLength, 1.0f) * 2.2f) + 12;
+
 
         queue.push_back({origin, heading, steps, grown * s.linkRadius, false, meet, s.linkAim, s.linkSquash});
     }
