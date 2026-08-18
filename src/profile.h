@@ -116,6 +116,15 @@ private:
 
 inline void Begin() { Get().enabled = true; }
 
+// Whether it is counting. Asked by the loop, which has to call Frame() for as long
+// as it is and must not call it when it is not — the frame count is what every
+// figure in the report is divided by.
+inline bool Running() {
+    return Get().enabled;
+}
+
+inline void End() { Get().enabled = false; }
+
 inline void Frame() { Get().frames++; }
 
 // Throws away everything measured so far, keeping the registry. Called after
@@ -132,7 +141,13 @@ inline void Reset() {
     state.frames = 0;
 }
 
-inline void Report(const char *title) {
+// The report, written wherever it is wanted.
+//
+// A file and not only the console, because the game is normally started by
+// double-clicking it and there is no console to print into — and the one time a
+// profile is most wanted is when something has gone slow in a window somebody is
+// looking at, not in a headless run.
+inline void Print(std::FILE *into, const char *title) {
     const State &state = Get();
 
     const int frames = (state.frames > 0) ? state.frames : 1;
@@ -149,8 +164,8 @@ inline void Report(const char *title) {
 
     total /= runs * 1.0e6;
 
-    std::printf("\n%s over %d frames\n\n", title, frames);
-    std::printf("%-34s %8s %10s %10s %8s\n", "zone", "calls/f", "ms/f", "self ms", "share");
+    std::fprintf(into, "\n%s over %d frames\n\n", title, frames);
+    std::fprintf(into, "%-34s %8s %10s %10s %8s\n", "zone", "calls/f", "ms/f", "self ms", "share");
 
     for (int i = 0; i < state.count; i++) {
         const Zone &zone = state.zones[i];
@@ -167,11 +182,29 @@ inline void Report(const char *title) {
 
         std::snprintf(label, sizeof(label), "%*s%s", indent, "", zone.name);
 
-        std::printf("%-34s %8.2f %10.3f %10.3f %7.1f%%\n", label, static_cast<double>(zone.calls) / runs, ms, self,
+        std::fprintf(into, "%-34s %8.2f %10.3f %10.3f %7.1f%%\n", label, static_cast<double>(zone.calls) / runs, ms, self,
                     (total > 0.0) ? 100.0 * ms / total : 0.0);
     }
 
-    std::printf("\n%-34s %8s %10.3f            (%.0f fps)\n", "frame", "", total, (total > 0.0) ? 1000.0 / total : 0.0);
+    std::fprintf(into, "\n%-34s %8s %10.3f            (%.0f fps)\n", "frame", "", total, (total > 0.0) ? 1000.0 / total : 0.0);
+}
+
+// The report on the console, which is where a headless run wants it.
+inline void Report(const char *title) {
+    Print(stdout, title);
+}
+
+// And into a file beside the executable. Says whether it could be written: a
+// profile nobody can find is worse than none, because it is believed to exist.
+inline bool Write(const char *path, const char *title) {
+    std::FILE *into = std::fopen(path, "w");
+    if (into == nullptr) return false;
+
+    Print(into, title);
+
+    std::fclose(into);
+
+    return true;
 }
 
 } // namespace profile

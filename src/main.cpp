@@ -926,6 +926,13 @@ int main(int argc, char **argv) {
     // hole in whatever was behind it.
     bool holdOff = false;
 
+    // The profile of a game being played by hand — see F2 below.
+    //
+    // Frames counted since it was turned on, and when the report was last written.
+    // Both live out here with the other things that are states of the screen rather
+    // than of the world.
+    int profiled = 0;
+
     // The screens in front of the game, and how the world being played was made.
     //
     // The mode is held out here with the other things a session is rather than
@@ -1306,6 +1313,52 @@ int main(int argc, char **argv) {
             }
         }
 
+            // F2: the profile of what is actually being played.
+        //
+        // `--profile` measures a flight over the surface with nobody at the keys,
+        // which is the right way to compare two builds and the wrong way to find out
+        // why *this* is slow — the answer is usually somewhere the flight never goes.
+        // This is the same instrument with a player at the controls: press it once to
+        // start counting, press it again to write the report out.
+        //
+        // The report goes to a file rather than to the console, because a game
+        // started by double-clicking it has no console. It is written beside the
+        // executable, which is where the working directory was moved to at startup.
+        if (!typing && IsKeyPressed(KEY_F2)) {
+            if (profile::Running()) {
+                const bool wrote = profile::Write("profile.txt", "played");
+
+                chat.Say(wrote ? TextFormat("profile of %d frames written to profile.txt", profiled)
+                               : "could not write profile.txt",
+                         wrote ? console::Tone::Done : console::Tone::Failed);
+
+                profile::End();
+
+                profiled = 0;
+            } else {
+                profile::Begin();
+                profile::Reset();
+
+                profiled = 0;
+
+                chat.Say("profiling — press F2 again to write it out", console::Tone::Note);
+            }
+        }
+
+        // Counted only while it is running, since every figure in the report is
+        // divided by this — and never while `--profile` is doing the counting
+        // itself, or every figure in *its* report comes out halved.
+        if (!profiling && profile::Running()) {
+            profile::Frame();
+
+            profiled++;
+
+            // Written as it goes as well as on the way out. A profile is wanted most
+            // when something has gone wrong, and something that has gone wrong is
+            // exactly the case where the second press never happens.
+            if (profiled % 240 == 0) profile::Write("profile.txt", "played");
+        }
+
         if (!typing) debug_view::ReadToggles(debug);
         if (!typing && IsKeyPressed(KEY_R)) {
             world.Reset();
@@ -1596,7 +1649,14 @@ int main(int argc, char **argv) {
         }
     }
 
-    if (profiling) profile::Report("frame");
+    if (profiling) {
+        profile::Report("frame");
+
+        // And beside the executable, on the same terms F2 writes it: a run started
+        // from a shortcut has nowhere to print, and the two ways of asking for a
+        // profile should leave the same thing behind.
+        profile::Write("profile.txt", "frame");
+    }
 
     world.UnloadPainted();
     grove.Unload();

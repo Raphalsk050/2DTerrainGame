@@ -2,6 +2,7 @@
 
 #include "flora.h"
 #include "hotbar.h"
+#include "profile.h"
 #include "inventory.h"
 #include "view.h"
 
@@ -98,6 +99,10 @@ void hud::Draw(const World &world, const Grove &grove, const Player &player, con
               "  planks and cobble build on the grid  |"
               "  1-9 or wheel: slot  |  tab: inventory  |  esc: menu  |  - / +: brush size  |  R: regenerate",
               10, 28, ink);
+    Label(profile::Running() ? "F2: writing a profile — press it again to save profile.txt"
+                             : "F2: profile what you are playing",
+          10, 64, profile::Running() ? Color{150, 214, 120, 255} : ink);
+
     Label(TextFormat("V: vertices  |  B: bounce %s  |  L: light limits  |  F3: chunks  |  F4: height grid  |"
                          "  F5: light field  |"
                          "  F6: unlit %s  |  F7: fast weather %s  |  F8: next quarter  |  F9: season %s  |"
