@@ -36,6 +36,62 @@
 
 namespace {
 
+// The sky on its own, drawn straight to a file.
+//
+// Every other picture this file takes is of the ground, and the sky was the one
+// part of the world with no still picture of it at all — so how full it looks, what
+// a deck does at dusk, whether a mood reads as the weather it is named after, could
+// only be judged by standing in the game at the right hour under the right spell.
+// Which is to say: not judged, argued about.
+//
+// Drawn through the real path, in the frame's own order: the air, then the cloud
+// inside the light, then the stars over both.
+void DrawSky(World &world, Rectangle strip, const char *path, int zoom, int mood, float hours) {
+    if (mood >= 0) world.ForceWeather(mood);
+
+    // The clock run on to the hour asked for, in the steps the weather itself takes,
+    // so the deck has drifted and the sun has moved rather than being teleported.
+    const float wanted = std::max(hours, 0.0f) * 3600.0f;
+
+    world.StepWeather(1.0f / 60.0f);
+
+    for (float t = 0.0f; t < wanted; t += 1.0f) world.StepWeather(1.0f);
+
+    world.Update(strip);
+
+    RenderTexture2D canvas = LoadRenderTexture(static_cast<int>(strip.width), static_cast<int>(strip.height));
+
+    Camera2D camera = {};
+    camera.offset   = {0.0f, 0.0f};
+    camera.target   = {strip.x, strip.y};
+    camera.zoom     = 1.0f;
+
+    BeginTextureMode(canvas);
+    ClearBackground(BLANK);
+
+    BeginMode2D(camera);
+
+    world.Sky().DrawAtmosphere(strip);
+    world.Sky().DrawClouds(strip, world.Spacing());
+    world.DrawStars(strip);
+
+    EndMode2D();
+    EndTextureMode();
+
+    Image shot = LoadImageFromTexture(canvas.texture);
+    ImageFlipVertical(&shot);
+
+    if (zoom > 1) ImageResizeNN(&shot, shot.width * zoom, shot.height * zoom);
+
+    ExportImage(shot, path);
+
+    UnloadImage(shot);
+    UnloadRenderTexture(canvas);
+
+    std::printf("sky %.0f x %.0f at (%.0f, %.0f), %s, %.1f h in, written to %s%c", strip.width, strip.height, strip.x,
+                strip.y, world.Sky().Now().name, hours, path, 10);
+}
+
 // One strip of the world drawn straight to a file, at one screen pixel per world
 // pixel.
 //
@@ -1613,8 +1669,10 @@ bool probes::Headless(int argc, char **argv) {
     const bool building = argc >= 2 && TextIsEqual(argv[1], "--build");
 
 
-    return probing || counting || cruising || weighing || reading || digging || assaying || settling || timing
-        || gauging || checking || building;
+    const bool skying = argc >= 7 && TextIsEqual(argv[1], "--sky");
+
+    return probing || skying || counting || cruising || weighing || reading || digging || assaying || settling
+        || timing || gauging || checking || building;
 }
 
 std::optional<int> probes::Run(int argc, char **argv, World &world, Grove &grove, terrain::Settings &settings,
@@ -2287,6 +2345,17 @@ std::optional<int> probes::Run(int argc, char **argv, World &world, Grove &grove
                   (argc >= 9) ? static_cast<float>(std::atof(argv[8])) : 0.0f,
                   (argc >= 10) ? (std::atoi(argv[9]) != 0) : true, (argc >= 11) ? std::atoi(argv[10]) : 0,
                   (argc >= 12) ? std::atoi(argv[11]) : -1, (argc >= 13) ? std::atoi(argv[12]) : -1);
+
+        return 0;
+    }
+
+    // `--sky x y w h out.png [zoom] [mood] [hours]` draws the sky alone. See DrawSky.
+    if (argc >= 7 && TextIsEqual(argv[1], "--sky")) {
+        const Rectangle strip = {static_cast<float>(std::atof(argv[2])), static_cast<float>(std::atof(argv[3])),
+                                 static_cast<float>(std::atof(argv[4])), static_cast<float>(std::atof(argv[5]))};
+
+        DrawSky(world, strip, argv[6], (argc >= 8) ? std::atoi(argv[7]) : 1, (argc >= 9) ? std::atoi(argv[8]) : -1,
+                (argc >= 10) ? static_cast<float>(std::atof(argv[9])) : 0.0f);
 
         return 0;
     }
