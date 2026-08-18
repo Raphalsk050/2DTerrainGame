@@ -671,16 +671,43 @@ Column Sky::ColumnAt(float worldX) const {
     return column;
 }
 
-float Sky::MarginAt(Vector2 world, const Column &column) const {
-    if (column.cover <= 0.0f) return -1.0f;
+Sky::Deck Sky::Near() const {
+    Deck deck;
 
     // The underside hangs lower in heavy weather, which is the visible half of a
     // rain cloud sitting closer to the ground than a fair-weather one.
-    const float base = settings_.base + settings_.rainDrop * now_.rain;
-    const float span = base - settings_.ceiling;
+    deck.ceiling = settings_.ceiling;
+    deck.base    = settings_.base + settings_.rainDrop * now_.rain;
+
+    return deck;
+}
+
+Sky::Deck Sky::Far() const {
+    const Settings::Distance &far = settings_.distance;
+
+    Deck deck;
+
+    deck.ceiling = far.ceiling;
+    deck.base    = far.base;
+    deck.scale   = std::max(far.scale, 0.05f);
+    deck.flatten = std::max(far.flatten, 0.05f);
+    deck.taper   = std::max(far.taper, 0.05f);
+    deck.drift   = far.drift;
+    deck.cover   = std::clamp(far.cover, 0.0f, 3.0f);
+    deck.slice   = far.slice;
+    deck.haze    = std::clamp(far.haze, 0.0f, 1.0f);
+    deck.hazeFar = std::clamp(far.hazeFar, 0.0f, 1.0f);
+
+    return deck;
+}
+
+float Sky::MarginIn(const Deck &deck, Vector2 world, const Column &column) const {
+    if (column.cover <= 0.0f) return -1.0f;
+
+    const float span = deck.base - deck.ceiling;
     if (span <= 0.0f) return -1.0f;
 
-    const float through = (world.y - settings_.ceiling) / span;
+    const float through = (world.y - deck.ceiling) / span;
     if (through <= 0.0f || through >= 1.0f) return -1.0f;
 
     // Nothing at the top and bottom of the band, thickest through the middle. A
@@ -692,9 +719,27 @@ float Sky::MarginAt(Vector2 world, const Column &column) const {
     // cutoff with it and the deck always ends softly — where a fixed penalty on the
     // cutoff is a fixed number of field units and an overcast sky walks straight
     // through it.
-    const float profile = std::pow(std::sin(through * kPi), std::max(settings_.bandTaper, 0.01f));
+    const float profile = std::pow(std::sin(through * kPi), std::max(settings_.bandTaper * deck.taper, 0.01f));
 
-    return Field(world) - Cutoff(column.cover * profile);
+    // Sampled in the deck's own frame, which is the whole of what distance is here.
+    //
+    // Dividing by the scale compresses its shapes; adding back the share of the
+    // drift it is *not* carrying leaves it moving at that share of the wind, so a
+    // far deck crawls behind the near one out of the same field rather than out of a
+    // second one; and the slice moves it to a different stretch of weather so the
+    // two are not one cloud drawn twice.
+    const float slip = swept_ * settings_.cloudWind * (1.0f - deck.drift);
+
+    const Vector2 at = {(world.x + slip) / deck.scale,
+                        (world.y + deck.slice) / (deck.scale * deck.flatten)};
+
+    return Field(at) - Cutoff(column.cover * deck.cover * profile);
+}
+
+float Sky::MarginAt(Vector2 world, const Column &column) const {
+    // The near deck, which is the one everything outside the drawing means when it
+    // says cloud: the shadow it casts, the rain it drops, the stars it hides.
+    return MarginIn(Near(), world, column);
 }
 
 float Sky::DensityAt(Vector2 world, const Column &column) const {
@@ -1204,13 +1249,18 @@ Color Sky::CloudTint(float lit) const {
 // ------------------------------------------------------------------ the cloud
 
 void Sky::DrawClouds(Rectangle view, int spacing) const {
+    // The far deck first, because it is behind. See Settings::Distance for what
+    // "far" is made of and why the sky needed it.
+    DrawDeck(Far(), view, spacing);
+    DrawDeck(Near(), view, spacing);
+}
+
+void Sky::DrawDeck(const Deck &deck, Rectangle view, int spacing) const {
     // The band, clipped to the view. Underground there is no overlap at all and the
     // whole cost of the sky goes away without anything having to ask where the
     // player is.
-    const float deepest = settings_.base + settings_.rainDrop;
-
-    const float top    = std::max(view.y, settings_.ceiling);
-    const float bottom = std::min(view.y + view.height, deepest);
+    const float top    = std::max(view.y, deck.ceiling);
+    const float bottom = std::min(view.y + view.height, deck.base);
     if (bottom <= top) return;
 
     const int bands = std::max(settings_.shading.layers, 1);
@@ -1219,7 +1269,18 @@ void Sky::DrawClouds(Rectangle view, int spacing) const {
     // across, so this is still thirty-odd samples over one of them, and the
     // rasteriser interpolates between samples anyway — the shape does not coarsen,
     // only the sampling of it, and the field is much the most expensive thing here.
-    const float step = static_cast<float>(std::max(spacing, 1)) * settings_.fieldStep;
+    //
+    // Finer for the far deck in proportion to how much its shapes have shrunk, so a
+    // cloud a third the size is sampled a third as coarsely and keeps the lobed
+    // outline that makes it a cloud.
+    //
+    // This was tried the other way round — one step for both decks, letting the
+    // bilinear smooth the far one — on the reasoning that distance costs detail. It
+    // does, but not like that: what it takes is *contrast*, not shape. Smoothed, the
+    // far deck stopped being cloud-shaped and became a stain. Distance is carried
+    // here by size, by flatness and by the haze; the shape stays built the way the
+    // near one is built.
+    const float step = static_cast<float>(std::max(spacing, 1)) * settings_.fieldStep * deck.scale;
 
     // Room for the march towards the sun to read outside the visible band.
     const float margin = settings_.shading.sunReach + step;
@@ -1232,7 +1293,7 @@ void Sky::DrawClouds(Rectangle view, int spacing) const {
     // One grid, filled once. There used to be eight of these and six full copies a
     // frame, because each shading layer was a separate pass over its own shifted
     // copy of the same numbers.
-    Grid field(origin, cols, rows, static_cast<int>(step));
+    Grid field(origin, cols, rows, static_cast<int>(std::max(step, 1.0f)));
 
     {
         PROFILE_ZONE("cloud field");
@@ -1245,9 +1306,9 @@ void Sky::DrawClouds(Rectangle view, int spacing) const {
         // for the clouds alone, with nothing else in the draw coming near it.
         //
         // Safe by construction rather than by arrangement: a worker writes only the
-        // column it was handed, `ColumnAt` and `MarginAt` are pure functions of the
-        // settings and the position, and the grid is sized before any of them
-        // start. Nothing is shared but the read-only settings.
+        // column it was handed, `ColumnAt` and `MarginIn` are pure functions of the
+        // settings and the position, and the grid is sized before any of them start.
+        // Nothing is shared but the read-only settings.
         pool::For(
             cols,
             [&](int i) {
@@ -1255,7 +1316,7 @@ void Sky::DrawClouds(Rectangle view, int spacing) const {
                 // the same at every height in it.
                 const Column column = ColumnAt(origin.x + i * step);
 
-                for (int j = 0; j < rows; j++) field.SetValue(i, j, MarginAt(field.PointAt(i, j), column));
+                for (int j = 0; j < rows; j++) field.SetValue(i, j, MarginIn(deck, field.PointAt(i, j), column));
             },
             2, 1);
     }
@@ -1279,11 +1340,11 @@ void Sky::DrawClouds(Rectangle view, int spacing) const {
     {
         PROFILE_ZONE("cloud draw");
 
-        DrawShaded(field, towards, bands);
+        DrawShaded(field, towards, bands, deck);
     }
 }
 
-void Sky::DrawShaded(const Grid &field, Vector2 towards, int bands) const {
+void Sky::DrawShaded(const Grid &field, Vector2 towards, int bands, const Deck &deck) const {
     const float step  = static_cast<float>(field.Spacing());
     const float pixel = std::max(config::kPixelSize, 1.0f);
 
@@ -1391,8 +1452,49 @@ void Sky::DrawShaded(const Grid &field, Vector2 towards, int bands) const {
 
     for (int band = 0; band < shades; band++) tint[static_cast<std::size_t>(band)] = CloudTint(BandLight(band, bands));
 
+    // How bright the day is, for the air the far deck is seen through. Scaled the
+    // way DrawAtmosphere scales it — this is drawn inside the light, so it must not
+    // carry the day twice.
+    const float floorLight = std::clamp(settings_.air.night, 0.0f, 1.0f);
+    const float day        = floorLight + (1.0f - floorLight) * std::clamp(today_.light, 0.0f, 1.0f);
+
+    const float band = std::max(deck.base - deck.ceiling, 1.0f);
+
     for (int r = 0; r < tall; r++) {
         const float y = (static_cast<float>(n0 + r) + 0.5f) * pixel;
+
+        // The air in front of this row, and how much of it there is.
+        //
+        // Down the band rather than one figure for the whole deck: its lower edge is
+        // further away than its upper one, which is why a real horizon fades rather
+        // than stopping, and it is what keeps this deck from ending in a line.
+        //
+        // A row of tints rather than a mix per square: there are eight of them and
+        // a thousand squares.
+        std::array<Color, 64> shaded = tint;
+
+        if (deck.hazeFar > 0.0f || deck.haze > 0.0f) {
+            const float down = std::clamp((y - deck.ceiling) / band, 0.0f, 1.0f);
+            const float veil = deck.haze + (deck.hazeFar - deck.haze) * down;
+
+            // What the haze washes *towards*, and it is not the bare air.
+            //
+            // Mixing a cloud into the air alone turns it the colour of the horizon,
+            // which here is a pale green-tan — and a distant cloud that has gone
+            // olive reads as dirt on the screen rather than as distance. What a far
+            // cloud actually does is lose contrast towards something *pale*: it is
+            // still a cloud, still lit, just with a great deal of air in front of it.
+            //
+            // So the target is the air lifted towards this deck's own lit tone. The
+            // bands converge on one pale colour as they recede, which is exactly the
+            // flattening the eye reads as distance, and none of them goes muddy.
+            const Color air  = Scale(AirAt(y, now_.cover), {day, day, day});
+            const Color pale = Mix(air, tint[static_cast<std::size_t>(shades - 1)], 0.45f);
+
+            for (int k = 0; k < shades; k++) {
+                shaded[static_cast<std::size_t>(k)] = Mix(tint[static_cast<std::size_t>(k)], pale, veil);
+            }
+        }
 
         const std::int8_t *row = shaded_.data() + static_cast<std::size_t>(r) * static_cast<std::size_t>(wide);
 
@@ -1408,7 +1510,7 @@ void Sky::DrawShaded(const Grid &field, Vector2 towards, int bands) const {
 
             if (run >= 0) {
                 DrawRectangleRec({from * pixel, y - pixel * 0.5f, (m - from) * pixel, pixel},
-                                 tint[static_cast<std::size_t>(std::clamp(run, 0, shades - 1))]);
+                                 shaded[static_cast<std::size_t>(std::clamp(run, 0, shades - 1))]);
             }
 
             run  = band;
