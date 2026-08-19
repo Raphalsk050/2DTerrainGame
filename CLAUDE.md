@@ -104,6 +104,7 @@ whole phases, never inside a `pool::For` body.
 | `--sun x y` | the solved light as numbers |
 | `--build [cells]` | sets a run of build cells and digs it back out; checks the exchange is exact |
 | `--wind`, `--caves`, `--ore`, `--covers`, `--woods`, `--settle`, `--column`, `--tones` | generator reports |
+| `--veins out.png [zoom]` | every inclusion at its own width, drawn and measured (§27.5) |
 
 `--woods x0 x1` is the companion to `--covers`: it walks the scatter's own cells
 and reports, per species, how many plants grow and what ground each one is
@@ -1246,6 +1247,7 @@ below about what a row buys still holds. What the row says and what falls out of
 | `stack`, `laying` | how it is carried, and whether it goes down by the cell or under the brush |
 | `light.opacity`, `glow`, `strength` | what it does to the light, both as a shadow and as a source |
 | `loose` | what it throws up underfoot |
+| `paint.vein` | whether it is a body of itself or a scatter through what it displaced (§27) |
 
 That last one is the newest, and it is there as a lesson rather than a feature: it
 was a `switch` over material names in `scuff.cpp`, with a `default`. The switch was
@@ -1304,6 +1306,8 @@ them cost the same day of looking in the wrong place.
 - `--tones` — that its paint divides between form and texture the way the others do.
 - `--build --png` — that a wall of it is drawn on the same grid as everything else.
 - `--covers` or `--ore`, if it generates — that it appears at the rate its row claims.
+- `--veins`, if it is an inclusion — that a seam of it is drawn at the share its row
+  asks for, and that a seam of it can be seen (§27).
 - The palette, in creative: it should be there without anything being told about it.
 
 ---
@@ -2407,3 +2411,138 @@ with nothing told about it.
 older half of the probe dispatch in `probes/probes.cpp`, which is still two walls of
 name tests written out twice and has to agree with itself. The registry, the checks
 and the per-row file layout are in place for all three; what is left is mechanical.
+
+---
+
+## 27. An ore is drawn in the rock it is in, and the rock is never named
+
+An ore used to be painted as a filled region of its own colour: a compact disc of
+pure black or pure copper set into the hillside, with a smooth curve round it. It
+read as a sticker rather than as a find. It is now a scatter of blotches through
+whatever it displaced, which is Minecraft's arrangement and is also what an ore
+actually is.
+
+**Nothing about the block changed.** It occupies the same vertices, stops the same
+bodies, takes the same time to break and yields the same item. `--sun`, `--column`,
+`--ore` and `--covers` are byte-identical across the change, and a `--probe` picture
+of open country is too. Only the paint moved.
+
+### 27.1 The host is the pass underneath, so it never has to be written down
+
+This is the whole design and it is one sentence: `soil::Paint` answers `BLANK` for a
+texel the vein does not claim, `DrawPainted` submits nothing for a colour with no
+alpha, and what stays on the screen is what the pass beneath already put there.
+
+That pass is the material under this one in the exclusion order, painted from the
+union of itself and everything that outranks it — §5.5 and §12.1, which is why the
+union exists in the first place. So by the time coal is asked about, the whole of
+coal's outline has already been painted stone.
+
+**Which answers the question this was really asked for**: when there are deeper,
+harder rocks with a look of their own, a vein inside one is drawn inside it with no
+row edited and no code changed. It is not that the ore looks its host up — there is
+no such lookup anywhere, and adding one would be the mistake. The host paints itself
+first, and the ore is a hole in the sheet laid over it.
+
+The only obligation a future rock has is the one every ground material already
+meets: `occupies`, `blocksBodies`, and a `precedence` below the ores.
+
+### 27.2 A vein must not be drawn from its silhouette
+
+`DrawnUnioned` in `element.h`, and this is the one place the change is not merely
+paint.
+
+A material's silhouette is the union of itself and **everything that outranks it,
+whether or not it is anywhere near** — that is what a union is. Coal is precedence
+1, so coal's silhouette contains every copper, iron, gold, diamond and emerald vein
+in the chunk, and the whole of the soil, sand and snow above them. Today that is
+invisible because each later pass paints solidly over the last.
+
+The moment a pass stops filling its outline, it is the entire picture: every diamond
+in the world would be speckled with coal, copper, iron and gold. So a vein is drawn
+from **its own field**, which the exclusion pass has already cut back under anything
+that outranks it.
+
+Nothing is lost by dropping the union there, because an inclusion never provided
+coverage in the first place. And it is *cheaper*: six ore ranks no longer build a
+silhouette, which is six full-chunk grids each taking the maximum over fourteen
+fields per vertex, against a walk that skips an empty cell after four reads.
+**`PaintChunks` went 0.95 ms to 0.64 ms**, with `world.Update` flat at 0.82 either
+side as the thermometer §4 asks for.
+
+### 27.3 The blotches are a hash on a lattice, not a noise field
+
+Because the share has to *be* the share. A hash is uniform, so a cut at 0.45 keeps
+45% of the blotches and the one number the row is written in means what it says.
+Perlin is crowded hard around its own midpoint — §17.5's trap met from the other
+side — so the same cut on a field would keep some quite different fraction.
+
+The lattice is two texels and world-anchored, so the pattern belongs to the rock and
+does not crawl as the view scrolls. Blotches that land beside each other run
+together, which is where the larger clumps come from; `share` is read against the
+percolation threshold of a square lattice, **0.593** — below it the blotches are
+islands and a seam reads as flecks, above it they join up and it reads as a mass of
+ore with rock coming through.
+
+### 27.4 The fringe is a share of the vein, and that was measured
+
+`ElementVein::fringe` thins the blotches out towards the vein's face. Without it the
+blotches stop along the very curve the solid disc was drawn to, and the eye
+reassembles the disc — a stippled disc is still a disc.
+
+It was written as six pixels first. That looked right on coal, which is forty-eight
+across, and swallowed gold, diamond and emerald whole: at eighteen to twenty-one
+pixels the same six was 88% of the vein, the density never once reached the share
+the row asked for, and what came out was three or four lonely texels. **A fringe is
+a proportion of a shape and not a distance.** `soil::For` turns the share into the
+pixels the painter measures depth in, off `ElementSpawn::veinCells`, so the two
+cannot drift apart.
+
+The two units deliberately have two names: `fringe` on the row is a share, `rim` in
+the painter is pixels. One name for both would be §11.2's `std::optional` fault in
+another form.
+
+### 27.5 `--veins`, and two things it taught in its first three runs
+
+`--veins out.png [zoom]` draws every inclusion at the width the generator actually
+makes it, twice: buried in rock, and standing out of a cave wall. The second is the
+one the player walks past, because `wallBias` puts ore there deliberately, and it is
+the one where two dark things can collapse into one smudge. It exists because the
+ores it is most needed for **cannot be found** — an `--ore` sweep of six thousand
+pixels of diamond's own level reports none at all.
+
+It then measures the same question against the world, through `soil::Shows` and
+`marching_squares::DrawPainted` themselves rather than a copy of either: a painter
+that records what it was handed and answers with nothing is the exact reading the
+real paint gets. Both lessons below came out of that number disagreeing with the
+picture.
+
+- **`Texel::depth` is not the distance to the edge of a vein.** It is the field's
+  value over the length of its gradient, which is a real distance where a field is a
+  distance and a linearisation where it is a shape. An ore's noise is a shape. So a
+  vein forty-eight pixels wide hands the painter a depth of forty in open rock and a
+  depth of three where the exclusion clamp against a neighbouring ore has made its
+  edge steep, and no rim written in pixels can be reasoned about without the
+  measurement. The `depth p90` column is that number.
+
+- **Print the count, or the tuning is against noise.** §23.1's lesson again, and it
+  cost the same hour. A fixed four-thousand-pixel sweep is five thousand texels of
+  coal and *thirty-eight* of diamond — one lucky vein, whose figures moved whenever
+  the sweep moved, and against which gold had already been "corrected" by twenty
+  points. `--veins` now walks until it has two thousand texels or sixty thousand
+  pixels, and prints both the count and the distance. Emerald needs the whole sixty
+  thousand to find two hundred and sixty, which is itself the interesting fact about
+  emerald.
+
+What it settles at: **drawn 54% for coal down to 39% for diamond**, from a table
+whose shares only descend from 62% to 50%. The rest is geometry — a narrow vein is
+mostly near its own edge — and it is the right way round, since a rich seam ought to
+look rich and a gem ought to look like a gem.
+
+### 27.6 One thing left latent
+
+`config::kDrawContours` is off, so `Outline()` returns `BLANK` and no outline is
+drawn. Were it ever switched on, `DrawPainted` gives the outline colour to every
+edge square **before** asking the painter — so a vein would get its disc drawn back
+round it as a line, with the blotches inside. The fix, if that day comes, is for the
+edge case to ask the painter first and take the outline only where it answered.

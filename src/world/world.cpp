@@ -3363,7 +3363,10 @@ void World::PaintChunk(Painted &slot, int cx, int cy) {
         for (const Element element : exclusionOrder_) {
             const ElementDef &def = Def(element);
 
-            if (!def.rules.blocksBodies) {
+            // From its own field, for one of the two reasons DrawnUnioned gives:
+            // it is not part of the ground, or it is a vein and the union would
+            // scatter it through every material that outranks it.
+            if (!DrawnUnioned(def)) {
                 const std::size_t index = ElementIndex(element);
 
                 marching_squares::DrawPainted(chunk->fields[index], def.threshold, paint_[index],
@@ -3607,10 +3610,11 @@ void World::DrawTerrain(Rectangle view) const {
     for (const Element element : exclusionOrder_) {
         const ElementDef &def = Def(element);
 
-        // Anything that is not part of the ground is drawn from its own field
-        // alone, never unioned into the silhouette of what is under it.
+        // Anything that is not part of the ground, and any vein, is drawn from its
+        // own field alone rather than unioned into the silhouette of what is under
+        // it. DrawnUnioned holds both reasons; the first of them is that
         //
-        // The union is stored as the strongest of several fields, and
+        // the union is stored as the strongest of several fields, and
         // interpolating that is not the same as interpolating each and taking
         // the strongest. Between two smooth fields the difference is nothing,
         // because exclusion already makes them cross their thresholds on the
@@ -3618,7 +3622,7 @@ void World::DrawTerrain(Rectangle view) const {
         // brush and zero outside, the union's crossing lands a fraction of a
         // cell further out than the material's own, and what shows in the gap
         // is a ring of whatever was beneath.
-        if (!def.rules.blocksBodies) {
+        if (!DrawnUnioned(def)) {
             const std::size_t index = ElementIndex(element);
 
             for (int cx = minCx; cx <= maxCx; cx++) {

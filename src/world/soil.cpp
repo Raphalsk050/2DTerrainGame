@@ -74,6 +74,11 @@ constexpr float kStrataAspect    = 9.0f;
 constexpr int kPatchSeed  = 7311;
 constexpr int kStrataSeed = 7317;
 
+// And one for the blotches a vein is scattered on, kept clear of the three above
+// for exactly that reason: a blotch that fell where the grain was already dark
+// would put every speck of ore in the shadow of the rock behind it.
+constexpr int kVeinSeed = 7331;
+
 // Hash of a pair of integers, in [0,1).
 //
 // A hash and not a noise field, because this one is read at the texel and a
@@ -135,10 +140,23 @@ Ramp Build(const Color authored[kElementTones]) {
 }
 
 Paint For(const ElementDef &def, int seed) {
+    // The fringe, from a share of the vein to the pixels the painter measures a
+    // texel's depth in. The half-width is what the share is of, because the depth
+    // runs from nothing at the face to the half-width at the middle.
+    //
+    // Floored at half a texel rather than allowed to reach zero. A material with no
+    // vein generator at all — an inclusion only ever placed by hand — would otherwise
+    // get a fringe of nothing and a hard edge, and a hard edge is the one thing this
+    // whole arrangement exists to remove.
+    const float half = def.spawn.veinCells * static_cast<float>(config::kResolution) * 0.5f;
+
     return {.ramp   = Build(def.paint.tone),
             .grain  = def.paint.grain,
             .patch  = def.paint.patch,
             .strata = def.paint.strata,
+            .vein   = {.share  = def.paint.vein.share,
+                       .blotch = def.paint.vein.blotch,
+                       .rim    = std::max(def.paint.vein.fringe * half, config::kPixelSize * 0.5f)},
             .seed   = seed};
 }
 
@@ -187,7 +205,43 @@ Shade Shading(const Paint &paint, const marching_squares::Texel &texel) {
     return shade;
 }
 
+bool Shows(const Paint &paint, const marching_squares::Texel &texel) {
+    if (paint.vein.Solid()) return true;
+
+    // Dense at the core and thinning to nothing at the face, which is the term
+    // that dissolves the outline: blotches that stopped along the very curve the
+    // solid disc was drawn to would let the eye put the disc back together.
+    //
+    // `rim` is already in the pixels the depth is measured in — For converted it
+    // from the share of the vein the row is written with, so this arithmetic knows
+    // nothing about how wide a seam of this material is.
+    const float dense = SmoothStep(0.0f, paint.vein.rim, texel.depth) * paint.vein.share;
+
+    // Then the blotch the texel falls in, hashed against that share.
+    //
+    // A hash and not a noise field, and the reason is that the share has to *be*
+    // the share: a hash is uniform, so a cut at 0.45 keeps 45% of the blotches.
+    // Perlin is crowded hard around its own midpoint — §17.5's trap, met from the
+    // other side — so the same cut on a field would keep some quite different
+    // fraction, and the one number the row is written in would mean nothing.
+    //
+    // Quantised to the blotch and anchored to the world, so the pattern belongs to
+    // the rock and does not crawl as the view scrolls.
+    const int bx = static_cast<int>(std::floor(texel.at.x / paint.vein.blotch));
+    const int by = static_cast<int>(std::floor(texel.at.y / paint.vein.blotch));
+
+    return Bits(bx, by, paint.seed + kVeinSeed) < dense;
+}
+
 Color Paint::operator()(const marching_squares::Texel &texel) const {
+    // Nothing at all where the vein is not, rather than a colour: a texel this
+    // painter declines is one DrawPainted does not submit, so what stays on the
+    // screen is what the pass underneath put there. That is also why this is the
+    // one place in the ground allowed to answer with an alpha of zero — see §5.5,
+    // which needs every colour the ground *is* drawn in to be opaque, and this is
+    // not a colour.
+    if (!Shows(*this, texel)) return BLANK;
+
     const float lit = Shading(*this, texel).Lit();
 
     const int index = std::clamp(static_cast<int>(lit * static_cast<float>(kElementRamp)), 0, kElementRamp - 1);

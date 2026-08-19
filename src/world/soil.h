@@ -53,6 +53,25 @@ struct Paint {
     // surface here.
     bool bedded = false;
 
+    // Whether this is a body of the material or a scatter of it through whatever
+    // it sits in. See ElementVein, which is where the whole of the reasoning lives.
+    //
+    // Not that struct itself, and the difference is one field's units. A row writes
+    // its fringe as a share of the vein it is on, because that is the only way to
+    // say it that survives the seam being made narrower; a painter is handed a
+    // texel and a distance in pixels and has nothing to take a share *of*. So the
+    // conversion happens once, in For, where the row that says how wide the vein is
+    // and the row that says how much of it is fringe are the same row.
+    struct Vein {
+        float share  = 1.0f;
+        float blotch = 2.0f * config::kPixelSize;
+        float rim    = 2.0f * config::kPixelSize; // In world pixels, unlike the row's.
+
+        bool Solid() const { return share >= 1.0f; }
+    };
+
+    Vein vein{};
+
     // Keeps one material's texture from being another's read at the same place,
     // which would put the same speckle on the soil and on the rock beneath it.
     int seed = 0;
@@ -84,6 +103,19 @@ struct Shade {
 };
 
 Shade Shading(const Paint &paint, const marching_squares::Texel &texel);
+
+// Whether this texel is drawn in the material's own tones at all.
+//
+// Always true of a solid material, which is everything the ground is built out
+// of. An inclusion is drawn on the blotches its own lattice hands it and nowhere
+// else — and what is left is not a hole in the ground: it is the material
+// underneath showing through, because the pass beneath this one has already
+// painted the whole of this outline. See ElementVein.
+//
+// Public for the same reason Shading is: the claim a row makes about how much of
+// its vein is ore has to be measurable without a window, and `--veins` is what
+// measures it — through this function rather than through a copy of it.
+bool Shows(const Paint &paint, const marching_squares::Texel &texel);
 
 // One step of the ramp, in the units Shade is measured in. Every weight in the
 // element table is written in steps and converted through this, so a weight can

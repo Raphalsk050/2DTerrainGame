@@ -485,6 +485,75 @@ struct ElementLight {
 inline constexpr std::size_t kElementTones = 4;
 inline constexpr int kElementRamp          = 7;
 
+// Drawn as blotches through whatever it sits in, rather than as a solid body of
+// its own colour.
+//
+// An ore is not a rock made of ore. It is metal scattered through the stone it
+// formed in, and drawing it as a filled region of its own tone gives a compact
+// disc of pure colour sitting in the hillside like a sticker — which is what the
+// world looked like, and it read as a decal rather than as a find.
+//
+// **What the blotches are drawn against is deliberately not written down here.**
+// Every material is painted as the union of itself and everything that outranks
+// it — see World::Occupancy — so by the time an ore's own pass runs, the whole of
+// its outline has already been painted by every material beneath it in the
+// exclusion order. Leaving a texel alone therefore shows the rock the vein is
+// actually in, whatever that rock happens to be. A second kind of stone added
+// later at a depth of its own needs nothing said in this struct and nothing said
+// in any ore's row: a vein inside it is drawn inside it, because the pass under
+// this one has already put it there.
+struct ElementVein {
+    // Share of the vein's core drawn in the material's own tones.
+    //
+    // One is a solid body of it, which is what everything the ground is built out
+    // of wants, so a row says nothing about this unless it is an inclusion.
+    //
+    // Read against the percolation threshold of a square lattice, 0.593: below it
+    // the blotches are islands and the vein reads as flecks in the rock, above it
+    // they join up and it reads as a mass of ore with rock showing through. The
+    // ores are written either side of that line by how rich a seam of each one
+    // ought to look.
+    float share = 1.0f;
+
+    // Side of one blotch, in world pixels.
+    //
+    // A whole number of texels, or a blotch straddles two of them and comes out a
+    // different shape depending on where in the world it fell — §10.4's arithmetic
+    // about kPixelSize, one grid further out. Two texels is the smallest mark a
+    // pixel artist would make; blotches that land beside each other run together,
+    // so this sets the grain of the scatter and not the size of every clump in it.
+    float blotch = 2.0f * config::kPixelSize;
+
+    // How far in from the vein's face the share climbs to its full value, as a
+    // share of the vein's own half-width.
+    //
+    // This is what breaks the outline, and without it the whole change is worth
+    // very little: blotches that stop along the very curve the solid disc was drawn
+    // to leave the eye to reassemble the disc, and a stippled disc is still a disc.
+    // Thinning them out towards the edge is what makes a vein end *in* the rock
+    // rather than against a line.
+    //
+    // **A share and not a width in pixels, and that was measured rather than
+    // argued.** Written as six pixels it looked right on coal, which is forty-eight
+    // across, and swallowed gold, diamond and emerald whole — those are eighteen to
+    // twenty-one, so the same six pixels was 88% of the vein, the density never once
+    // reached the share the row asked for, and what the sheet showed was three or
+    // four lonely texels. A fringe is a proportion of a shape, not a distance: the
+    // job it does is to stop the outline reading as a curve, and how much of a shape
+    // that takes scales with the shape.
+    //
+    // soil::For turns it into the pixels the painter wants, off the vein width
+    // ElementSpawn::veinCells names — so the two cannot drift apart, and an ore
+    // whose seams are made narrower tomorrow gets a narrower fringe with them.
+    float fringe = 0.15f;
+
+    // A solid material fills its own outline and is drawn the way everything in
+    // the ground has always been drawn. Every test of this is a test for "is this
+    // an inclusion", so it is asked here once rather than by comparing with one in
+    // four different files.
+    constexpr bool Solid() const { return share >= 1.0f; }
+};
+
 // How a material is painted.
 //
 // The same separation the plants are drawn with: the tones and the form are one
@@ -519,6 +588,11 @@ struct ElementPaint {
     // alone gives clouds inside the stone. Zero for anything with no bedding to
     // show, which is most things that are not stone.
     float strata = 0.0f;
+
+    // Whether this is a body of the material or a scatter of it through something
+    // else. See ElementVein: the default is a body, and only an inclusion says
+    // otherwise.
+    ElementVein vein{};
 
     // Side of one drawn square, in world units, for this material.
     //
@@ -697,6 +771,35 @@ struct ElementDef {
     ElementSpawn spawn;
     ElementLight light;
 };
+
+// Whether a material is drawn from the silhouette it shares with everything that
+// outranks it, or from its own field alone.
+//
+// The union is what stops a gap of open sky opening between two materials whose
+// squares fall differently — see ElementPaint::texel, where it is measured — and
+// it is load-bearing for anything that fills its own outline. Two kinds of
+// material do not want it, for entirely different reasons:
+//
+//   - Anything that is not part of the ground. The union is stored as the
+//     strongest of several fields, and interpolating that is not the same as
+//     interpolating each and taking the strongest. Against a hand-placed
+//     material, which is one inside its brush and zero outside, the union's
+//     crossing lands a fraction of a cell further out than the material's own and
+//     a ring of whatever was beneath shows in the gap.
+//
+//   - A vein. Its silhouette holds every material that outranks it whether or not
+//     the vein is anywhere near — that is what a union *is* — so coal drawn from
+//     one would scatter coal blotches through every diamond in the chunk, and
+//     through every seam of soil above it. Today that is invisible because each
+//     later pass paints solidly over the last; the moment a pass stops filling its
+//     outline, it is the whole picture.
+//
+// Nothing is lost by dropping it there, because an inclusion provides no coverage
+// in the first place. What fills a vein's outline is the pass underneath it, and
+// that pass *is* drawn from a union that includes the vein.
+inline constexpr bool DrawnUnioned(const ElementDef &def) {
+    return def.rules.blocksBodies && def.paint.vein.Solid();
+}
 
 // The material drawn as a block.
 //
@@ -1235,7 +1338,11 @@ inline constexpr ElementDef kElements[] = {
         .paint   = {.tone   = {{24, 24, 30, 255}, {40, 40, 48, 255}, {58, 58, 66, 255}, {82, 82, 92, 255}},
                     .grain  = 0.62f,
                     .patch  = 0.75f,
-                    .strata = 0.45f},
+                    .strata = 0.45f,
+                    // The commonest ore and the widest seams, so the richest of them to look at:
+                    // above the percolation line, so the blotches join up and a coal seam reads
+                    // as a mass of it with the rock coming through rather than as flecks.
+                    .vein   = {.share = 0.62f}},
         .contour = {26, 26, 32, 255},
 
         // Lumpy and matt. Coal is the one ore that does not catch the light, so
@@ -1287,7 +1394,8 @@ inline constexpr ElementDef kElements[] = {
         .paint   = {.tone   = {{116, 56, 34, 255}, {155, 82, 53, 255}, {196, 110, 74, 255}, {228, 150, 112, 255}},
                     .grain  = 0.62f,
                     .patch  = 0.75f,
-                    .strata = 0.45f},
+                    .strata = 0.45f,
+                    .vein   = {.share = 0.58f}},
         .contour = {132, 66, 40, 255},
 
         // The three metals are told apart by how each one catches the light,
@@ -1333,7 +1441,8 @@ inline constexpr ElementDef kElements[] = {
         .paint   = {.tone   = {{86, 80, 74, 255}, {117, 111, 103, 255}, {150, 143, 134, 255}, {186, 180, 172, 255}},
                     .grain  = 0.62f,
                     .patch  = 0.75f,
-                    .strata = 0.45f},
+                    .strata = 0.45f,
+                    .vein   = {.share = 0.56f}},
         .contour = {92, 86, 79, 255},
 
         // Iron is rolled: courses running flat across, stepping straight down,
@@ -1382,7 +1491,8 @@ inline constexpr ElementDef kElements[] = {
         .paint   = {.tone   = {{136, 104, 24, 255}, {179, 143, 43, 255}, {222, 183, 64, 255}, {248, 218, 122, 255}},
                     .grain  = 0.62f,
                     .patch  = 0.75f,
-                    .strata = 0.45f},
+                    .strata = 0.45f,
+                    .vein   = {.share = 0.54f}},
         .contour = {148, 114, 20, 255},
 
         // Gold is soft, so its sheen is the broadest and the least stepped of
@@ -1428,7 +1538,8 @@ inline constexpr ElementDef kElements[] = {
         .paint   = {.tone   = {{38, 144, 152, 255}, {70, 184, 189, 255}, {104, 224, 226, 255}, {170, 245, 246, 255}},
                     .grain  = 0.62f,
                     .patch  = 0.75f,
-                    .strata = 0.45f},
+                    .strata = 0.45f,
+                    .vein   = {.share = 0.52f}},
         .contour = {40, 146, 154, 255},
 
         // The two gems are cut rather than surfaced: the corners are taken off
@@ -1477,7 +1588,11 @@ inline constexpr ElementDef kElements[] = {
         .paint   = {.tone   = {{24, 122, 60, 255}, {47, 163, 88, 255}, {72, 206, 118, 255}, {134, 233, 166, 255}},
                     .grain  = 0.62f,
                     .patch  = 0.75f,
-                    .strata = 0.45f},
+                    .strata = 0.45f,
+                    // The rarest and the narrowest seam, and the sparsest to look at with it —
+                    // a few flecks caught in the rock, which is what a stone holding a little
+                    // of something precious actually looks like.
+                    .vein   = {.share = 0.50f}},
         .contour = {26, 124, 62, 255},
 
         // Emerald takes a step cut instead of diamond's brilliant: the corners
