@@ -105,6 +105,7 @@ whole phases, never inside a `pool::For` body.
 | `--build [cells]` | sets a run of build cells and digs it back out; checks the exchange is exact |
 | `--wind`, `--caves`, `--ore`, `--covers`, `--woods`, `--settle`, `--column`, `--tones` | generator reports |
 | `--veins out.png [zoom]` | every inclusion at its own width, drawn and measured (§27.5) |
+| `--craft out.png [w] [h]` | the recipe panel in every state it has (§28.7) |
 
 `--woods x0 x1` is the companion to `--covers`: it walks the scatter's own cells
 and reports, per species, how many plants grow and what ground each one is
@@ -1621,6 +1622,7 @@ for by eye.
 | `flora/` | the wood: species, the scatter, the canopy |
 | `entity/` | everything that is in the world without being the world — the body, the player, the creatures, the pickups, the fixtures, the footsteps |
 | `item/` | what is carried, and the pack |
+| `craft/` | recipes, and what a bag of materials is worth |
 | `render/` | the order the world is drawn in, and the light |
 | `ui/` | what is drawn in the frame's coordinates: the display, the menu, the console |
 | `hand/` | the editor — digging and building |
@@ -2546,3 +2548,157 @@ drawn. Were it ever switched on, `DrawPainted` gives the outline colour to every
 edge square **before** asking the painter — so a vein would get its disc drawn back
 round it as a line, with the blotches inside. The fix, if that day comes, is for the
 edge case to ask the painter first and take the outline only where it answered.
+
+---
+
+## 28. Making things, and the three states that are the whole mechanic
+
+A recipe is a bill of materials — what goes in, how much, what comes out — and the
+interface for it is a strip of icons down the left edge with a card beside the one
+being looked at. Two recipes today: a stick from wood, and a stone axe from cobble
+and sticks.
+
+### 28.1 Three states, decided in one place and drawn in another
+
+| the player holds | `craft::Standing` | what the strip does |
+|---|---|---|
+| none of some ingredient | `Absent` | the recipe is not there at all |
+| some of every ingredient, not enough of one | `Short` | shaded icon, dead button reading NOT ENOUGH |
+| enough of everything | `Ready` | lit icon, amber BUILD |
+
+The middle one is the point of the design. A recipe you have *started* is a recipe
+worth showing, because the strip is an answer to "what is what I am carrying worth"
+— and a wall of recipes needing materials that do not exist in your world yet is not
+that answer. So the axe appears the moment you hold one stick and one cobble, and it
+tells you it wants three and two.
+
+**`craft::StandingOf` decides it and `Crafting::Draw` only draws it**, and the click
+goes through `craft::Make`, which asks the same function again. A guard that lived
+in the interface would be a guard a second caller could walk past — the same
+argument §10.5 makes about `World::PlaceCell` refusing a cell rather than the hand
+refusing to ask for one.
+
+### 28.2 The strip is Don't Starve's, and that is why it is not a page of the pack
+
+There, crafting is simply *there* while you play: you gather, and what you can now
+make appears at the edge of your eye without being asked for. Minecraft's is the
+opposite idea — a grid you go and stand in front of, which is a place rather than a
+readout. This game already has the second thing, the pack behind Tab. Putting
+recipes in it would mean a player only ever learns what they can make when they go
+looking, which is exactly the discovery the strip exists to give away.
+
+**What the wiki settled and what it did not**, since it was looked up and it is thin.
+It gives the nineteen tabs, that a tab shows "what items need to be unlocked and
+which resources are needed to unlock them", and that the button reads *Prototype*
+when the ingredients are not there. Four pages of it — the single-player Crafting
+article, the DST one, the Getting Started guide and a Klei thread — describe the
+*organisation* of recipes and nowhere describe the shading of an unaffordable one,
+the ingredient counts, or the state of the build button in prose. So the three states
+above are the game as it is played rather than as it is documented, and they are the
+three the mechanic was asked for. Anything claiming to be a wiki citation for the
+*look* of it would be invented.
+
+One deliberate departure: the card prints **held over wanted**, `1/3`, where Don't
+Starve prints the required count alone. A cost alone answers "what does this take"
+and leaves "how much more" to be worked out against a bag that is not on screen.
+
+### 28.3 A recipe is a row, and it names the other tables by name
+
+`src/craft/recipes/<name>.{h,cpp}`, registered by a registrar beside it, in §19's
+arrangement. Nothing else is edited to add one — not a table, not an enum, not the
+build.
+
+`makes` and every `Need::what` are `const char *`, because a `constexpr` row cannot
+hold an id that is not handed out until `content::Open` freezes the tables. §19.3's
+rule, met from a third direction. What is new here is that a name may be a row of
+**either** content table — "wood" is an item and "cobblestone" is a material, and a
+player carries both in the same nine slots — so `craft::Named` walks the items and
+then the elements.
+
+That lookup's *order* would be a decision nobody wrote down if a name were ever in
+both tables, so `craft::Ambiguous` exists and `recipe_checks.cpp` refuses to start on
+one. The same file also refuses a recipe that names something missing, one that
+yields nothing, one that asks for nothing, and one that asks for the same ingredient
+twice — which would be counted twice and spent twice while reading as asking once.
+
+It was checked the only way a guard can be: by breaking a row and watching it fire.
+
+```
+content: recipe 'stone axe' needs 'cobblestome', and there is no such row
+content: 1 fault — refusing to start
+```
+
+### 28.4 The stick's arithmetic, which is the only number that had to be adapted
+
+Minecraft: two planks make four sticks, and a log makes four planks — so a log is
+worth eight sticks, and the stick recipe by itself consumes *half* a log.
+
+This world has no plank item. `wood plank` is a material, laid by the cell, and
+nothing crafts it. Half an item cannot be spent, so the chain is scaled up by two and
+written as one row: **one wood, eight sticks.** That is Minecraft's rate exactly
+rather than an invention, which is the sense in which the quantities are "the same"
+once they are adapted to the items this game actually has.
+
+The axe needed nothing done to it — three cobblestone and two sticks, unchanged,
+because both ingredients already exist as things the player holds and both are
+counted one to one. **It is only where a step of the chain is missing that the
+arithmetic has to be redone**, and that is worth knowing before the next recipe.
+
+### 28.5 What the axe does not do yet
+
+Nothing. `ToolInHand()` still answers `Tool::Hand` and `ToolSpeed` still answers 1 —
+§13.2b names those two lines as the whole of what changes when there is a real tool,
+and changing them is a change to how *breaking* works rather than to how crafting
+does. Doing it here would have meant the item could not be the one file an item
+costs.
+
+### 28.6 "The pointer is on a panel" is now one fact
+
+`editor.cpp` asked `hotbar::Contains` itself, which was right exactly while the bar
+was the only thing drawn over the world. It is not any more, and two files each
+deciding what counts as the interface is two of them disagreeing the first time
+either moves — §25.1's fault in miniature. `Editor::Update` takes `overUi` now, and
+main works it out once from both panels.
+
+Asked afresh at each use and never remembered from the top of the frame, because the
+panels move *during* it: crafting something takes a recipe off the strip, and a
+remembered answer is a hit test against a strip that is no longer that tall. Same
+rule §14 gives every menu screen.
+
+`src/ui/skin.h` came out of the same tidy. The amber a stack's count is drawn in was
+written out in `hotbar.cpp` and again in `inventory.cpp`, with nothing saying they
+had to agree; a third panel would have made three. One header of colours, and the
+two existing panels were moved onto it — a change with one visible consequence,
+which is that a tooltip's text went from `RAYWHITE` to the interface's own slightly
+cooler off-white.
+
+### 28.7 `--craft`, and the two things it asserts
+
+```bash
+./build/CppGame.exe --craft out.png [wide] [tall]
+```
+
+Three panels side by side, one per state, each drawn by `Crafting::Draw` itself
+against an inventory made up on the spot. It exists because **no single screenshot
+of a session shows the mechanic**: getting into all three states means gathering and
+spending particular materials in a particular order, which is exactly the check
+nobody runs.
+
+It reports a verdict rather than only a picture, and both halves have been wrong in
+this project under other names:
+
+- **No two rows of the card land in the same pixels.** §25.1 is the long version —
+  three things laid out separately in one column is how the hearts, the brush badge
+  and the held item's name came to share twenty pixels. The gaps are printed as
+  numbers, because "the information is too close together" is a claim about pixels
+  and a picture cannot be measured with a ruler.
+- **The strip lists exactly the recipes `craft::StandingOf` says are started.** A
+  panel that drew beautifully while every recipe read as ready would pass a picture
+  and fail a player.
+
+Two faults it caught on its first two renders, both of which look like nothing in
+code and are obvious in the sheet: a blurb one word longer than the card ran off the
+right-hand border and over it, and the shading over an unaffordable recipe was heavy
+enough that the silhouette it was supposed to be teaching had gone. The first is why
+the card wraps rather than trusting the table to be brief; the second is why the
+scrim is just over half and not two thirds.

@@ -8,6 +8,7 @@
 #include "hand/editor.h"
 #include "entity/fixture.h"
 #include "flora/grove.h"
+#include "ui/crafting.h"
 #include "ui/hotbar.h"
 #include "ui/hud.h"
 #include "render/liquid_layer.h"
@@ -888,6 +889,12 @@ int main(int argc, char **argv) {
     // that is not a material â€” see item.h for why the two are separate tables.
     Inventory inventory{};
 
+    // The recipe strip down the left edge. It holds nothing but which card is open —
+    // what can be made is a question about the inventory and is asked afresh every
+    // frame, so there is no second copy of the player's possessions here to fall out
+    // of step with the first.
+    Crafting crafting{};
+
     // The two ends of a day, and they are two colours rather than one turned down.
     //
     // Noon is the near-neutral light this world was lit by before there was a clock;
@@ -985,6 +992,24 @@ int main(int argc, char **argv) {
     menu::Menu menu;
 
     Gamemode mode = Gamemode::Survival;
+
+    // Whether the pointer is on a panel rather than on the world.
+    //
+    // One fact, asked in one place, by everything that has to know it: the hand does
+    // not dig through a panel and the cursor is not drawn over one. It used to be
+    // `hotbar::Contains` written inside `editor.cpp`, which was right exactly while
+    // the bar was the only thing drawn over the world — §25.1's fault in miniature,
+    // and the recipe strip is what made it one.
+    //
+    // Asked afresh at each use rather than worked out once at the top of the frame,
+    // because the panels' extent moves during it: crafting something takes a recipe
+    // off the strip, and a remembered answer would be a hit test against a strip that
+    // is no longer that tall. Same rule §14 gives every menu screen.
+    const auto overUiNow = [&] {
+        const Vector2 mouse = GetMousePosition();
+
+        return hotbar::Contains(mouse) || crafting.Contains(mouse, inventory, mode);
+    };
 
     // Making a world, one stage per frame.
     //
@@ -1368,6 +1393,21 @@ int main(int argc, char **argv) {
             if (!holdOff && !typing) {
                 hotbar::Update(inventory, ZoomModifier());
 
+                // The recipes, before the hand. A click that lands on the strip is a
+                // click about what is in the bag, and the hillside behind it must not
+                // also be dug by it.
+                const Crafting::Gesture made = crafting.Update(inventory, mode);
+
+                if (!made.overflow.Empty()) {
+                    grove.Fallen().Toss(made.overflow, player.Centre(),
+                                        GetScreenToWorld2D(GetMousePosition(), camera), world.Sky().Time());
+                }
+
+                if (made.said != nullptr) {
+                    notice    = made.said;
+                    noticeFor = kNoticeTime;
+                }
+
                 // Handed the player's body from before it moves this frame, which
                 // is what the reach is measured from, which side an overflowing
                 // dig throws its blocks out on, and the room no block may be laid
@@ -1376,7 +1416,7 @@ int main(int argc, char **argv) {
                 // is a block the body is stopped by rather than buried in.
                 const char *said =
                     editor.Update(world, inventory, grove, fixtures, camera, player.Bounds(), mode,
-                                  world.Sky().Time());
+                                  made.took || overUiNow(), world.Sky().Time());
 
                 if (said != nullptr) {
                     notice    = said;
@@ -1560,9 +1600,19 @@ int main(int argc, char **argv) {
                 // worth one cadence's share of one log, and a tree comes down in the
                 // time its own logs would take.
                 //
-                // Nothing about the swing changes when there is an axe. An axe is a
-                // ToolSpeed, and it divides the same seconds the ground's do.
-                constexpr float kChopBlow = player_config::kAttackCooldown / flora::kLogSeconds;
+                // Nothing about the *cadence* changes when there is an axe: a swing
+                // is a swing. What changes is what one blow is worth, and it is the
+                // tier multiplier dividing the seconds a log takes — the same
+                // division BreakSeconds makes against the ground, so an axe is worth
+                // the same to a tree as it is to a plank wall.
+                //
+                // Only where the kind matches, which is Minecraft's rule and is why
+                // a pickaxe fells nothing faster than a fist does.
+                const tool::Kit kit = KitOf(inventory.Held());
+
+                const float bite = (kit.kind == Tool::Axe) ? kit.speed : tool::kHand;
+
+                const float chopBlow = player_config::kAttackCooldown / flora::kLogSeconds * bite;
 
                 // Wood only where the press decided this hand was an axe — see
                 // Editor::Hand. The latch is what keeps a player digging out from
@@ -1570,7 +1620,7 @@ int main(int argc, char **argv) {
                 // the trunk, and a swing that struck whatever it happened to be over
                 // would undo it.
                 if (editor.Left() == Editor::Hand::Chop) {
-                    grove.Strike(swing, kChopBlow, player.Centre(), world.Sky().Time());
+                    grove.Strike(swing, chopBlow, player.Centre(), world.Sky().Time());
                 }
 
                 // And whatever was standing in it, whichever tool the hand became —
@@ -1579,7 +1629,12 @@ int main(int argc, char **argv) {
                 //
                 // The reach is the swing's own box and not the creature's: what
                 // decides whether a blow lands is where the arm went.
-                herd.Strike(swing, player_config::kFistDamage, player.Centre(), kFistKnock, kFistLift);
+                // A fist plus whatever is in it. `player_config::kFistDamage` is the
+                // unit every creature's `hardy` is written against and stays the
+                // floor; a sword adds to it rather than replacing it, so a boar at
+                // ten is five punches or two swings and both figures come off the
+                // same line.
+                herd.Strike(swing, player_config::kFistDamage + kit.damage, player.Centre(), kFistKnock, kFistLift);
 
                 // And whatever grass the same swing went through, whichever tool it
                 // was: a handful of grass comes away from a spade as readily as from
@@ -1699,7 +1754,7 @@ int main(int argc, char **argv) {
             PROFILE_ZONE("DrawScene");
 
             if (packOpen) backdrop.Compose(config::kPanelDim);
-            else render::Scene(world, grove, herd, inventory, player, editor, lit, camera, debug, !packOpen);
+            else render::Scene(world, grove, herd, inventory, player, editor, lit, camera, debug, !overUiNow());
         }
 
         {
@@ -1710,8 +1765,19 @@ int main(int argc, char **argv) {
             // The panel replaces the whole strip rather than sitting over it, since it
             // draws those same nine slots as its own bottom row — and since a row of
             // hearts showing through from underneath it is the layout leaking.
-            if (packOpen) inventory.Draw(mode);
-            else hud::Strip(inventory, player.Vigour(), editor, mode);
+            if (packOpen) {
+                inventory.Draw(mode);
+            } else {
+                hud::Strip(inventory, player.Vigour(), editor, mode);
+
+                // The recipes, drawn while the world is being played and not while the
+                // pack is up. Two reasons, and the second is the one that decided it:
+                // the strip is part of the playing screen, and a click that misses the
+                // pack is already a click that throws what is on the cursor into the
+                // world — so a panel underneath that also takes clicks would make one
+                // press mean two things.
+                crafting.Draw(inventory, mode);
+            }
 
             // Over everything, panel and bar included: an answer that arrived behind the
             // inventory is an answer nobody read.

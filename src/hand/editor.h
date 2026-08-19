@@ -62,8 +62,15 @@ public:
     // back for what is taken up. Everything else about the hand is the same in
     // both, which is the point of passing a mode rather than writing a second
     // editor.
+    //
+    // `overUi` is "the pointer is on a panel, so this click is not about the world".
+    // Handed in rather than worked out here, and that is the fix to a small version
+    // of §25.1's fault: this file used to ask `hotbar::Contains` itself, which was
+    // correct exactly while the bar was the only thing drawn over the world. It is
+    // not any more — see `ui/crafting.h` — and two files each deciding what counts
+    // as the interface is two of them disagreeing the first time either moves.
     const char *Update(World &world, Inventory &inventory, Grove &grove, fixture::Fixtures &fixtures,
-                       const Camera2D &camera, Rectangle body, Gamemode mode, float now);
+                       const Camera2D &camera, Rectangle body, Gamemode mode, bool overUi, float now);
 
     // Outline of the area the next click affects, drawn in world space so it
     // sits over the material it is about to change.
@@ -73,6 +80,9 @@ public:
     // stand. The grove draws that: what a sapling looks like is the wood's to
     // know, and the ghost has to be the same sprite the real one will be or it is
     // a promise about a different tree.
+    //
+    // Never called where the pointer is on a panel: `render::Scene`'s `aiming` is
+    // the same fact this file used to test for itself.
     void DrawCursor(const Inventory &inventory, const Grove &grove, flora::Season season,
                     const Camera2D &camera) const;
 

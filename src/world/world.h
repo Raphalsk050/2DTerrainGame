@@ -242,6 +242,29 @@ public:
     // in front was found, which is ExcavateCell's own order — see §11.2 of CLAUDE.md.
     void CellHolds(int cx, int cy, Yield &out) const;
 
+    // Which material a cell counts as: the occupying one holding most of its
+    // vertices. Nothing where none of them occupies it.
+    //
+    // **This is what makes a cell a block.** The ground is a field and a cell is
+    // nine samples of it, so a cell that straddles a boundary is genuinely part soil
+    // and part rock — but a *block* is one thing, and every rule the player meets is
+    // written about blocks. Without one answer, a cell five-four between two
+    // materials was charged the two rates added together and paid out in two ledgers
+    // that each fell short of a whole block, so it broke slowly and dropped nothing
+    // at all. See Editor::Bank.
+    //
+    // Only what occupies takes part. A liquid standing in the space around a block
+    // is not what the block is made of — a submerged seam of rock would otherwise
+    // count as water and hand the player water — and a wall behind it is a layer of
+    // its own, which ExcavateCell only ever reaches where the front is already
+    // empty.
+    //
+    // A tie goes to the higher `precedence`, which is to say to the rarer thing: an
+    // ore against the rock it sits in, soil against the stone under it. That is the
+    // one the player came for, and it is a rule rather than an accident of the
+    // table's order.
+    static std::optional<Element> ChiefOf(const Yield &holds);
+
     // Whether anything stands in the layer behind a cell.
     //
     // Asked at the middle of the cell, for the reason everything else about a cell

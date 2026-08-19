@@ -2,6 +2,7 @@
 
 #include "core/picture.h"
 #include "ui/bottom.h"
+#include "ui/skin.h"
 
 #include <cmath>
 
@@ -9,12 +10,15 @@ namespace {
 
 constexpr int kSlots = Inventory::kOnHand;
 
-// Colours of the bar, its slots and the ring round the one in hand.
-constexpr Color kBar     = {30, 34, 42, 255};
-constexpr Color kSlot    = {60, 66, 78, 255};
-constexpr Color kCount   = {255, 214, 110, 255};
-constexpr Color kKeycap  = {150, 158, 172, 255};
-constexpr Color kOutline = {255, 255, 255, 255};
+// Colours of the bar, its slots and the ring round the one in hand — all of them
+// the interface's own, from `ui/skin.h`, rather than a copy written out here. The
+// amber was already in two files before that header existed, which is how a palette
+// stops being one.
+constexpr Color kBar     = skin::kBar;
+constexpr Color kSlot    = skin::kSlot;
+constexpr Color kCount   = skin::kAccent;
+constexpr Color kKeycap  = skin::kMuted;
+constexpr Color kOutline = skin::kOutline;
 
 } // namespace
 
@@ -84,7 +88,7 @@ void hotbar::DrawSlot(const Stack &stack, Rectangle bounds, bool active) {
             // Shadowed rather than plain. The count sits over the picture, and
             // over a pale material — sand, snow — white on white is not a
             // number at all.
-            DrawText(amount, x + 1, y + 1, 10, {12, 14, 18, 220});
+            DrawText(amount, x + 1, y + 1, 10, skin::kShadow);
             DrawText(amount, x, y, 10, kCount);
         }
     }
@@ -112,7 +116,7 @@ void hotbar::Draw(const Inventory &inventory) {
         const int x = static_cast<int>(bounds.x + 4.0f);
         const int y = static_cast<int>(bounds.y + 2.0f);
 
-        DrawText(key, x + 1, y + 1, 10, {12, 14, 18, 220});
+        DrawText(key, x + 1, y + 1, 10, skin::kShadow);
         DrawText(key, x, y, 10, kKeycap);
     }
 

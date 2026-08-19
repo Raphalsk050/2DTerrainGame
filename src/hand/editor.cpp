@@ -1,7 +1,6 @@
 #include "item/items/torch.h"
 #include "hand/editor.h"
 
-#include "ui/hotbar.h"
 
 #include <iterator>
 
@@ -391,7 +390,7 @@ Editor::Progress Editor::Biting() const {
 }
 
 const char *Editor::Update(World &world, Inventory &inventory, Grove &grove, fixture::Fixtures &fixtures,
-                           const Camera2D &camera, Rectangle body, Gamemode mode, float now) {
+                           const Camera2D &camera, Rectangle body, Gamemode mode, bool overUi, float now) {
     // Where the character is, for the reach and for which side a spilled block
     // is thrown out on. The middle of the body, which is where the arm is.
     const Vector2 player = {body.x + body.width / 2.0f, body.y + body.height / 2.0f};
@@ -429,10 +428,10 @@ const char *Editor::Update(World &world, Inventory &inventory, Grove &grove, fix
 
     const Vector2 mouse = GetMousePosition();
 
-    // The bar sits over the world it edits, so a click that lands on it belongs
-    // to the bar alone. The cursor is dropped as well, otherwise it would hang
+    // A panel sits over the world it edits, so a click that lands on one belongs
+    // to that panel alone. The cursor is dropped as well, otherwise it would hang
     // over the slots as if they were something to dig.
-    if (hotbar::Contains(mouse)) {
+    if (overUi) {
         LetGo();
 
         under_.reset();
@@ -649,28 +648,68 @@ const char *Editor::Update(World &world, Inventory &inventory, Grove &grove, fix
         // its edge is two, and the second costs two ninths of the first, which is
         // both fair and what makes a ragged edge come away quickly instead of at the
         // price of solid rock.
-        World::Yield holds{};
+        // What is being swung. Read from the slot the bar points at, which is
+        // Minecraft's arrangement and the one editor.h already argues for: what a
+        // hand does depends on what is in it, with no equip step and no mode.
+        const tool::Kit kit = KitOf(inventory.Held());
 
-        for (int cx = x0; cx <= x1; cx++) {
-            for (int cy = y0; cy <= y1; cy++) world.CellHolds(cx, cy, holds);
-        }
+        World::Yield holds{};
 
         float takes = 0.0f;
         int filled  = 0;
 
-        for (std::size_t e = 0; e < kElementCount; e++) {
-            if (holds[e] <= 0) continue;
+        // Cell by cell, and that is the change rather than a tidying.
+        //
+        // It used to sum every material over the whole block and charge each of them
+        // its own rate. A cell five vertices of soil and four of rock was therefore
+        // charged five ninths of soil's time *plus* four ninths of rock's, which is
+        // neither material's rate and is slower than the rock it mostly is. Worse, it
+        // was paid out the same way — see Bank. Asked per cell and collapsed onto the
+        // one material the cell counts as, a block behaves like a block.
+        for (int cx = x0; cx <= x1; cx++) {
+            for (int cy = y0; cy <= y1; cy++) {
+                World::Yield cell{};
 
-            // Creative pays nothing for the block, and it is written as a cost of
-            // zero rather than as a branch around the bite: a bite that takes no
-            // time comes away on the frame it started, which is the path a liquid
-            // already takes and the bar already knows not to draw. Minecraft's
-            // creative hand is the same thing — instant, and still a hand.
-            if (mode == Gamemode::Survival) {
-                takes += BreakSeconds(static_cast<Element>(e), ToolInHand()) * holds[e] / kVerticesPerBlock;
+                world.CellHolds(cx, cy, cell);
+
+                int solid = 0;
+
+                for (std::size_t e = 0; e < kElementCount; e++) {
+                    if (cell[e] <= 0) continue;
+
+                    holds[e] += cell[e];
+                    filled += cell[e];
+
+                    if (kElements[e].rules.occupies) solid += cell[e];
+                }
+
+                // Creative pays nothing for the block, and it is written as a cost of
+                // zero rather than as a branch around the bite: a bite that takes no
+                // time comes away on the frame it started, which is the path a liquid
+                // already takes and the bar already knows not to draw. Minecraft's
+                // creative hand is the same thing — instant, and still a hand.
+                if (mode != Gamemode::Survival) continue;
+
+                // The cell's own material, at its own rate, over every vertex the
+                // cell holds of *anything* that occupies. So a ragged edge still
+                // comes away quickly — the count is what it really holds — while a
+                // mixed cell breaks at one price instead of two added together.
+                if (const std::optional<Element> chief = World::ChiefOf(cell)) {
+                    takes += BreakSeconds(*chief, kit) * static_cast<float>(solid) / kVerticesPerBlock;
+                }
+
+                // And whatever is in the cell without being part of a block: the
+                // liquid standing in it, or the wall behind it where the front was
+                // already empty. Each at its own rate, because neither is what the
+                // block is made of. Water is written at zero hardness, so it costs
+                // nothing and this loop is free in the ordinary case.
+                for (std::size_t e = 0; e < kElementCount; e++) {
+                    if (cell[e] <= 0 || kElements[e].rules.occupies) continue;
+
+                    takes += BreakSeconds(static_cast<Element>(e), kit) * static_cast<float>(cell[e])
+                             / kVerticesPerBlock;
+                }
             }
-
-            filled += holds[e];
         }
 
         // Aimed at open sky. Not a bite that fails, a bite that never began — the bar
@@ -714,7 +753,28 @@ const char *Editor::Update(World &world, Inventory &inventory, Grove &grove, fix
             for (int cy = y0; cy <= y1; cy++) {
                 const World::Stroke out = world.ExcavateCell(cx, cy);
 
-                for (std::size_t e = 0; e < kElementCount; e++) freed[e] += out.freed[e];
+                // Collapsed onto the one material the cell counted as, which is the
+                // whole of the fix for "I broke it and got nothing".
+                //
+                // Bank hands over a block per kVerticesPerBlock of the *same*
+                // material, so a cell of nine split five and four banked five ninths
+                // in one ledger and four ninths in another and paid out neither. The
+                // player saw a block break and no drop, with no way to tell that half
+                // of it was owed to them in two places. Nine vertices are nine
+                // vertices: they go to the material most of them were, the count is
+                // conserved, and a full cell always hands over exactly one block.
+                //
+                // Only what occupies is collapsed. A liquid keeps its own ledger for
+                // ChiefOf's reason, and a wall never shares a result with anything.
+                const std::optional<Element> chief = World::ChiefOf(out.freed);
+
+                for (std::size_t e = 0; e < kElementCount; e++) {
+                    if (out.freed[e] <= 0) continue;
+
+                    const bool part = chief.has_value() && kElements[e].rules.occupies;
+
+                    freed[part ? ElementIndex(*chief) : e] += out.freed[e];
+                }
             }
         }
 
@@ -873,7 +933,6 @@ void DrawHealth(const Editor::Progress &work, float zoom) {
 void Editor::DrawCursor(const Inventory &inventory, const Grove &grove, flora::Season season,
                         const Camera2D &camera) const {
     const Vector2 mouse = GetMousePosition();
-    if (hotbar::Contains(mouse)) return;
 
     // Before every early return below it, and outside the reach test. The bar is
     // about a block that is *being* worked on, and the paths that give up on drawing

@@ -53,8 +53,8 @@ public:
     // that choose between them.
     //
     // Three, and which page a thing lands on is *derived* rather than written into
-    // the tables: a material is a block, an item that fixes to a surface is gear,
-    // and everything else a plant leaves behind is nature. Deriving it is what
+    // the tables: a material is a block, an item that fixes to a surface or answers
+    // to a tool is gear, and everything else a plant leaves behind is nature. Deriving it is what
     // keeps a new row in either table from having to remember to name its tab —
     // and if a fourth page is ever wanted, it is a rule here and not a field on
     // twenty-three rows.

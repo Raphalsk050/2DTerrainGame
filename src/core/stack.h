@@ -124,6 +124,19 @@ inline Stack ItemsOf(Item item, int count) {
     return {.holds = Holds::Item, .what = static_cast<std::uint8_t>(item.index), .count = count};
 }
 
+// What one slot is worth as a tool.
+//
+// Here rather than on either table, because it is the one question that has to be
+// asked of *a slot* — the hand does not know whether it is holding a material or an
+// item, only that it is holding something. A material is never a tool: a block of
+// cobblestone in the hand is a block, and the pickaxe it could become is a
+// different row.
+inline tool::Kit KitOf(const Stack &stack) {
+    if (stack.holds != Holds::Item) return {};
+
+    return item::Table().At(stack.what).tool;
+}
+
 // The picture a stack is drawn from.
 //
 // A free function rather than a member so that it reads the same as the one

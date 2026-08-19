@@ -2,6 +2,7 @@
 
 #include "ui/hotbar.h"
 #include "core/picture.h"
+#include "ui/skin.h"
 
 #include <algorithm>
 #include <cmath>
@@ -13,10 +14,12 @@ namespace {
 // look alike.
 constexpr float kGap = 14.0f;
 
-constexpr Color kPanel = {24, 27, 34, 245};
-constexpr Color kEdge  = {96, 104, 120, 255};
-constexpr Color kTip   = {18, 20, 26, 235};
-constexpr Color kCount = {255, 214, 110, 255};
+// The interface's own, from `ui/skin.h`. See the head of that file for why they are
+// not written out here.
+constexpr Color kPanel = skin::kPanel;
+constexpr Color kEdge  = skin::kEdge;
+constexpr Color kTip   = skin::kTip;
+constexpr Color kCount = skin::kAccent;
 
 // The tabs' own metrics: how tall the strip over the panel is and how wide one
 // tab is. Written here rather than shared with the slots, because a tab is a
@@ -52,7 +55,7 @@ void DrawTip(const Stack &stack, Vector2 mouse) {
 
     DrawRectangleRec(box, kTip);
     DrawRectangleLinesEx(box, 1.0f, kEdge);
-    DrawText(text, static_cast<int>(box.x + 8.0f), static_cast<int>(box.y + 5.0f), 14, RAYWHITE);
+    DrawText(text, static_cast<int>(box.x + 8.0f), static_cast<int>(box.y + 5.0f), 14, skin::kText);
 }
 
 } // namespace
@@ -320,7 +323,11 @@ Inventory::Page Inventory::PageOf(Tab tab) {
 
     for (int i = 0; i < item::Count(); i++) {
         const auto item      = static_cast<Item>(i);
-        const bool gear      = Def(item).placement == Placement::Fixture;
+        // Gear is what is *used* rather than what is gathered: anything that fixes
+        // to a surface, and anything that is a tool. Still derived and not a field
+        // on the row — eight tools arrived in one commit and every one of them
+        // landed on the right page without being told about this file.
+        const bool gear      = Def(item).placement == Placement::Fixture || Def(item).tool.Any();
         const Tab belongs    = gear ? Tab::Gear : Tab::Nature;
 
         if (belongs != tab) continue;
@@ -460,7 +467,7 @@ void Inventory::Draw(Gamemode mode) const {
             const int wide   = MeasureText(name, 14);
 
             DrawText(name, static_cast<int>(at.x + (at.width - static_cast<float>(wide)) / 2.0f),
-                     static_cast<int>(at.y + 8.0f), 14, showing ? RAYWHITE : Color{150, 158, 172, 255});
+                     static_cast<int>(at.y + 8.0f), 14, showing ? skin::kText : skin::kMuted);
         }
     }
 
@@ -525,6 +532,6 @@ void Inventory::Draw(Gamemode mode) const {
     const int x = static_cast<int>(corner.x + drawn - MeasureText(amount, 10) - 1.0f);
     const int y = static_cast<int>(corner.y + drawn - 9.0f);
 
-    DrawText(amount, x + 1, y + 1, 10, {12, 14, 18, 220});
+    DrawText(amount, x + 1, y + 1, 10, skin::kShadow);
     DrawText(amount, x, y, 10, kCount);
 }

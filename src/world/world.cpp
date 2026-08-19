@@ -1710,6 +1710,31 @@ void World::CellHolds(int cx, int cy, Yield &out) const {
     }
 }
 
+std::optional<Element> World::ChiefOf(const Yield &holds) {
+    std::optional<Element> chief;
+
+    int most = 0;
+
+    for (std::size_t e = 0; e < kElementCount; e++) {
+        const ElementDef &def = kElements[e];
+
+        if (!def.rules.occupies) continue;
+        if (holds[e] <= 0) continue;
+
+        // Strictly more wins; equal falls to the higher rank. Written as one test so
+        // that the tie-break cannot be forgotten by a later edit to the loop.
+        const bool better =
+            holds[e] > most || (holds[e] == most && chief && def.rules.precedence > Def(*chief).rules.precedence);
+
+        if (!better) continue;
+
+        most  = holds[e];
+        chief = static_cast<Element>(e);
+    }
+
+    return chief;
+}
+
 World::Stroke World::ExcavateCell(int cx, int cy) {
     Stroke out = ApplyStroke(CellReach(cx, cy), std::nullopt, 0, {});
 

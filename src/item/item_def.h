@@ -2,6 +2,7 @@
 
 #include "core/picture.h"
 #include "core/registry.h"
+#include "core/tool.h"
 #include "raylib.h"
 
 // What an item *is*, and nothing about which items there are.
@@ -60,6 +61,14 @@ struct ItemDef {
     int stack;
 
     Placement placement = Placement::None;
+
+    // What this is worth in the hand: which tool it counts as, how fast it goes
+    // through what that tool is right for, and what it adds to a punch.
+    //
+    // A row that says nothing is not a tool, which is nearly all of them. See
+    // `core/tool.h` — the whole of the reasoning is there, including why this is one
+    // struct and not three fields.
+    tool::Kit tool{};
 
     // What this kind of row is called, for the startup line. See
     // `registry::Table`'s constructor, which is the only thing that reads it.
