@@ -1541,6 +1541,161 @@ void ReportSettling(World &world, Rectangle region, int steps) {
                 world.TotalWater(region));
 }
 
+// Whether one particular bush is still standing under the view.
+//
+// By id rather than by position, because that is what "still there" means: the
+// scatter regrows every cell of the undergrowth every frame from the same pure
+// function, so a bush that is back is a bush with the same id, and one that is
+// gone is an id the list no longer holds.
+bool StillThere(const Grove &grove, std::int64_t id) {
+    for (const flora::Plant &bush : grove.Undergrowth()) {
+        if (bush.id == id) return true;
+    }
+
+    return false;
+}
+
+// `--bushes [count]` pulls the floor of the wood up and checks that it stays up.
+//
+// The undergrowth is the one thing in the world that is a pure function of
+// position *and* breakable, so the absence of a bush has nowhere to live but a
+// record — the same bargain World::edits_ makes for a dug hole and
+// Grove::remembered_ makes for a felled tree. Every way that can fail is invisible
+// in a still picture, which is why it is worth a mode:
+//
+//   - the hand never offers the bush, so the click digs the hillside behind it and
+//     nothing on screen says why;
+//   - the blow lands somewhere the bush is not, because the strike box and the
+//     sprite are two answers to "where is this thing" and nothing makes them agree;
+//   - the bush comes back, the moment the view has moved off its cell and back.
+//
+// So this walks a stretch of country and, for every bush standing on its own:
+// asks the hand what a click there would be, swings once, checks it is gone,
+// walks the view forty thousand pixels away and back, and checks it is still gone.
+//
+// Returns a shell status, so it can be run in a loop.
+int ReportBushes(World &world, Grove &grove, int wanted) {
+    constexpr float kStep = 1.0f / 60.0f;
+
+    // The hand's own slack, so the probe asks exactly what the cursor asks. See
+    // Editor::kAimSlack.
+    constexpr float kProbe = 10.0f;
+
+    // One blow's worth, the same figure main.cpp swings — see the note beside it.
+    // A bush comes up in one whatever this is, and handing it the real number is
+    // what makes that a fact about the bush rather than about the probe.
+    constexpr float kBlow = player_config::kAttackCooldown / flora::kLogSeconds;
+
+    // Far enough to walk the chunks the bush stood in out of residency and back.
+    // That is the whole point of the second look: a record that only survives while
+    // its chunk is loaded is not a record.
+    constexpr float kAway = 40000.0f;
+
+    // Two bushes can interlock, and a swing at one of them is then ambiguous —
+    // Strike takes the first in the list, which is not necessarily the one aimed
+    // at. Those are counted and skipped rather than tested, because the thing under
+    // test is not which of two overlapping bushes wins.
+    constexpr float kApart = 40.0f;
+
+    Inventory gathered{};
+
+    const float now = world.Sky().Time();
+
+    // The view walked to a place, world and wood together, exactly as the loop
+    // does it. Everything below reads `grove.Undergrowth()` after one of these.
+    const auto Look = [&](float x) {
+        const Rectangle view = {x - 450.0f, terrain::Height(x, world.Settings()) - 200.0f, 900.0f, 400.0f};
+
+        world.Update(view::Expand(view, config::kSimulationMargin));
+        grove.Update(world, view, {x, view.y}, now, kStep, gathered);
+    };
+
+    int pulled = 0;  // Bushes taken and gone for good.
+    int blind  = 0;  // The cursor said there was nothing there.
+    int stuck  = 0;  // Still standing after the blow.
+    int again  = 0;  // Gone, and back when the view returned.
+    int fibre  = 0;  // Pieces thrown on the ground by the blows.
+    int packed = 0;  // Skipped for having a neighbour inside kApart.
+
+    for (float at = 0.0f; at < 120000.0f && pulled < wanted; at += 700.0f) {
+        Look(at);
+
+        // A copy: every Look below rebuilds the list this is walking.
+        const std::vector<flora::Plant> bushes = grove.Undergrowth();
+
+        for (std::size_t i = 0; i < bushes.size() && pulled < wanted; i++) {
+            const flora::Plant &bush = bushes[i];
+
+            bool crowded = false;
+
+            for (std::size_t j = 0; j < bushes.size(); j++) {
+                if (j == i) continue;
+
+                crowded = crowded || std::fabs(bushes[j].base.x - bush.base.x) < kApart;
+            }
+
+            if (crowded) {
+                packed++;
+                continue;
+            }
+
+            const flora::SpeciesDef &def = flora::Def(bush.species);
+
+            const float tall = def.height[flora::StageIndex(flora::Stage::Mature)] * bush.scale;
+
+            // The middle of what is drawn, which is where a player aims. Not the
+            // base — a hand pointed at the foot of a bush is pointed at the ground.
+            const Rectangle probe = {bush.base.x - kProbe, bush.base.y - tall * 0.5f - kProbe, kProbe * 2.0f,
+                                     kProbe * 2.0f};
+
+            if (!grove.TimberAt(probe, now)) {
+                blind++;
+                continue;
+            }
+
+            const int lying = grove.Fallen().Live();
+
+            // From the left, so what comes off is thrown to the right. Which side
+            // makes no difference to whether it comes up; it is handed in because
+            // Strike has to be given somewhere to throw from.
+            grove.Strike(probe, kBlow, {bush.base.x - 60.0f, bush.base.y}, now);
+
+            fibre += grove.Fallen().Live() - lying;
+
+            Look(at);
+
+            if (StillThere(grove, bush.id)) {
+                stuck++;
+                continue;
+            }
+
+            Look(at + kAway);
+            Look(at);
+
+            if (StillThere(grove, bush.id)) {
+                again++;
+                continue;
+            }
+
+            pulled++;
+        }
+    }
+
+    std::printf("%d bushes pulled up, %d skipped for a neighbour inside %.0f px\n", pulled, packed, kApart);
+    std::printf("%d pieces thrown on the ground\n\n", fibre);
+
+    std::printf("%-28s %6d\n", "cursor offered nothing", blind);
+    std::printf("%-28s %6d\n", "still standing after a blow", stuck);
+    std::printf("%-28s %6d\n", "back after the view moved", again);
+
+    const bool sound = pulled >= wanted && blind == 0 && stuck == 0 && again == 0 && fibre > 0;
+
+    std::printf("\n%s\n", sound ? "the undergrowth breaks and stays broken"
+                                : "FAILED: see the counts above");
+
+    return sound ? 0 : 1;
+}
+
 // Where a frame's time actually goes, at a place in the world.
 //
 // Every phase the loop runs, in the order it runs them, timed separately. It
@@ -1687,11 +1842,15 @@ bool probes::Headless(int argc, char **argv) {
     // the exchange is exact. See the block itself for why it is worth a mode.
     const bool building = argc >= 2 && TextIsEqual(argv[1], "--build");
 
+    // `--bushes [count]` pulls the undergrowth up and checks it stays up. See
+    // ReportBushes.
+    const bool weeding = argc >= 2 && TextIsEqual(argv[1], "--bushes");
+
 
     const bool skying = argc >= 7 && TextIsEqual(argv[1], "--sky");
 
     return probing || skying || counting || cruising || weighing || reading || digging || assaying || settling
-        || timing || gauging || checking || building;
+        || timing || gauging || checking || building || weeding;
 }
 
 std::optional<int> probes::Run(int argc, char **argv, World &world, Grove &grove, terrain::Settings &settings,
@@ -1750,6 +1909,10 @@ std::optional<int> probes::Run(int argc, char **argv, World &world, Grove &grove
     // `--build [cells]` sets a run of cells and digs it back out, checking that
     // the exchange is exact. See the block itself for why it is worth a mode.
     const bool building = argc >= 2 && TextIsEqual(argv[1], "--build");
+
+    // `--bushes [count]` pulls the undergrowth up and checks it stays up. See
+    // ReportBushes.
+    const bool weeding = argc >= 2 && TextIsEqual(argv[1], "--bushes");
 
 
     if (argc >= 4 && TextIsEqual(argv[1], "--sun")) {

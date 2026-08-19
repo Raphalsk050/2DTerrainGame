@@ -202,6 +202,14 @@ public:
     Drops &Fallen() { return drops_; }
 
     const std::vector<flora::Plant> &Plants() const { return plants_; }
+
+    // The floor of the wood under the view, on the same terms as Plants above.
+    //
+    // Published for the one probe that has to name a particular bush and ask
+    // again later whether it is still there — see --bushes. Nothing in the game
+    // reads it: what a bush is to the hand is asked through TimberAt and Strike,
+    // which is what keeps the cursor and the blow describing one rectangle.
+    const std::vector<flora::Plant> &Undergrowth() const { return undergrowth_; }
     const flora::Settings &Settings() const { return settings_; }
 
 private:
@@ -381,7 +389,13 @@ private:
     // Fells anything left standing on ground that has been dug out from under it.
     void Undermine(const World &world, float now);
 
-    // Clears the undergrowth out of the trunks and thins it by the shade over it.
+    // Clears the undergrowth out of the trunks, drops whatever the player has
+    // pulled up, and thins what is left by the shade over it.
+    //
+    // The one filter over `undergrowth_`, and so the one place that has to know a
+    // bush was taken: the scatter regrows every cell every frame and cannot be
+    // told, in the same way the world regenerates a chunk and World::edits_ is
+    // what makes a dug hole survive it.
     void Thin();
 
     // The two halves of DrawLeaves: the year's own shedding, and what has been

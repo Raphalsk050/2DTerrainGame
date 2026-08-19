@@ -1468,6 +1468,71 @@ divisible by four is what catches it: at Δ = 30 the content moves nine texels a
 the row moves three pixels on screen, and the pictures now agree to a tenth of a
 per cent.
 
+### 17.2d A picket fence is the octave gain, not the octave count
+
+The near rows came out as a comb of identical needles standing shoulder to
+shoulder, each one drawn as a vertical bar the whole height of the row — which is
+the slope term, since a column's slope shades the whole of that column and a fold
+that wiggles per texel gives a bar per texel.
+
+The cause is arithmetic. A fold's contribution to the **slope** of the outline is
+its amplitude over its wavelength, so an octave adds `lacunarity * gain` times the
+steepness of the one above it. At a half against 1.93 that product is 0.97 — every
+octave as steep as the last — and the finest one on a 190 px row draws a crest
+every twenty-six pixels at the amplitude of a hill.
+
+`gain` is 0.38, where the product is 0.73 and the fine work lies along the slope
+instead of standing out of it. **The frequencies and the octave count are
+unchanged**, which is the point: the fault was never that there was too much
+detail. `Settings::finest` puts a floor under it as well — a crest narrower than
+seventy pixels is noise on the outline rather than a mountain, which is §9's
+lattice argument one level out; the broad rows still take all four octaves and the
+near ones stop at two.
+
+### 17.2e Measure a face in texels, not in pixels — and vertical motion is what says so
+
+A flicker that showed **only when the player moved up or down**, and the asymmetry
+is what named it.
+
+`depth` — how far below the crest a texel is — was the true distance to where the
+crest mathematically stands. That slides continuously as the camera rises while the
+texels stand on the world's grid, so it drifts through a texel's worth of value; and
+it drifts by the *same amount in every column at once*, because every column's apex
+moves together. The lit rim and the volume under it are steep functions of it, so
+the whole face changed tone in step and the eye read a flash. Sideways the identical
+drift is spread over the columns at every phase, which is why it reads as texture
+there and was invisible.
+
+Counted in **rows down from the row the crest was drawn in** it is an integer, so
+the shading steps exactly when the silhouette steps and never between. Which is also
+the rule the rest of the picture is drawn by: a lit rim is the top so many texels of
+a face, not the top so many pixels of a curve that happens to be sampled there.
+`above` — which carries the treeline and the snow line — is counted the same way off
+the same rounded horizon, or those two sweep through the picture between texels for
+exactly the same reason.
+
+**The check has to allow for the air.** A view moved thirty pixels up is looking
+through a different part of the sky gradient, so the haze legitimately changes and a
+byte-for-byte comparison is 100% different at every offset. Compare mean absolute
+difference instead and look for the minimum: it lands at three pixels, which is
+`distance x 30`, with 471 pixels of 48000 differing by more than sixteen.
+
+### 17.2f The crawl that is left is inherent, and the dither width is the knob
+
+Content that moves over a fixed lattice of texels cannot avoid temporal aliasing.
+A piece of a row is rasterised on the world's grid, its dither threshold is a
+lattice in the row's own frame, and the two slide past one another by up to one
+cell as the camera crosses a texel — so every texel sitting near a quantisation
+boundary flips as the player walks.
+
+There is no arrangement of frames that removes it: the threshold has to be a
+lattice for the dither to draw cleanly, and the picture has to be rasterised on the
+world's grid for the blit in §17.4 to be exact. What can be chosen is **how much of
+the picture is near a boundary at all**, which is what `ditherGround`, `ditherTone`
+and `ditherSnow` say. At 0.55 a little over half of every step was dithered and the
+flicker was easy to see; at 0.42 it is under half and the banding still has
+somewhere to go.
+
 ### 17.3 Near to far, with a ceiling per column
 
 Every row is opaque, so a texel covered by the range in front of it is a texel the

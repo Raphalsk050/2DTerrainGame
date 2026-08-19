@@ -76,14 +76,14 @@ struct LayerDef {
     // two silhouettes happen to be doing, so the stack never collapses into one
     // shape. It mixes towards the sky as drawn, so an overcast afternoon greys the
     // horizon and a sunset burns it without either being written down here.
-    float haze = 0.0f;
+    float haze = 0.5f;
 
     // Overall brightness of the layer before the haze takes it.
     //
     // Under one for the near rows. Ground close to the eye is in the shade of
     // everything standing on it, and a foreground hill at the brightness of a
     // distant one reads as a paper cut-out laid over the picture.
-    float lum = 1.0f;
+    float lum = 1.5f;
 
     // How much of the snow the climate offers this row actually takes, in [0,1].
     //
@@ -106,24 +106,24 @@ inline constexpr LayerDef kRanges[] = {
     // above a horizon of 144 is level with its underside and no higher. A range
     // drawn *into* the deck would be a mountain in front of a cloud that is
     // supposed to be miles behind it.
-    {.foot = 250.0f, .amp = 250.0f, .span = 900.0f, .seed = 0, .distance = 0.10f, .haze = 0.55f, .lum = 1.00f, .snow = 1.0f},
+    {.foot = 250.0f, .amp = 250.0f, .span = 900.0f, .seed = 0, .distance = 0.10f, .haze = 0.95f, .lum = 1.00f, .snow = 1.0f},
 
     // The second range, and the first with any shape the eye can hold. Narrower
     // crests, a little more of the day on it.
-    {.foot = 190.0f, .amp = 215.0f, .span = 620.0f, .seed = 811, .distance = 0.20f, .haze = 0.46f, .lum = 0.98f, .snow = 0.85f},
+    {.foot = 190.0f, .amp = 215.0f, .span = 620.0f, .seed = 811, .distance = 0.20f, .haze = 0.87f, .lum = 0.98f, .snow = 0.85f},
 
     // Middle distance: the last row that gets any snow at all, and it gets it only
     // on the crests the noise happens to push over the line.
-    {.foot = 130.0f, .amp = 185.0f, .span = 430.0f, .seed = 1627, .distance = 0.34f, .haze = 0.31f, .lum = 0.93f, .snow = 0.45f},
+    {.foot = 130.0f, .amp = 185.0f, .span = 430.0f, .seed = 1627, .distance = 0.34f, .haze = 0.82f, .lum = 0.93f, .snow = 0.45f},
 
     // Foothills. Below the snow line by construction, and dark enough to read as
     // the near side of the valley.
-    {.foot = 70.0f, .amp = 140.0f, .span = 290.0f, .seed = 2333, .distance = 0.52f, .haze = 0.17f, .lum = 0.84f, .snow = 0.0f},
+    {.foot = 70.0f, .amp = 140.0f, .span = 290.0f, .seed = 2333, .distance = 0.52f, .haze = 0.7f, .lum = 0.84f, .snow = 0.0f},
 
     // The near rise, which is mostly hidden behind the world's own hills and is
     // there for the moments it is not: standing on a summit, or looking across a
     // valley. Nearly the world's own speed, nearly no haze, and darkest of all.
-    {.foot = 10.0f, .amp = 105.0f, .span = 190.0f, .seed = 3701, .distance = 0.74f, .haze = 0.07f, .lum = 0.70f, .snow = 0.0f},
+    {.foot = 10.0f, .amp = 105.0f, .span = 190.0f, .seed = 3701, .distance = 0.74f, .haze = 0.6f, .lum = 0.70f, .snow = 0.0f},
 };
 
 inline constexpr std::size_t kRangeCount = std::size(kRanges);
@@ -146,7 +146,30 @@ struct Settings {
     int octaves    = 4;
     float sharp    = 1.15f;
     float lacunarity = 1.93f;
-    float gain       = 0.5f;
+
+    // **Under one over the lacunarity, and that is the whole of it.**
+    //
+    // A fold's contribution to the *slope* of the outline is its amplitude over its
+    // wavelength, so an octave adds `lacunarity * gain` times the steepness of the
+    // one above it. At a half against 1.93 that product is 0.97 — every octave as
+    // steep as the last — and what the finest one draws is a crest every twenty-six
+    // pixels at the amplitude of a hill. On a range that reads as a picket fence:
+    // a row of identical needles standing shoulder to shoulder, each one turned
+    // into a vertical bar down the face by the volume term below.
+    //
+    // At 0.38 the product is 0.73, so each octave is three quarters the steepness
+    // of the one over it and the fine work lies along the slope instead of standing
+    // up out of it. The detail is all still there — same frequencies, same octave
+    // count — which is the point: the fault was never that there was too much of it.
+    float gain = 0.38f;
+
+    // And a floor under how fine a fold may go, in pixels of the row's own span.
+    //
+    // The same argument §9 makes about the lattice, one level out: a crest narrower
+    // than this is not a mountain the eye can read at that distance, it is noise on
+    // the outline, and the near rows — whose crests are two hundred pixels apart to
+    // begin with — reach it two octaves in. Broad rows keep all four.
+    float finest = 70.0f;
 
     // An exponent on the finished fold, and it is under one for the reason
     // `SurfaceSettings::ridgeSharp` is (§9): `1 - |signed|` is a triangle by
@@ -237,7 +260,7 @@ struct Settings {
     // flat tones and the dither is what carries the values between them. A smooth
     // ramp here would be the one part of the frame that is not pixel art.
     int tones        = 4;
-    float ditherTone = 0.30f;
+    float ditherTone = 0.26f;
 
     // ----------------------------------------------------------------- the colour
 
@@ -261,8 +284,20 @@ struct Settings {
     float lineJitter = 0.22f;
     float snowJitter = 110.0f;
 
-    float ditherGround = 0.55f;
-    float ditherSnow   = 0.55f;
+    // How wide a band either side of a boundary is dithered rather than cut.
+    //
+    // **This is the knob for the crawl**, and it is a trade rather than a fix.
+    // Content that moves over a fixed lattice of texels cannot avoid temporal
+    // aliasing: a piece of a row is drawn on the world's grid, its dither threshold
+    // is a lattice in the row's own frame, and the two slide past one another by up
+    // to one cell as the camera crosses a texel — so every texel sitting near a
+    // boundary flips as the player walks. That is dither crawl and every parallax
+    // layer in every pixel-art game has it. What can be chosen is how much of the
+    // picture is near a boundary at all, which is exactly these numbers: at 0.55 a
+    // little over half of every step was dithered and the flicker was easy to see,
+    // at 0.42 it is under half and the banding still has somewhere to go.
+    float ditherGround = 0.42f;
+    float ditherSnow   = 0.50f;
 
     // Pixels above the horizon the snow begins, and over how many it comes in.
     //

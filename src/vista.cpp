@@ -147,6 +147,11 @@ float vista::Range::Fold(float sample, const LayerDef &def) const {
     float above = 1.0f;
 
     for (int octave = 0; octave < std::max(s.octaves, 1); octave++) {
+        // Stop before the fold starts describing something too narrow to be a
+        // mountain. The first octave always runs, whatever the row's span, so a row
+        // is never left with nothing.
+        if (octave > 0 && terrain::kFeatureSpan / frequency < s.finest) break;
+
         const terrain::NoiseShape shape = {.frequency = frequency,
                                            .octaves   = 1,
                                            .seed      = terrain_.seed + def.seed + octave * 977};
@@ -455,8 +460,15 @@ void vista::Range::Draw(Rectangle view, const weather::Sky &sky) const {
 
                 const float apex = horizon_ + slid[layer] - lift;
 
-                int from = static_cast<int>(std::ceil(apex / pixel - 0.5f)) - n0;
-                from     = std::max(from, 0);
+                // The texel row the crest actually landed in, before it is clipped
+                // to the view. Everything below is measured in rows from *this*, and
+                // it is kept unclipped for that reason alone: a crest above the top
+                // of the frame still has to say where its shading is being counted
+                // from, or the whole face rearranges itself the moment the summit
+                // leaves the screen.
+                const int crest = static_cast<int>(std::ceil(apex / pixel - 0.5f)) - n0;
+
+                const int from = std::max(crest, 0);
 
                 const int until = ceilings_[static_cast<std::size_t>(column)];
 
@@ -541,11 +553,38 @@ void vista::Range::Draw(Rectangle view, const weather::Sky &sky) const {
                     // about its colour is measured in: a distant range and a near
                     // one both have their rock above their green, and that is what
                     // altitude looks like from here.
-                    const float above = horizon_ + slid[layer] - worldY;
+                    //
+                    // In whole texels too, off the same rounded horizon the grain is
+                    // keyed to, and for the reason `depth` is: the row's horizon
+                    // slides continuously as the camera rises, so the treeline and
+                    // the snow line would sweep through the picture between texels
+                    // and in every column at once. Counted in rows they step where
+                    // the picture steps.
+                    const float above = static_cast<float>(shiftY - (n0 + texel)) * pixel;
 
                     // And below its own crest, which is what everything about its
-                    // light is measured in.
-                    const float depth = worldY - apex;
+                    // light is measured in — **counted in whole texels down from
+                    // the row the crest was drawn in**, not as the distance to where
+                    // the crest mathematically is.
+                    //
+                    // This is the fix for a flicker that only showed on *vertical*
+                    // movement, and the asymmetry is what named it. `apex` slides
+                    // continuously as the camera rises while the texels stand on the
+                    // world's grid, so the true distance to it drifts through a
+                    // texel's worth — and it drifts by the *same amount in every
+                    // column at once*, because every column's apex moves together.
+                    // The lit rim and the volume under it are steep functions of it,
+                    // so the whole face changed tone in step and the eye read a
+                    // flash. Sideways the same drift is spread over the columns at
+                    // every phase, which is why it reads as texture there and was
+                    // invisible.
+                    //
+                    // Counted in rows it is an integer, so the shading steps exactly
+                    // when the silhouette steps and never between. Which is also the
+                    // rule the rest of the picture is drawn by: a lit rim is the top
+                    // so many texels of a face, not the top so many pixels of a
+                    // curve that happens to be sampled there.
+                    const float depth = static_cast<float>(texel - crest) * pixel;
 
                     const float grain = Threshold(m0 + column - shiftX, n0 + texel - shiftY);
 

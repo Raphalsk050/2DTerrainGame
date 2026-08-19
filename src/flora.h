@@ -84,6 +84,24 @@ inline constexpr std::size_t SeasonIndex(Season season) {
     return static_cast<std::size_t>(season);
 }
 
+// What a plant is called, for every table that files something under one.
+//
+// The layer *and* the cell, and the layer is not decoration. The two passes count
+// their cells on lattices four times apart — 110 px against 26 — so the number 5
+// names a place in each of them, and an id that was the cell alone made a fern and
+// an oak the same plant. That was not theoretical: canopy::Sheet keys its baked
+// sprites on the id and the undergrowth is drawn first, so an oak standing in
+// canopy cell 5 was handed the fern's picture; and Grove::remembered_ keys damage
+// on it, so pulling up a fern would have cleared a tree three hundred pixels away.
+//
+// Interleaved rather than offset by a base, because a cell index is signed and a
+// base only separates the halves of the number line it does not straddle. This is
+// injective for every cell either side of zero, at the cost of one bit of range —
+// which leaves Grove's kPlantedBase as unreachable as it was.
+inline constexpr std::int64_t PlantId(Layer layer, std::int64_t cell) {
+    return cell * static_cast<std::int64_t>(kLayerCount) + static_cast<std::int64_t>(LayerIndex(layer));
+}
+
 // Every plant is built from its own seed, so no two of them are the same tree.
 //
 // This was a fixed set of variants baked once, and it was wrong: a screenful of
@@ -1111,9 +1129,9 @@ float SunkAt(const Ground &ground, float worldX);
 
 // One plant the world grows, before anything that has happened to it.
 struct Plant {
-    // The cell it grew in, which is the whole of its identity: the same number
-    // on every frame and in every session, and therefore what a record of damage
-    // is filed under.
+    // Which layer and which cell it grew in, through PlantId — the whole of its
+    // identity: the same number on every frame and in every session, and therefore
+    // what a record of damage is filed under.
     std::int64_t id = 0;
 
     Species species = Species::Oak;

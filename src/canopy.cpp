@@ -826,9 +826,10 @@ void Paint(const Canvas &canvas, const flora::SpeciesPalette &palette, bool snow
 } // namespace
 
 std::uint64_t Sheet::Key(std::int64_t cell, flora::Stage stage, flora::Season season, bool snowy) {
-    // A cell index shifted up by five, which is exact for any world anyone can
-    // walk across: it leaves fifty-nine bits of cell, and a cell is a hundred
-    // pixels.
+    // A plant's id shifted up by five, which is exact for any world anyone can
+    // walk across: it leaves fifty-nine bits of id, and an id is a cell index
+    // doubled — see flora::PlantId, which is also why a fern and a tree standing
+    // in cells that happen to share a number are no longer one drawing.
     //
     // Snow is a bit of the key and not a tint applied at the draw, because it is
     // baked into the sprite: a cap of snow is texels, laid on whichever of them

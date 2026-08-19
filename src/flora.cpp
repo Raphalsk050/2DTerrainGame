@@ -357,7 +357,7 @@ bool Grow(Layer layer, std::int64_t cell, const Settings &settings, const terrai
     // is what the edge of a desert looks like anyway.
     if (!RootsIn(def, SurfaceCoverAt(x, terrain))) return false;
 
-    out.id      = cell;
+    out.id      = PlantId(layer, cell);
     out.species = static_cast<Species>(chosen);
     out.scale   = scale;
 

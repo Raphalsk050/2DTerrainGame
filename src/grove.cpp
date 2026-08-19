@@ -127,13 +127,13 @@ constexpr float kPlantApart = 16.0f;
 
 // Where the ids of planted trees begin.
 //
-// Records are keyed by cell index for everything the world grew itself, so a
-// planted tree needs a key no cell can ever be. A cell index is a world position
-// over the cell span, and a world position is a float — which stops counting in
-// whole pixels above two to the twenty-fourth, about sixteen million. Over a
-// span of a hundred and ten that is an index under a hundred and fifty thousand,
-// and this base clears the largest one the world can produce by seven million
-// times.
+// Records are keyed by flora::PlantId for everything the world grew itself, so a
+// planted tree needs a key no cell can ever produce. That id is a cell index
+// doubled, and a cell index is a world position over the cell span; a world
+// position is a float, which stops counting in whole pixels above two to the
+// twenty-fourth, about sixteen million. Over the undergrowth's span of
+// twenty-six that is an index under seven hundred thousand, doubled to under a
+// million and a half — and this base clears it by seven hundred thousand times.
 constexpr std::int64_t kPlantedBase = 1LL << 40;
 
 // And where the ids of the ghosts begin, one per species.
@@ -730,6 +730,18 @@ void Grove::Thin() {
     for (std::size_t i = 0; i < undergrowth_.size(); i++) {
         const flora::Plant &plant = undergrowth_[i];
 
+        // Pulled up, and it stays pulled up. The scatter grows this cell again
+        // every frame — it is a pure function of position and knows nothing about
+        // anybody — so the record is the only thing that can say a bush is gone,
+        // and this is the one pass that reads it.
+        //
+        // The record itself rather than Read, which is the difference between one
+        // hash lookup and one lookup plus an age nothing here asks about: an
+        // undergrowth plant is drawn at Mature whatever its age, so the only thing
+        // its record has to say is whether it is still there.
+        const auto found = remembered_.find(plant.id);
+        if (found != remembered_.end() && found->second.cleared) continue;
+
         bool blocked = false;
         float shade  = 0.0f;
 
@@ -1216,6 +1228,21 @@ std::optional<Rectangle> Grove::StrikeRect(const flora::Plant &plant, float now)
     // Nothing there at all.
     if (standing.cleared) return std::nullopt;
 
+    // The floor of the wood, which is a different thing to swing at and not a
+    // small version of the same one. It has no trunk to aim for and leaves no
+    // stump, so the box is the whole plant — and it is taken at Mature whatever
+    // its record says, because Mature is the size Draw puts on the screen and a
+    // box that disagrees with the picture is a bush that cannot be hit where it
+    // is drawn.
+    if (def.layer == flora::Layer::Undergrowth) {
+        const std::size_t full = flora::StageIndex(flora::Stage::Mature);
+
+        const float tall  = def.height[full] * plant.scale;
+        const float reach = std::max(def.canopyWidth[full] * plant.scale * 0.5f, kStrikeSlack);
+
+        return Rectangle{plant.base.x - reach, plant.base.y - tall, reach * 2.0f, tall};
+    }
+
     // The stump left where a tree came down, which is the second half of the job
     // and the reason the wood is not simply gone when the tree is. Taken before the
     // guard below, because to that guard a stump is a felled tree and a felled tree
@@ -1264,6 +1291,13 @@ void Grove::DrawCollision(flora::Season season, float now) const {
         DrawRectangleLinesEx({plant.base.x - sprite->anchor.x * pixel, plant.base.y - sprite->anchor.y * pixel,
                               sprite->source.width * pixel, sprite->source.height * pixel},
                              1.0f, Fade(SKYBLUE, 0.35f));
+
+        // And where the hand goes, in the same red the trees use. A bush is
+        // something to break now, so the pair of rectangles has the same thing to
+        // say about it that a trunk's pair has: the box is only ever as true as the
+        // picture it is sitting on.
+        const std::optional<Rectangle> strike = StrikeRect(plant, now);
+        if (strike.has_value()) DrawRectangleLinesEx(*strike, 1.0f, Fade(RED, 0.5f));
     }
 
     for (const flora::Plant &plant : plants_) {
@@ -1294,10 +1328,15 @@ void Grove::DrawCollision(flora::Season season, float now) const {
 }
 
 bool Grove::TimberAt(Rectangle probe, float now) const {
-    for (const flora::Plant &plant : plants_) {
-        const std::optional<Rectangle> box = StrikeRect(plant, now);
+    // Both lists, because the hand has one button for the two of them: a bush the
+    // cursor lit up on and then dug straight through would be worse than a bush
+    // the cursor said nothing about.
+    for (const std::vector<flora::Plant> *standing : {&plants_, &undergrowth_}) {
+        for (const flora::Plant &plant : *standing) {
+            const std::optional<Rectangle> box = StrikeRect(plant, now);
 
-        if (box.has_value() && CheckCollisionRecs(probe, *box)) return true;
+            if (box.has_value() && CheckCollisionRecs(probe, *box)) return true;
+        }
     }
 
     return false;
@@ -1392,6 +1431,47 @@ void Grove::Strike(Rectangle hitbox, float damage, Vector2 from, float now) {
         // Away from whoever swung. A tree that fell towards the axe would be the
         // one thing in the world actively trying to land on the player.
         state.fallLeft = from.x > plant.base.x;
+
+        return;
+    }
+
+    // And the floor under them, after them — the order they are drawn in. A fern
+    // at the foot of a trunk is drawn behind it, so a swing covering both is a
+    // swing at the tree, and the bush is what is left when there is no tree there.
+    for (std::size_t i = 0; i < undergrowth_.size(); i++) {
+        const flora::Plant &plant = undergrowth_[i];
+
+        const std::optional<Rectangle> box = StrikeRect(plant, now);
+
+        if (!box.has_value() || !CheckCollisionRecs(hitbox, *box)) continue;
+
+        // One blow, and it comes up root and all.
+        //
+        // The same shape as a sapling — no fall, no stump, nothing left to clear
+        // afterwards — and for the same reason: there is no trunk here to cut
+        // through, so there is nothing for a second blow to be for. What differs is
+        // what it hands over. A sapling gives back the seed that planted it; a bush
+        // was never sown, and what a handful of it is worth is its own drop table,
+        // which is the fibre a tuft of grass gives.
+        TreeState &state = Remember(plant, now);
+
+        state.felledAt = now;
+        state.cleared  = true;
+        state.dropped  = true;
+        state.fallLeft = from.x > plant.base.x;
+
+        // Full size, whatever the record was seeded with. Draw asks the sheet for
+        // Mature and StrikeRect swings at Mature, so this is not a plant that has
+        // stages — an undergrowth pass that paid out a fraction would be paying for
+        // a smaller bush than the one on the screen.
+        state.growth = 1.0f;
+
+        Yield(plant, state, now);
+
+        // Gone from the picture on the frame it was pulled rather than on the next
+        // one. Thin is what keeps the cell empty from here on, and it does not run
+        // again until the next Update.
+        undergrowth_.erase(undergrowth_.begin() + static_cast<std::ptrdiff_t>(i));
 
         return;
     }
