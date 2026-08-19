@@ -1,30 +1,33 @@
-#include "backdrop.h"
-#include "canopy.h"
-#include "commands.h"
-#include "config.h"
-#include "debug_view.h"
-#include "editor.h"
-#include "fixture.h"
-#include "grove.h"
-#include "hotbar.h"
-#include "hud.h"
-#include "liquid_layer.h"
-#include "lit_layer.h"
-#include "menu.h"
-#include "player.h"
-#include "probes.h"
-#include "profile.h"
-#include "render.h"
-#include "console.h"
-#include "scuff.h"
-#include "sod.h"
-#include "soil.h"
+#include "core/content.h"
+#include "item/items/fibre.h"
+#include "weather/backdrop.h"
+#include "flora/canopy.h"
+#include "ui/commands.h"
+#include "core/config.h"
+#include "ui/debug_view.h"
+#include "hand/editor.h"
+#include "entity/fixture.h"
+#include "flora/grove.h"
+#include "ui/hotbar.h"
+#include "ui/hud.h"
+#include "render/liquid_layer.h"
+#include "render/lit_layer.h"
+#include "ui/menu.h"
+#include "entity/mob/herd.h"
+#include "entity/player/player.h"
+#include "probes/probes.h"
+#include "core/profile.h"
+#include "render/render.h"
+#include "ui/console.h"
+#include "entity/scuff.h"
+#include "world/sod.h"
+#include "world/soil.h"
 #include "raylib.h"
 #include "rlgl.h"
-#include "terrain.h"
-#include "view.h"
-#include "weather.h"
-#include "world.h"
+#include "world/terrain.h"
+#include "core/view.h"
+#include "weather/weather.h"
+#include "world/world.h"
 
 #include <algorithm>
 #include <string>
@@ -82,16 +85,28 @@ light::Radiance Glow(const ElementLight &light) {
 // the axe.
 constexpr float kAimedBlow = 12.0f;
 
+// How hard a bare hand throws a creature, and how far it lifts one.
+//
+// The character's figures rather than the creature's, and that is the right way
+// round: how hard *you* hit is a fact about you, and how hard you are hit back is on
+// the row of whatever hit you. A sword will multiply these two and nothing else.
+//
+// The lift is separate from the knock and is always upward, because a blow struck
+// downward at something standing on the floor has nowhere to throw it — without a
+// lift the knock is entirely horizontal and the target skates rather than being hit.
+constexpr float kFistKnock = 190.0f;
+constexpr float kFistLift  = 130.0f;
+
 
 PlayerInput ReadPlayerInput(const Camera2D &camera, bool swinging) {
     PlayerInput input;
 
-    if (IsKeyDown(KEY_A) || IsKeyDown(KEY_LEFT)) input.moveX -= 1.0f;
-    if (IsKeyDown(KEY_D) || IsKeyDown(KEY_RIGHT)) input.moveX += 1.0f;
+    if (IsKeyDown(KEY_A) || IsKeyDown(KEY_LEFT)) input.motion.moveX -= 1.0f;
+    if (IsKeyDown(KEY_D) || IsKeyDown(KEY_RIGHT)) input.motion.moveX += 1.0f;
 
-    input.jumpPressed   = IsKeyPressed(KEY_SPACE) || IsKeyPressed(KEY_W);
-    input.jumpHeld      = IsKeyDown(KEY_SPACE) || IsKeyDown(KEY_W);
-    input.crouchHeld    = IsKeyDown(KEY_S) || IsKeyDown(KEY_DOWN);
+    input.motion.jumpPressed = IsKeyPressed(KEY_SPACE) || IsKeyPressed(KEY_W);
+    input.motion.jumpHeld    = IsKeyDown(KEY_SPACE) || IsKeyDown(KEY_W);
+    input.motion.crouchHeld  = IsKeyDown(KEY_S) || IsKeyDown(KEY_DOWN);
 
     // The left button, whatever the hand became: an axe in a trunk, a spade in the
     // hillside, a fist through the grass. The arm swings for all three, because to
@@ -113,11 +128,11 @@ PlayerInput ReadPlayerInput(const Camera2D &camera, bool swinging) {
     // The vertical axis is the same two keys as jump and crouch. Only flight
     // reads it, and while flying neither of those actions applies, so there is
     // nothing for it to conflict with.
-    if (input.jumpHeld) input.moveY -= 1.0f;
-    if (input.crouchHeld) input.moveY += 1.0f;
+    if (input.motion.jumpHeld) input.motion.moveY -= 1.0f;
+    if (input.motion.crouchHeld) input.motion.moveY += 1.0f;
 
-    input.flyToggled = IsKeyPressed(KEY_F);
-    input.sprintHeld = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
+    input.flyToggled        = IsKeyPressed(KEY_F);
+    input.motion.sprintHeld = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
 
     input.aimWorld = GetScreenToWorld2D(GetMousePosition(), camera);
 
@@ -180,6 +195,21 @@ void FollowPlayer(Camera2D &camera, const Player &player, float dt) {
 } // namespace
 
 int main(int argc, char **argv) {
+    // The content, sealed and checked, before anything else in the program.
+    //
+    // Every item, material, creature and fixture put itself into a table during
+    // static initialisation. Two things still have to happen: ids have to be handed
+    // out — by name, so that they are the same on every build — and every check any
+    // content file registered has to run. See core/registry.h for why the first
+    // cannot be done as the rows arrive, and core/content.h for what the second
+    // replaced.
+    //
+    // First statement in the program, and it has to be: a table refuses to be read
+    // before it is frozen, which is a loud abort rather than a wrong answer. Before
+    // the probes, because a probe reads the tables; before the window, because a
+    // content fault is exactly the case where the window should never open.
+    if (!content::Open()) return 1;
+
     // Whether this run is a probe rather than a game — see probes.h. Asked before
     // the window opens, because it decides whether the window shows at all.
     const bool measuring = probes::Headless(argc, argv);
@@ -840,6 +870,12 @@ int main(int argc, char **argv) {
     Grove grove;
 
     fixture::Fixtures fixtures;
+
+    // What walks about. Beside the wood and the fixtures because it is the same kind
+    // of thing — something in the world that is not the world — and because all three
+    // are cleared together when a new world is made.
+    mob::Herd herd;
+
     grove.Configure({.seed = settings.seed}, settings, world.Sky());
 
 
@@ -1124,6 +1160,7 @@ int main(int argc, char **argv) {
                         grove.Configure({.seed = settings.seed}, settings, world.Sky());
 
                         fixtures.Clear();
+                        herd.Clear();
                         inventory.Clear();
 
                         making.stage++;
@@ -1197,7 +1234,7 @@ int main(int argc, char **argv) {
         if (typing) {
             const std::string sent = chat.Read();
 
-            if (!sent.empty()) commands::Run(sent, world, grove, inventory, player, camera, chat);
+            if (!sent.empty()) commands::Run(sent, world, grove, inventory, player, herd, camera, chat);
         }
 
         // The frame can change size between any two frames, so the two things that
@@ -1289,6 +1326,27 @@ int main(int argc, char **argv) {
             // is fixed to is the world, and the world is what the player has just
             // been changing.
             fixtures.Undermine(world, grove.Fallen(), world.Sky().Time());
+
+            // And whatever walks. Over the simulated region rather than the visible
+            // one — a creature just off screen has to keep walking, or the world
+            // reorganises itself every time the player turns round.
+            //
+            // What it hands back is a blow, not a hit: the herd never learns that a
+            // `Player` exists, and joining the two is the loop's job. The same
+            // arrangement the editor already has with the inventory.
+            {
+                PROFILE_ZONE("herd.Update");
+
+                const mob::Herd::Toll toll = herd.Update(world, active, player.Bounds(), player.Centre(),
+                                                         world.Sky().Time(), dt, grove.Fallen());
+
+                // Not in creative. Being unable to die is the whole of what that mode
+                // means here, and it is one test rather than a rule inside the herd —
+                // a creature still chases, still strikes, and still reads as dangerous.
+                if (toll.Any() && mode == Gamemode::Survival) {
+                    player.Hurt({.damage = toll.damage, .from = toll.from, .knock = toll.knock, .lift = toll.lift});
+                }
+            }
 
             // The two that read the mouse wait out the click that closed the
             // panel; the plants above do not, since nothing about them is a
@@ -1450,10 +1508,8 @@ int main(int argc, char **argv) {
             // standing still is the one thing a player never does and the one
             // case every cache in here is at its best. See `--profile`.
             const PlayerInput moves =
-                flying ? PlayerInput{.moveX      = 1.0f,
-                                     .jumpHeld   = false,
-                                     .flyToggled = (played == kWarmup / 2),
-                                     .sprintHeld = true}
+                flying ? PlayerInput{.motion     = {.moveX = 1.0f, .jumpHeld = false, .sprintHeld = true},
+                                     .flyToggled = (played == kWarmup / 2)}
                 : typing ? PlayerInput{}
                          : ReadPlayerInput(camera, !packOpen && !holdOff && editor.Left() != Editor::Hand::Idle
                                                        && IsMouseButtonDown(MOUSE_BUTTON_LEFT));
@@ -1503,6 +1559,14 @@ int main(int argc, char **argv) {
                     grove.Strike(swing, kChopBlow, player.Centre(), world.Sky().Time());
                 }
 
+                // And whatever was standing in it, whichever tool the hand became —
+                // the same argument the grass below makes. A fist is a fist against a
+                // boar whether the player was mid-way through digging or not.
+                //
+                // The reach is the swing's own box and not the creature's: what
+                // decides whether a blow lands is where the arm went.
+                herd.Strike(swing, player_config::kFistDamage, player.Centre(), kFistKnock, kFistLift);
+
                 // And whatever grass the same swing went through, whichever tool it
                 // was: a handful of grass comes away from a spade as readily as from
                 // an axe. A tuft gives up fibre where a tree gives up wood, into the
@@ -1516,7 +1580,7 @@ int main(int argc, char **argv) {
                     // the side the blow came from and the way the wood already goes.
                     const float away = (from.x < player.Centre().x) ? -1.0f : 1.0f;
 
-                    grove.Fallen().Scatter(ItemsOf(Item::Fibre, mown), from, away, world.Sky().Time());
+                    grove.Fallen().Scatter(ItemsOf(items::Fibre(), mown), from, away, world.Sky().Time());
                 }
             }
         }
@@ -1600,7 +1664,7 @@ int main(int argc, char **argv) {
 
             lit.Capture();
 
-            if (lit.Ready()) render::LitWorld(world, grove, fixtures, player, trail, liquids, world.Light(), camera, debug);
+            if (lit.Ready()) render::LitWorld(world, grove, fixtures, herd, player, trail, liquids, world.Light(), camera, debug);
 
             lit.Finish();
         }
@@ -1611,7 +1675,7 @@ int main(int argc, char **argv) {
         // only the blurred result is drawn once the frame is open.
         if (packOpen) {
             backdrop.Capture();
-            render::Scene(world, grove, inventory, player, editor, lit, camera, debug, !packOpen);
+            render::Scene(world, grove, herd, inventory, player, editor, lit, camera, debug, !packOpen);
             backdrop.Finish();
         }
 
@@ -1621,13 +1685,13 @@ int main(int argc, char **argv) {
             PROFILE_ZONE("DrawScene");
 
             if (packOpen) backdrop.Compose(config::kPanelDim);
-            else render::Scene(world, grove, inventory, player, editor, lit, camera, debug, !packOpen);
+            else render::Scene(world, grove, herd, inventory, player, editor, lit, camera, debug, !packOpen);
         }
 
         {
             PROFILE_ZONE("DrawHud");
 
-            hud::Draw(world, grove, player, editor, camera, debug, lantern, notice, noticeFor);
+            hud::Draw(world, grove, herd, player, editor, camera, debug, lantern, notice, noticeFor);
 
             // The panel replaces the bar rather than sitting over it, since it draws
             // those same nine slots as its own bottom row.

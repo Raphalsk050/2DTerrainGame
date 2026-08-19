@@ -1229,8 +1229,10 @@ everywhere except the one place that was written as a list of names.
 
 ### 16.1 A material
 
-One row in `kElements[]` in `element.h`, in the exclusion order the `precedence`
-field decides. What the row says and what falls out of it:
+One row in `kElements[]` in `world/element.h`, in the exclusion order the
+`precedence` field decides. **This is the last central table left** — items and
+creatures register themselves now, and §19 is what that means and why. Everything
+below about what a row buys still holds. What the row says and what falls out of it:
 
 | the row says | and this follows, with nothing else edited |
 |---|---|
@@ -1260,8 +1262,8 @@ stop listing whatever was added last.
 
 ### 16.2 An item
 
-One row in `kItems[]` in `item.h`, and the head of that file says why an item is not
-an element: an element has a field over the lattice, a threshold, a rank and a
+**Superseded by §22** — an item is its own file now and there is no `kItems[]` to
+insert into. What has not changed is why an item is not an element: an element has a field over the lattice, a threshold, a rank and a
 generator, and an apple has none of those.
 
 `placement` is what decides what the right hand does with it — nothing, root it in
@@ -1600,3 +1602,267 @@ With it on, it is the only still picture of the world as it is actually seen.
 Read `--covers x0 x1 step` first to find the country worth photographing. A desert
 is 2% of columns in this world, so a horizon of dunes is not something to go looking
 for by eye.
+
+---
+
+## 18. Where the files are now
+
+`src/` was seventy-seven files in one directory. It is the same code in ten:
+
+| folder | what is in it |
+|---|---|
+| `core/` | the machinery that is not the game: the pool, the profiler, the registry, the picture and figure types, config, view, mode |
+| `world/` | the ground: `world`, `terrain`, `cave`, `element`, `soil`, `sod`, `water`, `marching_squares` |
+| `weather/` | the sky, the horizon, the backdrop |
+| `flora/` | the wood: species, the scatter, the canopy |
+| `entity/` | everything that is in the world without being the world — the body, the player, the creatures, the pickups, the fixtures, the footsteps |
+| `item/` | what is carried, and the pack |
+| `render/` | the order the world is drawn in, and the light |
+| `ui/` | what is drawn in the frame's coordinates: the display, the menu, the console |
+| `hand/` | the editor — digging and building |
+| `probes/` | the world measured rather than played |
+
+**The build globs every `.cpp` under `src/`** with `CONFIGURE_DEPENDS`. There is no
+list of sources anywhere, and that is half of what makes a content row register
+itself: the other half is the registrar beside the row, and this is what guarantees
+its file is compiled at all.
+
+The whole move was held to §2's bar — `--sun`, `--column`, `--build`, `--tones`,
+`--covers` and a `--probe` picture, byte for byte, before and after.
+
+---
+
+## 19. A row registers itself
+
+`src/core/registry.h`. This section is about a change of principle, and the
+principle is the Open/Closed one: **adding a thing must not mean editing a file
+that already works.**
+
+Every table used to be an array with every row in it and an `enum` naming the
+positions. That is a good design right up until the table is long, and then every
+addition is an edit in the middle of a file full of things that are already correct.
+
+So a row lives in its own file, and a `registry::Registrar` beside it files the row
+before `main` runs. A new item is `src/item/items/hide.{h,cpp}`. A new creature is
+`src/entity/mob/mobs/wolf.{h,cpp}`. A new behaviour is
+`src/entity/mob/brains/pack.{h,cpp}`. **No existing file is opened for any of them**,
+including `CMakeLists.txt`.
+
+### 19.1 Ids are sorted by name, and that is the whole difficulty
+
+A row's id ends up in `Stack::what` and will end up in save data, so it has to be
+the same number on every build of the same content. Static initialisers run in an
+order the standard does not fix and the linker is free to change, so **registration
+order is not an identity**. Handing out ids as rows arrive would mean a world saved
+today loading as something else tomorrow, silently, with stone where the diamond was.
+
+`content::Open()` therefore freezes every table after every registrar has run, and
+assigns ids by sorting on each row's own name. The numbering is a pure function of
+*the set of rows* — nothing to do with the order they arrived in, the order the files
+compiled in, or the platform. A table refuses to be read before it is frozen, which
+is a loud abort rather than a wrong answer.
+
+`content::Open()` is the **first statement in `main`**, before the probes and before
+the window.
+
+### 19.2 What was given up, and what replaced it
+
+The old tables were `constexpr`, and a handful of `static_assert`s walked them at
+compile time. Those cannot survive a table assembled at run time, and pretending
+otherwise would be worse than losing them.
+
+They are `registry::Checker`s now, run together by `content::Open`, reporting **every**
+fault and then refusing to start. That is weaker than a compile error and much
+stronger than nothing: a bad row is found before the window opens, named in a line
+you can act on, and impossible to play past.
+
+```
+content: fixture 'torch' is put up from 'tourch', and there is no such item
+content: 1 fault — refusing to start
+```
+
+That was produced by breaking a row deliberately and watching it fire, which is the
+only way to know a guard guards anything — the discipline §16.2b describes. The exit
+status is 1.
+
+**What must never happen is a check quietly downgraded to a warning.** The whole
+argument of §16.2b is that a row which looks added and is not costs a day of looking
+in the wrong place.
+
+### 19.3 One table names another by name, not by handle
+
+A creature's row is `constexpr` and an item's id is not known until startup, so
+`Spoil::item`, `SpeciesDef::sapling`, `DropRule::item` and `fixture::Def::from` are
+all `const char *`. `item::Named(name)` resolves one; `Verify` has already
+established that every name in every table resolves, so a lookup that fails at run
+time cannot happen in a build that started.
+
+`nullptr` means *says nothing* — a plant that does not sow, a creature that drops
+nothing. That distinction is the one §16.2b was about, and it survives the move to
+names because `nullptr` and an empty string are not the same thing.
+
+### 19.4 A seed comes from a name, never from a row number
+
+`core/hash.h`. Indices are stable across builds and still **shift when a row is
+added**, because everything after the new name moves up one. Anything that seeded a
+roll from an index would have every tree already in the world drop something
+different the day a new item was added — a world quietly rewriting itself for a
+reason nobody could see. `hash::Of(name)` does not shift.
+
+---
+
+## 20. Everything that walks walks through one body
+
+`src/entity/body/`. Three files, and the middle one is the seam the whole creature
+layer hangs off.
+
+- **`build.h`** — `body::Build`: the thirty numbers a body is made of. It was
+  `player_config`, a namespace of constants, which is exactly right while there is
+  one body in the world and exactly wrong the moment there are two.
+- **`intent.h`** — `body::Intent`: six wishes. `moveX`, `moveY`, jump pressed and
+  held, crouch, sprint.
+- **`body.h/.cpp`** — `body::Body`: the walk. Gravity, the ledge it steps over, the
+  corner it is nudged past, the ground it is snapped back down to, the rock it is dug
+  out of, the water it floats in.
+
+**The seam already existed.** `Player` was deliberately written to know nothing about
+the keyboard, taking a snapshot of intentions instead — put there for remapping and
+replays. That indirection turns out to be the thing that makes a creature cheap: an
+animal is a body with the same six wishes filled in by a brain rather than by a hand.
+
+So there is **no AI movement code anywhere in this project, and there must never be
+any**. A creature that walked by some other route would drift from the character's
+walk the first time either was tuned, and the symptom is a mob climbing a ledge the
+player is stopped by, or falling through a floor the player stands on.
+
+`Player` now *has* a body rather than *being* one. What is left in that class is what
+is actually the character: the aim, the swing, the health and the drawing.
+
+**Two kinds of not-falling, and they are different fields in different places.**
+`Build::floats` is a creature gravity does not act on which still collides with the
+mountain — a bat, and a fact about the row. `Body::Ghost` is the free flight, which
+passes through rock, and is a state the player is put into.
+
+---
+
+## 21. Adding a creature
+
+One file. `src/entity/mob/mobs/<name>.h` with the row, and a `.cpp` beside it holding
+the registrar. Nothing else in the project is edited — not a table, not an enum, not
+the build.
+
+| the row says | and this follows, with nothing else edited |
+|---|---|
+| `look` | how it is drawn, at the world's own texel, in both facings |
+| `build` | how it walks, falls, swims, steps over ledges and is dug out of rock |
+| `temper` | which brain drives it, by name |
+| `hardy`, `hits`, `knock`, `lift`, `reach`, `rest` | what it takes and what it deals |
+| `notices` | how far it reacts, in whichever way its brain reacts |
+| `spoils` | what it leaves, by item name |
+| `haunt` | where it comes from: depth band, light band, climate bell, group size, crowd cap, keep-away |
+| `burnsInDaylight` | whether the sun ends it |
+
+**The rule to keep**: a fact about a creature goes on the creature's row. If
+answering a question about a boar means writing a test on its name anywhere outside
+that file, the field is missing. That is §16.1's `ElementDef::loose` lesson, one table
+further on.
+
+The `haunt` reads the same `ElementClimate` bell the covers, the woods, the drought
+and the snowfall are placed by. There is no biome table for creatures either, and
+there must not be one: the moment a mob names a biome, the boar's country and the
+grass's country are two facts that can disagree. See §8.
+
+### 21.1 A behaviour is a file, and a creature is not
+
+`src/entity/mob/brains/`. Three today — `drifter` wanders, `skittish` grazes until it
+is hurt and then bolts, `stalker` closes and strikes. A creature that behaves like an
+existing one costs nothing here; a *new* behaviour is one file and its registrar.
+
+**A brain is stateless and shared.** One `Drifter` answers for every bat in the world,
+so it must hold nothing about any of them — everything a behaviour remembers goes in
+the `Wits` it is handed, which is one small struct per creature rather than one object
+with a vtable per creature. It is also what makes the layer safe to run across the
+cores later, since nothing a brain touches belongs to anybody else.
+
+**A brain returns a wish, not a move.** See §20.
+
+**What a brain can see is `Sense`, and it is deliberately narrow.** No herd — a
+creature that could read every other creature's position would make each brain cost
+the size of the pool, and would let a boar react to a boar off screen. Nothing
+mutable. No input. Widen that struct and every behaviour in the project quietly gains
+a new way to be surprising.
+
+### 21.2 The spawner samples the band, it does not reject against it
+
+This shipped broken, and the fault is worth keeping written down because there was
+nothing on screen and nothing in any log to point at.
+
+`spawn::Try` used to pick a uniform point in the simulated region and test it against
+the row. A boar's depth band is 56 pixels of a region thirteen hundred deep, so about
+one candidate in twenty-five was even in the right place; with six tries, about two
+attempts in a hundred succeeded. **What that looked like was an empty world.** No
+error, no warning, and `--mobs` reporting the country as perfectly suitable — because
+the country *was* suitable, and the spawner was never asking about it.
+
+The height is now taken from the row's own band, measured off the surface at the
+chosen column. Every candidate is in the band by construction, and the refusals are
+left to be about things worth refusing: rock, light, climate. `herd.Update` went from
+0.001 ms a frame doing nothing to 0.018 ms with creatures in the world, which is 0.1%
+of it.
+
+### 21.3 Check it with `--mobs`, and never by eye
+
+`--mobs x0 x1 [step] [hours]`. The companion to `--woods`, and it exists for the same
+reason: a placement rule is very easy to author into something that is never anywhere,
+and nothing errors. A creature is the worst case — one that never spawns looks exactly
+like one that spawns somewhere you have not walked.
+
+It reports, per creature, how many spots suit it and **why the rest were refused**,
+one column per band. A row that fails says which of its own fields did it.
+
+**It sweeps the day by default, and that is the whole design of the verdict.** A
+creature of the dark is legitimately nowhere at noon, so a report at one hour cannot
+tell "this row is wrong" from "you asked at the wrong time". With no hour given it
+walks midnight, dawn, noon and dusk and fails only a row that appears at none of them.
+Given an hour it walks that one and passes no verdict.
+
+The shade's `darkerThan` was found this way rather than chosen: at 0.22, which is what
+a threshold for darkness looks like it ought to be, it took one surface spot in twenty
+at midnight and the only hostile creature in the game was effectively not in it. The
+open meadow at midnight is brighter than that. At 0.35 it takes every unlit surface
+spot at night and none at all by day.
+
+`--critters out.png [zoom]` is the other half: a contact sheet of every creature at
+the world's own texel, in both facings, with its collider drawn over it. A mirrored
+sprite is the one fault invisible in a single still — a boar whose snout is on the
+wrong end looks fine until it turns round.
+
+---
+
+## 22. Adding an item
+
+One file. `src/item/items/<name>.h` with the row, and a `.cpp` beside it holding the
+registrar. §16.1's table of what a row buys still holds; what has changed is that
+there is no `kItems[]` to insert into and no `enum class Item` to extend.
+
+A row's id is reached through an accessor written beside it:
+
+```cpp
+inline Item Hide() {
+    static const Item id = item::Table().IdOf(&kHide);
+    return id;
+}
+```
+
+Cached on the first call, which is after the table is frozen. Call sites read
+`items::Hide()` where they used to read `Item::Hide`.
+
+`hide` was added while writing this, to prove the claim: one file, one registrar, and
+it appears in the hotbar, the creative palette, the drop tables and the pickup pool
+with nothing told about it.
+
+**What is still a central table, and is the next thing to move**: `kElements` in
+`world/element.h` (1,900 lines), `flora::kSpecies` in `flora/flora.h` (1,200), and the
+older half of the probe dispatch in `probes/probes.cpp`, which is still two walls of
+name tests written out twice and has to agree with itself. The registry, the checks
+and the per-row file layout are in place for all three; what is left is mechanical.

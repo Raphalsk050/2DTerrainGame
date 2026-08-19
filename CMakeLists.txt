@@ -57,42 +57,21 @@ FetchContent_Declare(
 
 FetchContent_MakeAvailable(raylib raylib_cpp raygui)
 
-add_executable(${PROJECT_NAME}
-    src/main.cpp
-    src/grid.cpp
-    src/marching_squares.cpp
-    src/noise_view.cpp
-    src/debug_view.cpp
-    src/canopy.cpp
-    src/commands.cpp
-    src/drop.cpp
-    src/editor.cpp
-    src/fixture.cpp
-    src/flora.cpp
-    src/grove.cpp
-    src/hotbar.cpp
-    src/hud.cpp
-    src/inventory.cpp
-    src/menu.cpp
-    src/backdrop.cpp
-    src/light.cpp
-    src/picture.cpp
-    src/probes.cpp
-    src/liquid_layer.cpp
-    src/lit_layer.cpp
-    src/player.cpp
-    src/render.cpp
-    src/scuff.cpp
-    src/console.cpp
-    src/water.cpp
-    src/vista.cpp
-    src/weather.cpp
-    src/soil.cpp
-    src/sod.cpp
-    src/world.cpp
-    src/cave.cpp
-    src/terrain.cpp
-)
+# Todo .cpp em src/ entra no build, encontrado e nao listado.
+#
+# Isto e metade do que faz uma linha de conteudo se registrar sozinha: a outra
+# metade e o `registry::Registrar` ao lado da linha (ver src/core/registry.h), e
+# esta e a que garante que o arquivo dele seja compilado. Com uma lista aqui,
+# acrescentar um item significaria editar dois arquivos que ja funcionam - o
+# CMakeLists e a tabela - que e exatamente o que o registro existe para evitar.
+#
+# CONFIGURE_DEPENDS faz o CMake reconferir o glob a cada build, entao um arquivo
+# novo aparece sem reconfigurar na mao. Custa uma varredura de diretorio por
+# build e paga por si mesma na primeira vez que alguem esquece de reconfigurar e
+# passa vinte minutos atras de um item que "nao esta registrado".
+file(GLOB_RECURSE GAME_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp)
+
+add_executable(${PROJECT_NAME} ${GAME_SOURCES})
 
 target_include_directories(${PROJECT_NAME} PRIVATE
     src
@@ -138,7 +117,7 @@ endif()
 # make its answers depend on the generator.
 add_executable(LightScenes EXCLUDE_FROM_ALL
     tools/light_scenes.cpp
-    src/light.cpp
+    src/render/light.cpp
 )
 
 target_include_directories(LightScenes PRIVATE

@@ -24,7 +24,7 @@
 // shaders and wants an OpenGL 4.3 context, so a window is opened and immediately
 // ignored.
 
-#include "light.h"
+#include "render/light.h"
 
 #include "raylib.h"
 

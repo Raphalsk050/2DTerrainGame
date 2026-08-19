@@ -15,12 +15,12 @@
 // within a texel of the width the table asked for; what was actually wrong was
 // something else. The table below settles that in one line.
 
-#include "canopy.h"
-#include "config.h"
-#include "element.h"
-#include "flora.h"
-#include "item.h"
-#include "picture.h"
+#include "flora/canopy.h"
+#include "core/config.h"
+#include "world/element.h"
+#include "flora/flora.h"
+#include "item/item_def.h"
+#include "core/picture.h"
 #include "raylib.h"
 
 #include <algorithm>
@@ -126,7 +126,7 @@ int main(int argc, char **argv) {
     // twelve materials, and the strip would otherwise run off the right-hand
     // edge and be silently clipped — which looks exactly like a table with
     // fewer materials in it than it has.
-    const int longest = 12 + static_cast<int>(std::max(kItemCount, kElementCount)) * step;
+    const int longest = 12 + std::max(item::Count(), static_cast<int>(kElementCount)) * step;
     const int width   = std::max(perSpecies * cellW, longest);
 
     Image sheet = GenImageColor(width, rows * cellH + strip, kBackdrop);
@@ -258,8 +258,8 @@ int main(int argc, char **argv) {
             }
         };
 
-        for (std::size_t i = 0; i < kItemCount; i++) {
-            blit(kItems[i].picture, 12 + static_cast<int>(i) * step, rows * cellH + 12);
+        for (int i = 0; i < item::Count(); i++) {
+            blit(item::Table().At(i).picture, 12 + i * step, rows * cellH + 12);
         }
 
         for (std::size_t e = 0; e < kElementCount; e++) {
