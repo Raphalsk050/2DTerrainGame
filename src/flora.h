@@ -330,10 +330,17 @@ struct SpeciesDef {
     // names the items one drops. So flora depends on item and never the other way
     // round, and the pairing lives on the side that can express it.
     //
-    // A species with no sapling of its own leaves this at the first item, which
-    // is not a sapling; SpeciesOf answers nothing for it and nothing can be
-    // planted that grows it. The undergrowth is that case.
-    Item sapling = Item::Wood;
+    // Nothing for a species that does not sow — the undergrowth, which grows on its
+    // own and is never planted.
+    //
+    // An optional and not a marker item. It was left at the first row of the item
+    // table on the reasoning that the first row is not a sapling, so nothing could
+    // mistake it for one — which is true and hid a typo perfectly: a species naming
+    // *any* item that is not plantable came out as a species that simply does not
+    // sow, which is a legitimate answer, so nothing anywhere could tell the two
+    // apart. Now there is a way to say "none", and saying anything else and getting
+    // it wrong is a compile error.
+    std::optional<Item> sapling{};
 
     // Stands bare in winter. A conifer does not, which is the one thing that
     // distinguishes the two through the cold half of the year.
@@ -866,12 +873,29 @@ inline constexpr float kLogSeconds = kFellSeconds / Toughest();
 // in hand, which is nothing at all — and it keeps the pairing stated exactly once,
 // in the table, rather than as a table plus a switch somewhere that has to be
 // remembered when a sixth tree arrives.
+// Every sapling a species names has to be an item the hand will plant.
+//
+// The counterpart of fixture::KindsArePlaceable, and it catches the same class of
+// mistake: a row that names the wrong item is a tree whose sapling cannot be put in
+// the ground, and the only way to find that out was to fell one and try.
+inline constexpr bool SaplingsArePlantable() {
+    for (std::size_t e = 0; e < kSpeciesCount; e++) {
+        const std::optional<Item> sapling = kSpecies[e].sapling;
+
+        if (sapling.has_value() && Def(*sapling).placement != Placement::Plant) return false;
+    }
+
+    return true;
+}
+
+static_assert(SaplingsArePlantable(), "a species names a sapling the hand will not plant");
+
 inline constexpr std::optional<Species> SpeciesOf(Item sapling) {
     for (std::size_t e = 0; e < kSpeciesCount; e++) {
         // The second test is what makes the default safe: a species with no
         // sapling of its own leaves the field at an item that is not planted, so
         // it can never answer for one.
-        if (kSpecies[e].sapling == sapling && Def(sapling).placement == Placement::Plant) {
+        if (kSpecies[e].sapling == sapling) {
             return static_cast<Species>(e);
         }
     }

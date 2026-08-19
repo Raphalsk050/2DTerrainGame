@@ -1370,8 +1370,12 @@ void Grove::Strike(Rectangle hitbox, float damage, Vector2 from, float now) {
             state.dropped  = true;
             state.fallLeft = from.x > plant.base.x;
 
-            drops_.Scatter(ItemsOf(def.sapling, 1), {plant.base.x, plant.base.y - height * 0.5f},
-                           state.fallLeft ? -1.0f : 1.0f, now);
+            // A species that does not sow drops nothing here, which is the
+            // undergrowth: it comes back on its own and never from a seed.
+            if (def.sapling.has_value()) {
+                drops_.Scatter(ItemsOf(*def.sapling, 1), {plant.base.x, plant.base.y - height * 0.5f},
+                               state.fallLeft ? -1.0f : 1.0f, now);
+            }
 
             return;
         }

@@ -58,6 +58,20 @@ inline constexpr std::size_t kKindCount = static_cast<std::size_t>(Kind::Count);
 struct Def {
     const char *name;
 
+    // The item this is put up from.
+    //
+    // Named rather than matched. It used to be found by comparing this row's `name`
+    // against the item's, which worked and was a trap with a very long fuse: the two
+    // tables were tied together by a *string*, so renaming either — the sort of thing
+    // done without thinking, in a commit about wording — silently broke the link, and
+    // what a player saw was a torch that could no longer be placed. Nothing in either
+    // file said the names had to agree.
+    //
+    // Adding a fixture is now: a row here that names its item, and a row in item.h
+    // with `.placement = Placement::Fixture`. The static_assert below fails the build
+    // if the second half is forgotten.
+    Item from;
+
     Picture picture;
 
     // Which surfaces will hold it.
@@ -72,6 +86,7 @@ struct Def {
 inline constexpr Def kKinds[] = {
     {
         .name = "torch",
+        .from = Item::Torch,
 
         // The row the old element carried, kept exactly: a flame over a shaft,
         // with the shaft the darkest of its own four rather than a brown fetched
@@ -118,15 +133,28 @@ inline constexpr const Def &Of(Kind kind) {
 // somebody thinking about different things, and the first row inserted above
 // either of them silently makes torches out of apples. A name is the one thing
 // about a row that is already required to be what it says.
-inline std::optional<Kind> KindOf(Item item) {
-    // `::Def` and not `Def`, which in here is this namespace's own row type. The
-    // one being asked for is item.h's accessor.
+inline constexpr std::optional<Kind> KindOf(Item item) {
     for (std::size_t k = 0; k < kKindCount; k++) {
-        if (TextIsEqual(kKinds[k].name, ::Def(item).name)) return static_cast<Kind>(k);
+        if (kKinds[k].from == item) return static_cast<Kind>(k);
     }
 
     return std::nullopt;
 }
+
+// Every fixture's item has to be one the hand will put down.
+//
+// A row here with an item whose `placement` is not Fixture is a fixture that can be
+// carried and never placed, and the only way to find that out was to carry it and
+// click. It is a compile error now.
+inline constexpr bool KindsArePlaceable() {
+    for (std::size_t k = 0; k < kKindCount; k++) {
+        if (::Def(kKinds[k].from).placement != Placement::Fixture) return false;
+    }
+
+    return true;
+}
+
+static_assert(KindsArePlaceable(), "a fixture names an item the hand will not put down");
 
 // One fixture, standing in one cell of the build grid.
 struct Placed {
