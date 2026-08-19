@@ -1269,6 +1269,33 @@ creative palette. A sapling additionally needs its species in `flora::SpeciesOf`
 and a fixture its kind in `fixture::KindOf`: both are one line, and both are the
 seam between two tables that deliberately do not know about each other.
 
+### 16.2b A row names what it needs, and the build checks that it can
+
+Two tables join the item table from outside it, and both used to join it *loosely*:
+
+- **A fixture** found its item by comparing name strings — `TextIsEqual(kKinds[k].name,
+  Def(item).name)`. It worked, and it was a trap with a long fuse: the two tables
+  were tied together by a word, so renaming either one, in a commit about wording,
+  silently broke the link. What a player saw was a torch that could no longer be
+  placed, and nothing in either file said the names had to agree. `Def::from` names
+  the item now.
+- **A species** left its sapling at the first row of the item table to mean "does not
+  sow", on the reasoning that the first row is not a sapling. True, and it hid a typo
+  perfectly: a species naming *any* item that is not plantable read as a species that
+  does not sow, which is a legitimate answer, so nothing could tell the two apart. It
+  is a `std::optional<Item>` now — there is a way to say none, and getting it wrong
+  is no longer a way of saying it.
+
+Both are backed by a `static_assert` that walks the table at compile time:
+`fixture::KindsArePlaceable` and `flora::SaplingsArePlantable`. Both were checked by
+breaking a row deliberately and watching the build fail, which is the only way to
+know a guard guards anything.
+
+**The rule these three share** — with the palette assert in `inventory.h` and
+`ElementDef::loose` above — is that adding a row should either work or fail to
+compile. Anything in between is a row that looks added and is not, and every one of
+them cost the same day of looking in the wrong place.
+
 ### 16.3 What to check after adding one
 
 - `--tones` — that its paint divides between form and texture the way the others do.
