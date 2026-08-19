@@ -1659,6 +1659,7 @@ int main(int argc, char **argv) {
     }
 
     world.UnloadPainted();
+    world.UnloadVista();
     grove.Unload();
     liquids.Unload();
     lit.Unload();

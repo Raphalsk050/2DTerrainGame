@@ -44,8 +44,9 @@ namespace {
 // only be judged by standing in the game at the right hour under the right spell.
 // Which is to say: not judged, argued about.
 //
-// Drawn through the real path, in the frame's own order: the air, then the cloud
-// inside the light, then the stars over both.
+// Drawn through the real path, in the frame's own order: the air, the ranges
+// standing in front of it, then the cloud inside the light, then the stars over
+// all three.
 void DrawSky(World &world, Rectangle strip, const char *path, int zoom, int mood, float hours) {
     if (mood >= 0) world.ForceWeather(mood);
 
@@ -72,6 +73,7 @@ void DrawSky(World &world, Rectangle strip, const char *path, int zoom, int mood
     BeginMode2D(camera);
 
     world.Sky().DrawAtmosphere(strip);
+    world.Vista().Draw(strip, world.Sky());
     world.Sky().DrawClouds(strip, world.Spacing());
     world.DrawStars(strip);
 
@@ -105,7 +107,7 @@ void DrawSky(World &world, Rectangle strip, const char *path, int zoom, int mood
 // doing and what the light is doing to it are two questions, and answering them
 // together is how a palette gets tuned against a time of day.
 void DrawProbe(World &world, Grove &grove, Inventory &gathered, Rectangle strip, const char *path, int zoom,
-               float seconds, bool plants, int lit, int mood, int quarter) {
+               float seconds, bool plants, int lit, int mood, int quarter, bool sky) {
     // Held at one weather and one season where asked for, and this is what makes the
     // probe worth anything for judging the wind: what a gale does is only legible
     // against the calm afternoon beside it, and two pictures taken of whatever the
@@ -143,6 +145,13 @@ void DrawProbe(World &world, Grove &grove, Inventory &gathered, Rectangle strip,
 
     // The sky's own colour, so the silhouette of the ground reads against
     // something rather than against black.
+    //
+    // A flat colour and not the real air, and `sky` is what asks for the real one
+    // instead. Off by default deliberately: every reference picture this probe has
+    // ever taken was taken against this exact blue, and the whole use of them is
+    // that two runs of it are compared byte for byte — so the day, the weather and
+    // the ranges behind the world all have to stay out of the picture unless they
+    // are what is being looked at.
     ClearBackground({92, 132, 176, 255});
 
     // The plants too, and in the order the frame draws them, because half the
@@ -153,6 +162,15 @@ void DrawProbe(World &world, Grove &grove, Inventory &gathered, Rectangle strip,
     const auto season = static_cast<flora::Season>(world.Sky().Turn().index);
 
     BeginMode2D(camera);
+
+    // The air and the far country over it, in the frame's own order, for a picture
+    // of the world as it is actually seen rather than of the ground alone.
+    if (sky) {
+        world.Sky().DrawAtmosphere(strip);
+        world.Vista().Draw(strip, world.Sky());
+        world.Sky().DrawClouds(strip, world.Spacing());
+    }
+
     world.DrawTerrain(strip);
     sod::DrawTufts(world.Grass(), strip, world.Sky().Time(), world.Settings().seed);
 
@@ -1616,7 +1634,8 @@ void ReportFrame(World &world, Grove &grove, Inventory &gathered, Vector2 at, in
 } // namespace
 
 bool probes::Headless(int argc, char **argv) {
-    // `--probe x y w h out.png` draws one strip of the world to a file and exits.
+    // `--probe x y w h out.png [zoom] [seconds] [plants] [lit] [mood] [season] [sky]`
+    // draws one strip of the world to a file and exits.
     // See DrawProbe. Read here rather than after the window opens, so the probe
     // can ask for a hidden one: it wants a GL context and nothing else.
     const bool probing = argc >= 7 && TextIsEqual(argv[1], "--probe");
@@ -1679,7 +1698,8 @@ std::optional<int> probes::Run(int argc, char **argv, World &world, Grove &grove
                                const weather::Settings &sky) {
     (void)sky;
 
-    // `--probe x y w h out.png` draws one strip of the world to a file and exits.
+    // `--probe x y w h out.png [zoom] [seconds] [plants] [lit] [mood] [season] [sky]`
+    // draws one strip of the world to a file and exits.
     // See DrawProbe. Read here rather than after the window opens, so the probe
     // can ask for a hidden one: it wants a GL context and nothing else.
     const bool probing = argc >= 7 && TextIsEqual(argv[1], "--probe");
@@ -2236,7 +2256,7 @@ std::optional<int> probes::Run(int argc, char **argv, World &world, Grove &grove
             // Weather forced clear, or what falls out of the sky lands in the
             // picture: at this height a shower draws streaks straight down the
             // wall, and they read as seams in the drawing rather than as rain.
-            DrawProbe(world, grove, unused, strip, argv[4], 4, 0.0f, false, 0, 0, 0);
+            DrawProbe(world, grove, unused, strip, argv[4], 4, 0.0f, false, 0, 0, 0, false);
 
             std::printf("wrote %s\n", argv[4]);
         }
@@ -2344,7 +2364,8 @@ std::optional<int> probes::Run(int argc, char **argv, World &world, Grove &grove
         DrawProbe(world, grove, probed, strip, argv[6], (argc >= 8) ? std::atoi(argv[7]) : 1,
                   (argc >= 9) ? static_cast<float>(std::atof(argv[8])) : 0.0f,
                   (argc >= 10) ? (std::atoi(argv[9]) != 0) : true, (argc >= 11) ? std::atoi(argv[10]) : 0,
-                  (argc >= 12) ? std::atoi(argv[11]) : -1, (argc >= 13) ? std::atoi(argv[12]) : -1);
+                  (argc >= 12) ? std::atoi(argv[11]) : -1, (argc >= 13) ? std::atoi(argv[12]) : -1,
+                  (argc >= 14) && std::atoi(argv[13]) != 0);
 
         return 0;
     }

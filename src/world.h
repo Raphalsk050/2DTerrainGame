@@ -7,6 +7,7 @@
 #include "sod.h"
 #include "soil.h"
 #include "terrain.h"
+#include "vista.h"
 #include "water.h"
 #include "weather.h"
 
@@ -345,6 +346,20 @@ public:
     void StepWeather(float dt);
 
     const weather::Sky &Sky() const { return sky_; }
+
+    // The ranges standing behind the world.
+    //
+    // Owned here for the same reason the sky is: they are configured against the
+    // terrain — the climate at a column decides what colour the far country is —
+    // so a rebuild has to reach them, and a caller holding its own copy is a
+    // second world that can disagree with this one about which one it is.
+    void SetVista(const vista::Settings &settings) { vista_.Configure(settings, settings_); }
+
+    const vista::Range &Vista() const { return vista_; }
+
+    // Releases the texture the ranges are blitted from, beside UnloadPainted and on
+    // the same terms: the world owns it, so the world is where it is given back.
+    void UnloadVista() { vista_.Unload(); }
 
     // Runs the day on to its next quarter. For looking at a transition rather than
     // waiting for it; the weather and the clouds are not disturbed.
@@ -1245,6 +1260,7 @@ private:
     light::Field lightField_;
 
     weather::Sky sky_;
+    vista::Range vista_;
 
     // Every vertex the player has changed, grouped by the chunk it is filed
     // under. The whole of what this world cannot derive from its own noise.

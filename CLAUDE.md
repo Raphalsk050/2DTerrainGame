@@ -1138,6 +1138,7 @@ The rest went to files named after the one thing they do:
 | `render.{h,cpp}` | the order the world is drawn in | 260 |
 | `hud.{h,cpp}` | what is drawn in the frame's coordinates rather than the world's | 190 |
 | `menu.{h,cpp}` | the screens in front of the game, and the stack | 600 |
+| `vista.{h,cpp}` | the ranges behind the world, and the distance they buy | 1,030 |
 | `view.h` | what the frame covers, in world units | 40 |
 | `mode.h` | which of the two sets of rules a world is played under | 30 |
 
@@ -1302,3 +1303,235 @@ them cost the same day of looking in the wrong place.
 - `--build --png` — that a wall of it is drawn on the same grid as everything else.
 - `--covers` or `--ore`, if it generates — that it appears at the rate its row claims.
 - The palette, in creative: it should be there without anything being told about it.
+
+---
+
+## 17. The horizon is scenery, and it is the world's own tables in another shape
+
+`src/vista.h` and `src/vista.cpp`. Five ranges of mountains standing between the
+air and the world, each moving at its own speed as the view goes past it.
+
+It buys the one thing the generator cannot give at any price: **distance**. The
+world is a single plane, so everything in it moves with the camera at exactly one
+pixel per pixel, and a landscape where nothing is further away than anything else
+reads as a cross-section rather than as a place.
+
+Nothing here is generated, stored, collided with, lit, dug or built on. A range is
+a heightfield along x evaluated where it is drawn and thrown away, so the module
+has no state but its settings and the scratch it rasterises into.
+
+### 17.1 It is drawn in front of the air and behind the world
+
+Which puts it on the **unlit** side of the frame, beside the sky, and that is the
+whole of why it costs nothing to keep in step with the day:
+
+- What lights a mountain forty screens off is not the lantern in the player's hand.
+- The haze it dissolves into is the very air drawn behind it — `Sky::AirAt`, at the
+  texel's own height, snapped to the same ten-pixel band `DrawAtmosphere` uses. So
+  an overcast afternoon greys the horizon and a sunset burns it, and neither is
+  written down in `vista.h`.
+- It takes the day from the same `Daylight::light` the atmosphere is scaled by, so
+  dusk falls on the ranges and the sky together. **Over the whole colour and not
+  over the haze alone**, which is the shape of the bug this shipped with: the day
+  was applied to `air_` when it was filled, so a far row — which is mostly haze —
+  went dark on time while a near row, which is barely any, stayed at noon. What that
+  looked like at midnight was the foothills glowing on a black hillside, and it read
+  as the near rows being wrong rather than as the day being applied in the wrong
+  place. The air is now kept at full brightness and the finished texel is scaled,
+  which is the order `DrawAtmosphere` does it in.
+- The light on a face is `Daylight::sun` — the ranges light from the left in the
+  morning and the right in the afternoon, off the same vector the clouds are shaded
+  by. Nothing had to be told about the hour.
+
+Being drawn before `LitLayer::Compose` is what puts it behind every cloud, every
+hillside and every tree without any of them being asked.
+
+**The stars are the exception, and they had to be told.** They are drawn *after*
+the light — see `weather.h` for why — so they are no longer hidden by something
+simply because it was drawn later. `Sky::DrawStars` already asks the land and the
+cloud; `World::DrawStars` now folds `Range::CrestAt` into the ground profile it
+hands over. Written into the profile rather than tested separately, because the
+profile is exactly the question "how high is the world over this column" and a
+mountain on the skyline is the world over that column. Nothing in `weather.h`
+learns that ranges exist.
+
+### 17.2 The palette and the shape are both read out of the tables
+
+There is no biome name here either, and for §8's reasons:
+
+| what | read from |
+|---|---|
+| the low ground's colour | `sod::LookAt` — the same meadow / steppe / taiga / desert mix that colours the grass at the player's feet, season and drought included |
+| the rock above it | the rock row's `paint.tone`, through `soil::Build` |
+| the snow on top | the snow row's `paint.tone`, gated by the snow row's own climate bell |
+| **whether it is a range or a dune field** | the sand row's own climate bell — the very one that puts sand on the ground |
+
+Every one of them is read at the row's own country rather than at the drawn
+position, which is §17.2b and is not optional.
+
+So walking from a pine forest into a desert turns the horizon with the ground, and
+a cover added to `sod::kCovers` appears in the distance without this file being
+opened.
+
+**A desert's horizon is not a mountain range in sand colours.** That is the same
+fault §8 calls a wood in the desert, one level up: a palette says what a place is
+made of and a *shape* says what it is. So the ridged fold is blended out against
+the sand bell into a plain summed field — no crease anywhere on it, broader by
+half, and the whole lift scaled to two fifths, foot and all. Three numbers,
+`duneRound`, `duneSpan` and `duneRise`, and each says one thing a dune is. The
+altitude band goes with it: `alt *= 1 - dunes`, because sand has no treeline and a
+grey top would put a crag back in the one place the shape was changed to take it
+out of.
+
+`Settings::duneEdge` is the one place the horizon is allowed to **disagree** with
+the table it reads. §8 wants the ground's desert to have an edge; a silhouette is
+the opposite case, because the ranges come down by three fifths across it — at the
+ground's own width the skyline falls off a cliff inside one screen and reads as a
+wall rather than as a country changing.
+
+### 17.2b A range must stand still, and that decides where the climate is read
+
+The fault, in one sentence: **a mountain stayed put on the skyline while its snow,
+its colour and its very outline slid about underneath it**, so the distant country
+rearranged itself while the player walked.
+
+Everything about the *shape* was already a pure function of `sample`, the layer's
+own content coordinate — the fold, the swell, the dune field, the two wandering
+lines. What was not was the climate, which was read at the **drawn** position. A
+layer's content moves at its own fraction of the camera, so a fixed piece of a far
+range is drawn at a world position that runs away from it at nine tenths of walking
+pace; asking the climate there asks about somewhere else, and the answer changes
+every frame. That the rest was already still is exactly why it read as one feature
+misbehaving rather than as the scenery moving.
+
+`Range::Country` is the fix and it has two halves:
+
+- **Ask at `sample`.** Nailed to the layer, so a given piece of a range has one
+  climate for ever and nothing about it can change while the camera moves.
+- **Divide by the distance.** Without it a far row would traverse its own country at
+  a tenth of walking pace and a desert twenty screens across would show a fifth of
+  itself on the horizon. With it, one screen of a row covers as much country as its
+  distance says it does, the biome under the player's feet and the biome on the
+  skyline change over the same walk, and a far row shows a wider sweep of the world
+  across one screen than a near one — which is what distance means.
+
+`--sky` checks it, and the check is worth keeping: render the same world at two
+camera positions `Δ` apart and compare the top band against itself offset by
+`distance × Δ`. For the far row at Δ = 7000 that is 700 px, and the pictures agree
+to under two per cent — the residue being the nearer rows, which move by their own
+amounts.
+
+**And read it flat, without the altitude term.** `terrain::ClimateAt` cools its
+answer by the elevation of the ground under it, which is right for the ground and is
+a cliff generator here: a far row's country runs ten pixels for every one of the
+view, so `terrain::Height` along it swings a hillside's worth between neighbouring
+columns, and through the lapse rate that is a third of the temperature range — which
+flips the desert on and off column by column and, since being a desert scales the
+whole row, draws a wall of vertical slabs and one-column needles where a range should
+be. It is also the wrong question: the lapse says how the air cools over the ground
+*at that column*, and a range on the horizon is not standing on that ground. Its own
+altitude is its own business, and the snow line already asks it as a height in the
+row's own frame. `Range::Regional` reads the two fields at sea level.
+
+### 17.2c The dither is a lattice, and it belongs to the row and not to the world
+
+The complaint was that the ranges were seen **through sandblasted glass** — a fixed
+speckled pane in front of the scenery, with the mountains sliding along behind it.
+It is one fault and it took two goes, and the wrong go is the instructive one.
+
+The first reading was that an *ordered* pattern is what magnifies into a screen
+door: at one screen pixel per world pixel a Bayer 4x4 reads as a shade between two
+tones, and at three, where a texel is nine pixels across, it reads as a grid. So the
+matrix was swapped for a hash of the texel's position. That did take the grid out
+and it took the drawing with it — an ordered dither is what carries a value cleanly
+between two tones, and the same proportion of texels scattered at random reads as
+dirt on the picture rather than as a shade.
+
+**The lattice was never the fault. The frame was.** The threshold was keyed on the
+*world's* texel indices, which is right for the terrain and wrong for anything
+moving at its own speed: the pattern stayed where it was while the row slid past
+underneath, so what the eye had to explain was a stationary pane in front of moving
+scenery. A regular pane is simply a more legible one than a random pane, which is
+why changing the pattern seemed to help and why it was the wrong thing to change.
+
+The matrix is back, read in the row's own texel frame — the world's, shifted by the
+part of the camera that row does not take, rounded to whole texels because the
+pattern is a lattice of them. A fractional shift would resample it every frame,
+which is a shimmer and a worse fault than the drift.
+
+**And the rigidity check in §17.2b was blind to it**, which is worth knowing before
+trusting that check again. It compared camera offsets of 1000 and 7000 px; the far
+row's content moves 900 and 6300 world pixels, which are 300 and 2100 texels, and
+both are multiples of four — so the matrix happened to land back on itself and the
+pictures matched anyway. A Δ that moves the content a number of texels **not**
+divisible by four is what catches it: at Δ = 30 the content moves nine texels and
+the row moves three pixels on screen, and the pictures now agree to a tenth of a
+per cent.
+
+### 17.3 Near to far, with a ceiling per column
+
+Every row is opaque, so a texel covered by the range in front of it is a texel the
+ones behind never have to be asked about. The stack is walked **near to far** and
+each column keeps the first row not yet painted; a layer only shades what is still
+open above it, and every texel of the view is shaded exactly once. Drawn the
+natural way round — far to near, each row painting over the last — the same texel
+is shaded five times and four of those are thrown away.
+
+Each column is then **cut at the generated surface** (`terrain::Height + sink`),
+which is what keeps the cost to the sky it is actually drawn in: everything below
+is covered opaquely by the terrain or by `World::DrawUnderground` behind it. The
+*generated* surface and not the built one, deliberately — a hole somebody dug shows
+the deep rock the underground fill paints, and a range seen through a doorway would
+be a mountain inside the hill.
+
+### 17.4 It is a texture, and the runs are why
+
+It was submitted as runs of one colour first, on the model of every other
+rasteriser here. That measured **10.0 ms a frame** — a third of it — for one layer
+of scenery.
+
+The reason is in the haze: it mixes towards the air, the air is drawn in ten-pixel
+bands, and a texel is three, so **the colour changes every third row however flat
+the mountain is** and no run can ever be longer than that. Eighty thousand
+rectangles a frame is not a rasterisation strategy.
+
+The picture goes into a `Texture2D` instead and is blitted once: 10.0 ms to 0.11 ms,
+and the whole horizon is **2.2 ms** of a 20 ms frame — 11% of it, nearly all in the
+shading. It is exactly the argument
+§5.5 makes about the ground — one texel per square of the grid the colour was
+worked out on, point sampled, blitted at that scale, so the picture is identical to
+the rectangles it replaces — with the one difference that this **cannot be cached
+between frames**, because the parallax moves it and the day recolours it. What the
+texture saves is submission, and submission was all of the cost.
+
+The buffer is therefore **row major** and the shading takes the stride, rather than
+the other way round.
+
+### 17.5 Two things that were measured, not argued
+
+- **Jitter a line with `Signed`, never with `Sample - 0.5`.** The folded field is
+  crowded hard around its own midpoint, so `Sample - 0.5` visits about a seventh of
+  its nominal swing — a snow line jittered by 130 px came out very nearly straight,
+  a ruled horizontal edge across every peak on the screen. It is the same trap the
+  wind envelope and the cloud cutoffs are measured to avoid, arrived at from the
+  other side: there the fix is to measure the field, here it is to use the one whose
+  zero set is reachable.
+- **One octave of mottle.** It is the only term read per *texel* rather than per
+  column, so it is the whole of what the shading costs: 1.77 ms at two octaves
+  against 1.53 at one, for detail finer than the mottle is meant to have.
+
+### 17.6 What to check
+
+`--sky x y w h out.png [zoom] [mood] [hours]` draws the air, the ranges and the
+cloud in the frame's own order.
+
+`--probe x y w h out.png [zoom] [seconds] [plants] [lit] [mood] [season] [sky]` —
+the trailing `sky` is new and is **off by default**, deliberately. Every reference
+picture that probe has ever taken was taken against its flat blue, and the whole use
+of them is that two runs are compared byte for byte; the day, the weather and the
+ranges all have to stay out of the picture unless they are what is being looked at.
+With it on, it is the only still picture of the world as it is actually seen.
+
+Read `--covers x0 x1 step` first to find the country worth photographing. A desert
+is 2% of columns in this world, so a horizon of dunes is not something to go looking
+for by eye.

@@ -170,6 +170,9 @@ World::World(const terrain::Settings &settings, int spacing) : settings_(setting
     // Default weather, so the sky is never standing over a world it was not told
     // about. SetWeather replaces the settings and keeps the same terrain.
     sky_.Configure(weather::Settings{}, settings_);
+
+    // And the ranges behind it, on the same terms and for the same reason.
+    vista_.Configure(vista::Settings{}, settings_);
 }
 
 namespace {
@@ -355,6 +358,14 @@ void World::BeginRebuild(const terrain::Settings &settings) {
     const weather::Settings weather = sky_.Config();
 
     sky_.Configure(weather, settings_);
+
+    // The horizon with it. Its palette is read out of the climate at a column, so a
+    // range left configured against the old country is the wrong colour in the new
+    // one — and it is the sort of wrong that looks like a bad seed rather than like
+    // a bug. See CLAUDE.md §14.1.
+    const vista::Settings ranges = vista_.Config();
+
+    vista_.Configure(ranges, settings_);
 
     Reset();
 
@@ -3787,7 +3798,27 @@ void World::DrawRain(Rectangle view) const {
 void World::DrawStars(Rectangle view) const {
     // No lean to allow for — a star is drawn where it is — so the view itself is the
     // whole of what has to be covered.
-    sky_.DrawStars(view, GroundUnder(view, 0.0f));
+    weather::Ground ground = GroundUnder(view, 0.0f);
+
+    // With the ranges folded into it, which is the one thing being drawn after the
+    // light costs. A star is no longer hidden by something simply because that
+    // something was drawn later, so everything that should hide one has to be asked
+    // — the sky already asks the land and the cloud, and the horizon is the third.
+    //
+    // Written into the profile rather than tested separately because the profile is
+    // exactly the question "how high is the world over this column", and a mountain
+    // on the skyline is the world over that column. Nothing in weather.h has to
+    // learn that ranges exist.
+    if (vista_.Visible(view)) {
+        for (int column = 0; column < ground.count; column++) {
+            const float x = ground.originX + static_cast<float>(column) * ground.spacing;
+
+            surface_[static_cast<std::size_t>(column)] = std::min(surface_[static_cast<std::size_t>(column)],
+                                                                  vista_.CrestAt(x, view));
+        }
+    }
+
+    sky_.DrawStars(view, ground);
 }
 
 void World::DrawMist(Rectangle view) const {

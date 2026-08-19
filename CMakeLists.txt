@@ -85,6 +85,7 @@ add_executable(${PROJECT_NAME}
     src/scuff.cpp
     src/console.cpp
     src/water.cpp
+    src/vista.cpp
     src/weather.cpp
     src/soil.cpp
     src/sod.cpp

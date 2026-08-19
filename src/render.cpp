@@ -222,6 +222,22 @@ void render::Scene(const World &world, const Grove &grove, const Inventory &inve
     // see World::DrawUnderground, which is where the two are told apart.
     world.Sky().DrawAtmosphere(view);
 
+    // And the far country in front of it, which is the only other thing in the
+    // frame drawn in world space and left out of the light.
+    //
+    // It belongs on this side of the line for the reason the sky does rather than
+    // in spite of it: what lights a range forty screens off is not the lantern in
+    // the player's hand, and the haze it dissolves into is the very air drawn
+    // behind it. It takes the day from the same number the atmosphere is scaled
+    // by, so dusk falls on the horizon and the sky together — and being drawn
+    // before the lit layer is composited is what puts it behind every cloud, every
+    // hillside and every tree without any of them being asked.
+    {
+        PROFILE_ZONE("DrawVista");
+
+        world.Vista().Draw(view, world.Sky());
+    }
+
     EndMode2D();
 
     // Then the world over it, already lit, in one blend.
