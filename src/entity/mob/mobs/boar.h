@@ -78,7 +78,7 @@ inline constexpr mob::Def kBoar = {
 
     .haunt =
         {
-            .chance = 0.55f,
+            .chance = 0.15f,
 
             // At the surface and a little above it: the band straddles zero so that
             // a spot on a slope still qualifies.
@@ -100,13 +100,22 @@ inline constexpr mob::Def kBoar = {
                         .fullAt           = 0.45f,
                         .goneAt           = 0.20f},
 
-            // Two to four. A sounder, which is what boars come in, and what makes a
-            // meadow read as inhabited rather than as somewhere one animal happens
-            // to be standing.
+            // Two or three. A sounder, which is what boars come in, and what makes a
+            // meadow read as inhabited rather than as somewhere one animal happens to
+            // be standing.
+            //
+            // Read against the chance above and the size of a cell: a settling cell is
+            // 512 px, a screen is a little under four of them, and at 0.15 that is one
+            // sounder every couple of screens in country that suits them at all. Any
+            // denser and a walk is a procession of boars.
+            //
+            // The chance was 0.55 until the cell hash was fixed — see `warren.cpp`. It
+            // had been tuned against a world where whole rows of cells could never hold
+            // anything, so it was compensating for a bug and the real density was never
+            // once seen.
             .least = 2,
-            .most  = 4,
+            .most  = 3,
 
-            .crowd = 8,
         },
 };
 

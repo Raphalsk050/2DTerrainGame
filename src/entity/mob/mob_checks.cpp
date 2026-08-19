@@ -85,8 +85,6 @@ std::string HauntsAreReachable() {
             fault = "its light band runs backwards";
         } else if (haunt.least < 1 || haunt.most < haunt.least) {
             fault = "its group size cannot happen";
-        } else if (haunt.crowd < haunt.most) {
-            fault = "its crowd limit is smaller than one group";
         } else if (haunt.climate.goneAt > 1.0f) {
             fault = "its climate is never suitable enough to appear";
         }

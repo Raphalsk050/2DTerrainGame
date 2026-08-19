@@ -3,6 +3,7 @@
 #include "core/config.h"
 #include "world/world.h"
 
+#include <algorithm>
 #include <cmath>
 
 namespace {
@@ -25,6 +26,17 @@ constexpr float kSightMost = 420.0f;
 // why this is a red that removes the green and blue rather than a white that could
 // not brighten anything. See `figure::Draw`.
 constexpr Color kStung = {255, 96, 96, 255};
+
+// How often a creature nobody is looking at makes up its mind, in seconds.
+//
+// Five times a second. Slow enough to cost nothing and fast enough that a boar off
+// screen still turns at a cliff before walking off it — its own nav plan looks a
+// stride and a half ahead, and at its bolt that is over a fifth of a second of
+// travel.
+//
+// A creature that is being watched thinks every frame, because a hunter that decided
+// five times a second reads as one that keeps changing its mind.
+constexpr float kFarThink = 0.2f;
 
 bool Sees(const World &world, Vector2 from, Vector2 to) {
     const float dx = to.x - from.x;
@@ -69,6 +81,33 @@ void mob::Mob::Wake(Kind kind, Vector2 at, std::uint32_t seed) {
     live_      = true;
 }
 
+mob::Life mob::Mob::Remember() const {
+    Life life;
+
+    life.kind   = kind_;
+    life.at     = body_.Position();
+    life.health = health_.now;
+    life.wits   = wits_;
+
+    return life;
+}
+
+void mob::Mob::Restore(const Life &life) {
+    body_.PlaceAt(life.at);
+
+    // Clamped rather than trusted. A row whose `hardy` was lowered between one visit
+    // and the next would otherwise hand back a creature with more health than its
+    // kind can have, which nothing downstream is written to expect.
+    health_.now = std::clamp(life.health, 0, health_.most);
+
+    wits_ = life.wits;
+
+    // Whatever it was in the middle of, it is not in the middle of a leap: it has
+    // been standing still since the view left. Carrying the timer across would have
+    // it hold a jump it never took.
+    wits_.legs = {};
+}
+
 bool mob::Mob::Take(const life::Blow &blow) {
     if (!live_) return false;
     if (!health_.Hurt(blow.damage)) return false;
@@ -92,7 +131,7 @@ bool mob::Mob::Take(const life::Blow &blow) {
     return true;
 }
 
-bool mob::Mob::Update(const World &world, Vector2 quarry, bool quarryVisible, float now, float dt) {
+bool mob::Mob::Update(const World &world, Vector2 quarry, bool quarryVisible, bool watched, float now, float dt) {
     if (!live_) return false;
 
     const Def &def = Made();
@@ -139,18 +178,46 @@ bool mob::Mob::Update(const World &world, Vector2 quarry, bool quarryVisible, fl
 
     // Distance first, then the walk along the line — in that order, because the
     // distance is three multiplies and the walk is a few dozen world lookups.
-    sense.seesQuarry = quarryVisible && sense.toQuarry <= def.notices * 1.6f
-                       && Sees(world, centre, quarry);
+    //
+    // And not at all where the brain never reads the answer, which is two of the three
+    // behaviours. See `Brain::Notices`: this was the most expensive thing a creature
+    // did, and most creatures were paying it to produce a number nothing looked at.
+    sense.seesQuarry = quarryVisible && brain_ != nullptr && brain_->Notices()
+                       && sense.toQuarry <= def.notices * 1.6f && Sees(world, centre, quarry);
 
     sense.world = &world;
     sense.now   = now;
     sense.dt    = dt;
 
-    const body::Intent intent = (brain_ != nullptr) ? brain_->Think(sense, wits_) : body::Intent{};
+    thinkIn_ -= dt;
 
-    // Cleared after the think and not before it: a blow that lands between two
-    // frames has to survive until the brain has been asked once.
+    // Asked again, or carrying on with what it last decided. A creature being watched
+    // is asked every frame; one that is not is asked a few times a second and walks
+    // on its last wish in between. See `kFarThink`.
+    //
+    // Being hurt always breaks the wait: an animal that took a blow and then spent a
+    // fifth of a second finishing its stroll is an animal that did not notice.
+    if (watched || thinkIn_ <= 0.0f || stung_) {
+        // The dt handed to the brain is the whole stretch it is deciding for, not the
+        // frame — otherwise every timer inside a behaviour runs at a fifth speed for
+        // a creature off screen, and a fright that should last three seconds lasts
+        // fifteen.
+        sense.dt = watched ? dt : std::max(dt, kFarThink - thinkIn_);
+
+        wish_    = (brain_ != nullptr) ? brain_->Think(sense, wits_) : body::Intent{};
+        thinkIn_ = watched ? 0.0f : kFarThink;
+    }
+
+    // Cleared after the think and not before it: a blow that lands between two frames
+    // has to survive until the brain has been asked once.
     stung_ = false;
+
+    // A jump is a press and a press is one frame. Left standing, the wish a distant
+    // creature is carrying would ask for a jump on every frame until it is asked
+    // again, which at a fifth of a second is twelve jumps for one decision.
+    const body::Intent intent = wish_;
+
+    wish_.jumpPressed = false;
 
     body_.Step(intent, world, dt);
 

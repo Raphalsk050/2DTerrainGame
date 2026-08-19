@@ -1774,9 +1774,17 @@ grass's country are two facts that can disagree. See §8.
 
 ### 21.1 A behaviour is a file, and a creature is not
 
-`src/entity/mob/brains/`. Three today — `drifter` wanders, `skittish` grazes until it
-is hurt and then bolts, `stalker` closes and strikes. A creature that behaves like an
-existing one costs nothing here; a *new* behaviour is one file and its registrar.
+`src/entity/mob/brains/`. Two today — `drifter` wanders, `skittish` grazes until it is
+hurt and then bolts. A creature that behaves like an existing one costs nothing here; a
+*new* behaviour is one file and its registrar.
+
+There was a `stalker` that hunted the player, and a shade that used it, and a bat. All
+three were taken out on the strength of playing them: a hostile creature is a decision
+about what the game *is*, and it was made too early. Nothing else moved when they went
+— no table, no enum, no build file — which is the registry doing exactly what it is
+for. Note what the removal left behind: `Brain::Notices`, `Build::floats` and the
+whole floating branch of the navigator are all still there and still correct, because
+they were written as facts about a body rather than as facts about a bat.
 
 **A brain is stateless and shared.** One `Drifter` answers for every bat in the world,
 so it must hold nothing about any of them — everything a behaviour remembers goes in
@@ -1792,54 +1800,386 @@ the size of the pool, and would let a boar react to a boar off screen. Nothing
 mutable. No input. Widen that struct and every behaviour in the project quietly gains
 a new way to be surprising.
 
-### 21.2 The spawner samples the band, it does not reject against it
+### 21.2 A place has a population, not a spawn rate
 
-This shipped broken, and the fault is worth keeping written down because there was
-nothing on screen and nothing in any log to point at.
+The spawner was **stateless** and that was the whole fault. It tried a random spot
+every second or so and let anything outside the view go, so walking a few screens
+and back gave a different set of animals every time, killing one was undone by
+turning round, and a stretch of country had no population so much as a *rate*. None
+of that is what a world is.
 
-`spawn::Try` used to pick a uniform point in the simulated region and test it against
-the row. A boar's depth band is 56 pixels of a region thirteen hundred deep, so about
-one candidate in twenty-five was even in the right place; with six tries, about two
-attempts in a hundred succeeded. **What that looked like was an empty world.** No
-error, no warning, and `--mobs` reporting the country as perfectly suitable — because
-the country *was* suitable, and the spawner was never asking about it.
+`mob::Warren` replaces it, and the design is one field of `mob::Patch`:
 
-The height is now taken from the row's own band, measured off the surface at the
-chosen column. Every candidate is in the band by construction, and the refusals are
-left to be about things worth refusing: rock, light, climate. `herd.Update` went from
-0.001 ms a frame doing nothing to 0.018 ms with creatures in the world, which is 0.1%
-of it.
+- **The world is cut into cells**, 512 by 384. Two bands of them cover the surface
+  and the caves under it separately, so walking about on top does not keep waking
+  the bats underneath.
+- **`Patch::settled` is one bit per creature kind**, set the first time that kind's
+  population was rolled in that cell, and **never cleared**. That single bit is the
+  whole of "the dead stay dead": nothing will ever ask this cell for boars again, so
+  the ones that were killed do not come back. No death is written down anywhere —
+  the record of a creature is its absence.
+- **The roll is a pure function of `(cell, kind, seed)`**, so the same world holds
+  the same animals in the same places in every session. Not a function of the clock,
+  the view, or the order cells were visited.
+- **Leaving writes a creature back**, where it got to, with what it has left and
+  what it was in the middle of doing (`mob::Life`). Coming back wakes it there. The
+  `wits` go with it, or a boar you frightened is grazing calmly when you return and
+  every animal in the county steps off on the same foot at the same moment.
 
-### 21.3 Check it with `--mobs`, and never by eye
+This is `Grove::TreeState::cleared`'s argument one table over, and it is worth
+restating because it is the thing that is easy to undo: **the record has to outlive
+the thing it is about.** A cell with no record is a cell full of animals, so
+forgetting a cell the player has hunted out is the same as putting the animals back.
 
-`--mobs x0 x1 [step] [hours]`. The companion to `--woods`, and it exists for the same
-reason: a placement rule is very easy to author into something that is never anywhere,
-and nothing errors. A creature is the worst case — one that never spawns looks exactly
-like one that spawns somewhere you have not walked.
+**A cell is settled per kind and not once**, which is what keeps night creatures
+possible. A meadow settled at noon has its bit for boars set and its bit for shades
+clear, so the first night the player spends standing there settles the shades. The
+*content* stays deterministic; what depends on when you arrived is only which kinds
+have had their conditions met yet, and there is no other answer that is both
+consistent and has night creatures in it.
 
-It reports, per creature, how many spots suit it and **why the rest were refused**,
-one column per band. A row that fails says which of its own fields did it.
+Two edges rather than one — `kWakeOut` at a cell and `kSleepOut` at two and a half —
+because a single edge means a creature standing on it is woken and slept on alternate
+frames as the camera breathes, which is the churn the module exists to remove. The
+wake edge is outside the view on purpose: nothing appears in front of the player, it
+walks in.
 
-**It sweeps the day by default, and that is the whole design of the verdict.** A
-creature of the dark is legitimately nowhere at noon, so a report at one hour cannot
-tell "this row is wrong" from "you asked at the wrong time". With no hour given it
-walks midnight, dawn, noon and dusk and fails only a row that appears at none of them.
-Given an hour it walks that one and passes no verdict.
+`Haunt::crowd` went with the old spawner and could not survive this. A global ceiling
+on a kind would make whether a creature exists depend on how many others happened to
+be awake somewhere else, so walking far enough would change how many boars a meadow
+holds. What bounds a population now is `most` against the size of a cell, which is a
+density — and a density is what a country has.
 
-The shade's `darkerThan` was found this way rather than chosen: at 0.22, which is what
-a threshold for darkness looks like it ought to be, it took one surface spot in twenty
-at midnight and the only hostile creature in the game was effectively not in it. The
-open meadow at midnight is brighter than that. At 0.35 it takes every unlit surface
-spot at night and none at all by day.
+**Two costs, both measured.** `Close` used to walk every cell ever visited, once a
+frame, so standing still got dearer the longer the session had run — 0.78 ms after a
+couple of minutes, and worse from there. It walks a list of the paged-in cells now.
+And a kind that cannot be placed *yet* — a shade at noon — must not re-probe every
+frame; `Patch::askAgainAt` holds it for three seconds of the weather clock, which is
+the difference between a millisecond a frame and nothing.
 
-`--critters out.png [zoom]` is the other half: a contact sheet of every creature at
-the world's own texel, in both facings, with its collider drawn over it. A mirrored
-sprite is the one fault invisible in a single still — a boar whose snout is on the
-wrong end looks fine until it turns round.
+### 21.2b The spawner's own bug, kept for the lesson
+
+Before any of the above, `spawn::Try` picked a uniform point in the simulated region
+and tested it against the row. A boar's depth band is 56 pixels of a region thirteen
+hundred deep, so about one candidate in twenty-five was even in the right place;
+with six tries, about two attempts in a hundred succeeded. **What that looked like
+was an empty world** — no error, no warning, and `--mobs` reporting the country as
+perfectly suitable, because the country *was* suitable and the spawner was never
+asking about it.
+
+The height comes from the row's own band, measured off the surface at the chosen
+column. Every candidate is in the band by construction and the refusals are left to
+be about things worth refusing: rock, light, climate.
 
 ---
 
-## 22. Adding an item
+## 22. A creature walks by the same arithmetic it jumps by
+
+`src/entity/nav/`. Three files, and the first of them is why the other two are short.
+
+### 22.1 What a body can reach is derived, never tuned
+
+`nav::Reach` is worked out from `body::Build` and nothing else:
+
+| | from |
+|---|---|
+| how high a ledge it can land on | `jumpSpeed² / (2·gravity)`, times `kApexUsable` |
+| how long it is in the air | `2·jumpSpeed / gravity` |
+| how wide a hole it can clear | that times the pace it is *actually going*, times `kSpanUsable` |
+| how far it will drop | equal to what it can climb — or three times that, if it has a reason |
+
+Check the arithmetic against figures this project already had: for the character the
+apex is 480² / 3200 = **72 px**, which is what `player_config` has always claimed; the
+arc lasts 960 / 1600 = **0.6 s**, which is what the sprint's comment says; and a
+sprint carries it 380 × 0.6 = **228 px**, which is the figure that comment gives for
+clearing a hole. Nothing was invented — it is the same numbers read forwards.
+
+So a creature added tomorrow with a jump of its own gets a navigator that knows what
+it can reach, and nobody has to work it out.
+
+**The pace is the pace it is going, not the row's top speed.** A drifter ambles at
+0.45, and a navigator handed the row's figure would decide every hole was jumpable
+and then fall short of all of them. `nav::Plan` takes a throttle.
+
+**The drop is equal to the climb by default**, and that is the rule that keeps a
+wandering animal out of holes it cannot get out of again — the world otherwise fills
+its ravines with creatures that are alive and stuck, which is worse than either
+dying or staying up top because nothing on screen says what happened. A fleeing or
+hunting creature is allowed three times as much: being stuck later beats being caught
+now, and that is a decision the *caller* makes rather than a field on the row.
+
+### 22.2 Jumping at a wall does not climb it
+
+The one piece of arithmetic in the navigator that is not obvious, and it is the
+difference between a creature that climbs a terrace and one that bounces at the foot
+of it for ever.
+
+`Body::MoveAndCollide` resolves the horizontal axis first and `StepOver` refuses
+while airborne — deliberately, or anything would climb any wall it brushed. So a body
+that jumps *at* a wall has its horizontal speed zeroed on contact, rises straight up
+the face, and comes down in the same place. It has to already be **above the top** by
+the time it arrives.
+
+`LeadFor` is how far before the wall it must leave the ground: height `h` is reached
+at `t = (v - √(v² - 2gh)) / g`, and in that time it covers `pace · t`. For a boar
+clearing a 24 px terrace riser at its bolt that is about fifteen pixels.
+
+### 22.3 A leap is committed to, and the reading is cached
+
+Two things `nav::Legs` holds, for opposite reasons.
+
+**The leap.** A plan made afresh every frame unmakes a jump halfway through the arc:
+the moment the body leaves the lip, the gap it was clearing is behind it, the scan
+reports open ground, the wish to hold the jump goes away — and the shortened arc
+drops the creature into the hole. The arc is held for `airtime` and not re-planned.
+
+**The last reading**, which is the one thing in the navigator that exists for speed.
+The *decision* is deliberately not cached, only the reading — a cached decision would
+repeat a jump press every frame until it expired. Its distances are shifted by how far
+the creature has travelled since, which keeps the jump timing exact while a strolling
+animal scans once every several frames.
+
+### 22.4 The scan has to see over the hole, not up to it
+
+The fault `--nav` was written and immediately caught, and it is worth keeping written
+down because the symptom pointed at the wrong half of the module: **every gap, at
+every width, reported as uncrossable, with the creature standing at the lip.**
+
+The horizon was `reach.gap` plus a couple of strides, measured **from the body**. So
+a hole eight strides ahead used the whole of it getting there and had nothing left to
+see over the hole with; the far side fell outside the scan, `gapEnds` stayed false,
+and the planner correctly refused to jump into what it had been told was bottomless.
+What the reading has to cover is the distance to the near lip *plus* what the creature
+could clear from it, so the horizon extends once a hole is found.
+
+### 22.5 Two of the three brains never look at the player
+
+A performance question that had to become a design one, and it is `Brain::Notices`.
+
+Working out whether a creature can *see* the player means walking the straight line
+between the two and asking the world about every step — some thirty lookups, per
+creature, per frame. A drifter notices nothing by definition, and a skittish animal
+reacts to being *hit* rather than to being approached, which is what makes a boar
+something you can walk up to. Only a hunter needs the answer, and most creatures were
+paying for a number nothing read.
+
+**What the cost turned out to be** is worth recording, because three plausible
+suspects were wrong first: it is not the ground scan, not the sight test, and not the
+settling. `herd.Think` is **the bodies** — `body::Body::Step` costs about 23 µs, which
+is what the player's own zone reports for one, and twenty creatures is twenty times
+that. 0.46 ms of a 16 ms frame, and it scales with how many are awake. There is
+nothing clever to do about it; a walking creature costs what walking costs.
+
+### 22.6 What to check
+
+`--nav [mob]` builds a course out of blocks — a run of floor with a hole of a known
+number of cells in it, then one with a step of a known height — and walks a body
+along it. A hillside has no holes of a known width in it, so a test against the
+landscape can only ever say "it got somewhere", which is what watching it does and is
+not a check.
+
+**The verdict is one-sided and that is the design of it.** A promise the body could
+not keep is a fault: the planner said the hole was jumpable, the creature jumped, and
+it is at the bottom of it. A hole the planner *refused* and the body could in fact
+have cleared is not — `kSpanUsable` holds the planner to under three quarters of the
+arc the physics allows, deliberately, so the body will always out-reach the planner
+near the limit. A check that called that a disagreement would be a check against the
+margin existing. The `spare` column is what makes the margin judgeable instead of
+assumed.
+
+`--mobcheck [seconds] [away]` settles a stretch of country, walks far enough away
+that every creature is asleep, comes back, and then kills them all and does it again.
+It compares **rolls, not bodies**: a creature standing where a dead one was might have
+been rolled afresh — the fault — or might have walked in from next door, which is an
+animal doing what animals do, and counting bodies cannot tell the two apart. That
+distinction was found by the check reporting a failure that turned out to be a boar
+going for a walk.
+
+It also builds its course *after* streaming the ground, which it did not at first —
+every cell went into a chunk that did not exist, so nothing was written, and the
+report came out as a solid column of failures with no jumps in it. A probe that
+builds has to stream first, exactly as the game does.
+
+`--mobs x0 x1 [step] [hours]` is the third, and it is about the *rows* rather than
+about the code: a placement rule is very easy to author into something that is never
+anywhere, and nothing errors. It reports, per creature, how many spots suit it and
+**why the rest were refused**, one column per band, so a row that fails says which of
+its own fields did it.
+
+**It sweeps the day by default, and that is the design of its verdict.** A creature of
+the dark is legitimately nowhere at noon, so a report at one hour cannot tell "this row
+is wrong" from "you asked at the wrong time". With no hour given it walks midnight,
+dawn, noon and dusk and fails only a row that appears at none of them.
+
+It also reports the **density** — one creature every so many pixels — which is the
+number "there are too many boars" is actually about. See §23.3.
+
+`--critters out.png [zoom]` is the fourth: a contact sheet of every creature at the
+world's own texel, in both facings, with its collider drawn over it. A mirrored sprite
+is the one fault invisible in a single still — a boar whose snout is on the wrong end
+looks fine until it turns round.
+
+---
+
+### 22.7 Knowing *when* to jump is a different question from knowing *whether*
+
+Three complaints arrived together and they had one cause: the planner decided a jump
+was possible and then timed it against the pace the creature *meant* to be going.
+
+**A slow creature cannot climb at all, however well the jump is timed.** A boar
+ambling at 32 px/s covers fourteen pixels in its entire 0.44 s arc; a terrace riser is
+twenty-four and the body is twenty wide. There is no moment to leave the ground at
+that would work. The old planner did not know this, so it jumped, fell short, jumped
+again — for ever. That is the head-butting.
+
+`nav::PaceToClimb` is the missing figure. The jump is above a height `h` between
+`t1 = (v − √(v²−2gh))/g` and `t2 = (v + √(v²−2gh))/g`; in that window the body covers
+`pace × (t2 − t1)`, and it needs that to be at least its own half-width and a bit or
+it comes down with its feet on the lip. Below that pace, **do not jump** — run.
+
+**So seeing a ledge is what puts a creature at full pelt.** `Doing::RunUp` sets
+`moveX` to the whole direction the moment a climbable ledge is in the reading, and
+`nav::Advance` turns that into `sprintHeld`. An animal trots up to a step and hops it,
+which is also what animals do.
+
+**And the moment is the apex.** Jump when the face is `|velocity.x| × jumpSpeed/gravity`
+away, so the body arrives at the top of its arc: the most height to spare, and the most
+room either side of the instant to be wrong in. Against `velocity` and never against
+the intended pace — a creature stopped dead by the very wall it is trying to climb is
+going nowhere, and timing against what it meant to be doing is how it jumps on the spot.
+
+**A body already against the face has no room left**, and no amount of re-deciding
+makes any. `Legs::backing` reverses it for `kBackOff` and nothing reconsiders until
+that is done — the ledge is still there the whole time saying "climb me", which is why
+the back-off is tested before the reading rather than after it.
+
+**And it gives up.** Three attempts at one ledge is a ledge this creature is not going
+to climb, whatever the arithmetic says: the ground is a contour, not a stair, and there
+are shapes the numbers do not describe. The tally resets when an attempt actually
+changed the floor under it, or a staircase would be mistaken for one ledge tried three
+times.
+
+### 22.8 A drop is not a hole, and telling them apart was the whole fix
+
+The second complaint — *when it means to go down a block it should not jump* — and the
+third — *it climbs onto a block, freezes, and then goes back to normal* — were the same
+bug, and it was in the **reading** rather than in the planner.
+
+`nav::Ahead` used to know about two things: a rise it could not walk up, and ground
+that was not there. A descent deeper than the scan's band therefore came back as a
+**hole with no far side**, which is a thing a creature refuses — `moveX = 0`, stand
+still. On top of a block, looking down, that is a creature that has climbed up and
+frozen. And a descent whose bottom *was* found came back as a crossable hole, which is
+a thing a creature jumps.
+
+There are three kinds of thing ahead now — `toClimb`, `toDrop`, `toGap` — and the
+answers are different for each: climb it, walk off it, jump it. Whichever is nearest
+wins. A drop is **never** jumped: a jump at a descent throws the body further out than
+it meant to go and lands it harder, and on a staircase it reads as an animal bouncing
+downhill.
+
+A drop also does not stop the scan, where a climb and a hole both do. What is past a
+wall does not matter; what is past a *step down* very much does, or a creature is
+walked onto a ledge over a chasm it never saw.
+
+### 22.9 What `--nav` checks now
+
+Both paces, and the slow one is the point — a probe that only tested the bolt said
+everything was fine while an ambling boar could not climb a kerb.
+
+| column | fault |
+|---|---|
+| `FELL SHORT` | the planner promised a jump the body could not make |
+| `SPAMMED` | more than two attempts at one obstacle |
+| `JUMPED DOWNHILL` | a descent that cost a jump |
+| `spare` | refused something it could have done — **not** a fault, that is the margin |
+
+And a final section drives the **brain** rather than the planner: a boar struck from
+behind, over a step up, a drop and a wall it cannot climb, with the longest stretch it
+spends motionless measured. A frightened animal may hesitate and may not stop.
+
+Two things about that section, both learned by it passing when it should not have:
+
+- **It has to be refused something.** Without the wall the creature never turns, the
+  guard that used to freeze it is never reached, and the check passes whatever that
+  guard is set to. `turns` is printed so a run that never met the wall says so.
+- **Stillness is only counted while it is frightened.** Measured over the whole run it
+  reported half a second of stillness that turned out to be the animal *resting* — a
+  fright wears off and a calm drifter stands about for up to three seconds by design. A
+  check that cannot tell a frozen creature from a grazing one fails on correct
+  behaviour, which is the fastest way to get a check switched off.
+
+---
+
+## 23. How many creatures a place holds, and how that was got wrong
+
+### 23.1 The cell hash was handed half its input
+
+The worst bug of the lot, and the one nothing could see.
+
+`Warren::Settle` mixes a stream from the cell key, and it took
+`Key(cx, cy) & 0xFFFFFFFF` — the **low half**. The key packs the column into the high
+half, so every cell in a row shared one stream, made one chance roll, and answered
+identically. One unlucky roll therefore emptied *every cell at that height in the
+world*.
+
+What it looked like: a county with no animals in it. No error, nothing in any log, and
+`--mobs` cheerfully reporting the ground as perfectly suitable — because the ground
+*was* suitable and nothing had asked it.
+
+It was found because `--mobcheck` prints its counts rather than only a verdict: **279
+cells asked, 6696 spots tried, none suited** — with the very spot the probe was standing
+on passing `mob::Suits` when asked directly. Nothing short of those five numbers could
+have told a bad hash from bad ground, and three plausible suspects were wrong first —
+the light, the placement height, and the room test.
+
+**Every hash of a packed key folds both halves now.** It is a two-line fix and it was
+an hour to find.
+
+### 23.2 A creature is stood on the floor, not dropped into the band
+
+The §21.2b mistake in its second form. `Settle` sampled a height inside the row's depth
+band and hoped it had landed on the ground — but a boar's band is 56 px of mostly open
+air and `mob::Suits` demands something solid within two pixels under its feet, so about
+one try in twenty could ever succeed.
+
+A band that reaches above the ground is a creature of the surface, and `World::SurfaceOf`
+is what it stands on. One wholly below is a creature of the caves, and there the floor
+has to be walked down to with `World::FootingUnder`. Either way the spot is *found*
+rather than guessed at, and the refusals are left to be about light, climate and
+headroom.
+
+`mob::Suits` also stops its room box a pixel above the feet, because a body does not
+occupy the ground it is standing on — without that, every spot found by walking down to
+a floor was then refused for being inside it.
+
+### 23.3 The density is measured, and Minecraft is the yardstick
+
+"There are too many boars" is a statement about density and there was no way to measure
+it, so `--mobs` now settles a warren over the stretch it walked and reports **one
+creature every N pixels**.
+
+Minecraft's own rule, which is what the rows are written against: animals come almost
+entirely from **chunk generation** rather than from ongoing spawning — a pack is rolled
+per chunk at a probability of 0.1, on grass, in light 9 or over. Ongoing passive
+spawning exists but runs once every 400 ticks against a cap of 10 per player, so it is
+nearly irrelevant. A chunk is 16 blocks and a block here is 18 px, so **Minecraft's rate
+is one pack of 4 every 2880 px of walking — one animal every 720 px.**
+
+Ours measures **one every 1481 px**, which is half Minecraft's. That is deliberate:
+Minecraft scatters a pack of four through a 10-by-10 *area*, so a player meets one or
+two of them at a time. This world has no depth to scatter anything through, so the whole
+group is in view at once and the same felt density needs a smaller one.
+
+`Haunt::chance` was 0.55 before the hash was fixed, and it had been tuned against a
+world where whole rows of cells could never hold anything — it was compensating for a
+bug, and the real density had never once been seen.
+
+The knob is one line on the boar's row. Run `--mobs 0 40000 2000` after changing it.
+
+---
+
+## 24. Adding an item
 
 One file. `src/item/items/<name>.h` with the row, and a `.cpp` beside it holding the
 registrar. §16.1's table of what a row buys still holds; what has changed is that

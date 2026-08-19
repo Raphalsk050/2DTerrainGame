@@ -876,6 +876,10 @@ int main(int argc, char **argv) {
     // are cleared together when a new world is made.
     mob::Herd herd;
 
+    // Seeded like the wood is, and for the same reason: what lives in a place is a
+    // fact about the world, so it has to move when the seed does.
+    herd.Memory().Configure(settings.seed);
+
     grove.Configure({.seed = settings.seed}, settings, world.Sky());
 
 
@@ -1161,6 +1165,7 @@ int main(int argc, char **argv) {
 
                         fixtures.Clear();
                         herd.Clear();
+                        herd.Memory().Configure(settings.seed);
                         inventory.Clear();
 
                         making.stage++;
@@ -1313,13 +1318,21 @@ int main(int argc, char **argv) {
         // and a drop left falling behind an open inventory is a drop that has
         // timed out and gone by the time it is looked at again.
         if (!packOpen) {
-            PROFILE_ZONE("grove.Update");
+            // Braced, and it matters. A PROFILE_ZONE runs to the end of its enclosing
+            // scope, so declaring one at the top of this block made everything after
+            // it — the fixtures, the creatures, the hand — read as time inside
+            // `grove.Update`. The report was not wrong so much as unreadable, which
+            // §15.1 is the long version of: an instrument that attributes one
+            // subsystem's cost to another is worse than no instrument.
+            {
+                PROFILE_ZONE("grove.Update");
 
-            // Grown over the visible band rather than the simulated one. A plant is
-            // drawn and nothing else — it holds no liquid and steps no automaton — so
-            // there is nothing about one off screen that has to have settled by the
-            // time it scrolls in.
-            grove.Update(world, view::Bounds(camera), player.Centre(), world.Sky().Time(), dt, inventory);
+                // Grown over the visible band rather than the simulated one. A plant is
+                // drawn and nothing else — it holds no liquid and steps no automaton —
+                // so there is nothing about one off screen that has to have settled by
+                // the time it scrolls in.
+                grove.Update(world, view::Bounds(camera), player.Centre(), world.Sky().Time(), dt, inventory);
+            }
 
             // Anything whose surface has been dug out from under it comes down.
             // Beside the grove's own pass and for the same reason: what a fixture

@@ -1,38 +1,13 @@
 #include "entity/mob/herd.h"
 
-#include "entity/body/build.h"
 #include "entity/drop.h"
 #include "entity/mob/brains/whim.h"
-#include "entity/mob/spawner.h"
+#include "core/config.h"
+#include "core/profile.h"
 #include "world/world.h"
 
+#include <algorithm>
 #include <cmath>
-
-namespace {
-
-// How often the spawner is asked, in seconds.
-//
-// Not every frame. An attempt costs a handful of world lookups and a climate
-// sample, and the most it can produce is one group — so sixty of them a second
-// would be paying a frame's worth of work to place, at best, four animals.
-constexpr float kTryEvery = 1.4f;
-
-// How far outside the simulated region a creature is let go, as a multiple of that
-// region's own width.
-//
-// A margin and not the edge itself, because the edge moves with the player and a
-// creature dropped the instant it crossed would blink out while still visible at
-// the corner of the screen. Wide enough that walking a few steps back does not
-// bring it back — a creature that returned would be a different animal wearing the
-// same one's place.
-constexpr float kLetGo = 0.6f;
-
-// How far apart a group's members are put down, in world pixels.
-//
-// A sounder arriving on exactly one spot is one animal standing in three others.
-constexpr float kSpread = 26.0f;
-
-} // namespace
 
 mob::Mob *mob::Herd::Claim() {
     for (std::size_t n = 0; n < kSlots; n++) {
@@ -54,9 +29,20 @@ bool mob::Herd::Put(Kind kind, Vector2 at) {
     if (slot == nullptr) return false;
 
     // Its own stream, mixed from the herd's rather than taken from it, so that four
-    // creatures put down on one frame do not all step off in the same direction.
-    // See `brains/whim.h`.
+    // creatures put down on one frame do not all step off in the same direction. See
+    // `brains/whim.h`.
     slot->Wake(kind, at, Spread(seed_, Roll(seed_)));
+
+    return true;
+}
+
+bool mob::Herd::Revive(const Life &life) {
+    Mob *slot = Claim();
+
+    if (slot == nullptr) return false;
+
+    slot->Wake(life.kind, life.at, life.wits.seed);
+    slot->Restore(life);
 
     return true;
 }
@@ -84,8 +70,9 @@ int mob::Herd::LiveOf(Kind kind) const {
 void mob::Herd::Clear() {
     for (Mob &one : pool_) one.Sleep();
 
-    next_  = 0;
-    tryIn_ = 0.0f;
+    next_ = 0;
+
+    warren_.Clear();
 }
 
 int mob::Herd::Strike(Rectangle hitbox, int damage, Vector2 from, float knock, float lift) {
@@ -108,21 +95,50 @@ mob::Herd::Toll mob::Herd::Update(World &world, Rectangle active, Rectangle body
                                   float dt, Drops &drops) {
     Toll toll;
 
-    // Where a creature is let go. Measured off the simulated region rather than the
-    // drawn one, so a creature just off screen keeps walking — otherwise the world
-    // reorganises itself every time the player turns round.
-    const float margin = active.width * kLetGo;
+    // What counts as being looked at: the drawn view, which is the simulated region
+    // less the margin it was grown by.
+    //
+    // It was `active` itself first, and that quietly switched the whole throttle off —
+    // the margin is 256 px against a screen of nineteen hundred, so very nearly every
+    // creature awake was inside it and every one of them thought sixty times a second.
+    // The zone said 0.46 ms and the reason was not the number of creatures.
+    const Rectangle watched = {active.x + config::kSimulationMargin, active.y + config::kSimulationMargin,
+                               std::max(0.0f, active.width - config::kSimulationMargin * 2.0f),
+                               std::max(0.0f, active.height - config::kSimulationMargin * 2.0f)};
 
-    const Rectangle keep = {active.x - margin, active.y - margin, active.width + margin * 2.0f,
-                            active.height + margin * 2.0f};
+    // Everything the view has come to cover. Settling and waking are the warren's;
+    // what comes back is a list of creatures to bring to life.
+    waking_.clear();
+
+    {
+        // Zoned apart from the thinking below, because the two grow for different
+        // reasons and a single figure cannot say which. Settling grows with how much
+        // ground the view covers; thinking grows with how many creatures are in it.
+        PROFILE_ZONE("herd.Wake");
+
+        warren_.Wake(world, active, now, waking_);
+    }
+
+    for (const Life &life : waking_) {
+        // A pool with no room is the one case where the promise breaks, and it breaks
+        // in the right direction: the creature stays in the record and is woken the
+        // next time there is a slot, rather than being lost.
+        if (!Revive(life)) {
+            warren_.Rest(life);
+        }
+    }
+
+    PROFILE_ZONE("herd.Think");
 
     for (Mob &one : pool_) {
         if (!one.Live()) continue;
 
-        // Out of the world's reach. Gone rather than frozen: nothing about a
-        // creature is remembered, which is the rule at the head of `herd.h` and what
-        // keeps this from becoming a second thing that has to be saved.
-        if (!CheckCollisionRecs(keep, one.Bounds())) {
+        // Out past the sleeping edge. Written back into the ground rather than thrown
+        // away, which is the whole difference between this and what was here before:
+        // walking away no longer unmakes anything.
+        if (warren_.Sleeping(active, one.Centre())) {
+            warren_.Rest(one.Remember());
+
             one.Sleep();
 
             continue;
@@ -132,12 +148,21 @@ mob::Herd::Toll mob::Herd::Update(World &world, Rectangle active, Rectangle body
         // slot is one that can be woken as something else before this loop ends.
         const Def &def = one.Made();
 
-        const bool strikes = one.Update(world, quarry, true, now, dt);
+        const Vector2 was = one.Centre();
 
-        // Died this frame, of a blow or of the sun. Its drops are rolled here rather
-        // than inside the creature, because what a creature leaves is something that
-        // happens *in the world* and the creature does not have one.
+        const bool strikes = one.Update(world, quarry, true, CheckCollisionRecs(watched, one.Bounds()), now, dt);
+
+        // Died this frame, of a blow or of the sun.
+        //
+        // Nothing is written down about the death, and that is the design rather than
+        // an omission: its cell will never be asked for that kind again, so it does
+        // not come back. See `patch.h`. The count is kept only for the display.
         if (!one.Live()) {
+            warren_.Lose(was);
+
+            // Its drops are rolled here rather than inside the creature, because what
+            // a creature leaves is something that happens *in the world*, and the
+            // creature does not have one.
             for (const Spoil &spoil : def.spoils.each) {
                 if (spoil.item == nullptr) continue;
 
@@ -149,7 +174,7 @@ mob::Herd::Toll mob::Herd::Update(World &world, Rectangle active, Rectangle body
 
                 if (many <= 0) continue;
 
-                drops.Scatter(ItemsOf(*what, many), one.Centre(), (Chance(seed_) < 0.5f) ? -1.0f : 1.0f, now);
+                drops.Scatter(ItemsOf(*what, many), was, (Chance(seed_) < 0.5f) ? -1.0f : 1.0f, now);
             }
 
             continue;
@@ -162,9 +187,7 @@ mob::Herd::Toll mob::Herd::Update(World &world, Rectangle active, Rectangle body
         if (!CheckCollisionRecs(body, one.Bounds())) {
             // Reach is measured centre to centre and a body is a box, so a creature
             // can be within its reach and still not be touching. Both have to hold.
-            const float gap = std::fabs(one.Centre().x - quarry.x);
-
-            if (gap > def.reach) continue;
+            if (std::fabs(one.Centre().x - quarry.x) > def.reach) continue;
         }
 
         if (def.hits > toll.damage) {
@@ -175,31 +198,22 @@ mob::Herd::Toll mob::Herd::Update(World &world, Rectangle active, Rectangle body
         }
     }
 
-    // And then whether anything new arrives.
-    tryIn_ -= dt;
-
-    if (tryIn_ > 0.0f) return toll;
-
-    tryIn_ = kTryEvery;
-
-    const std::optional<spawn::Wish> wish = spawn::Try(world, active, quarry, seed_, *this);
-
-    if (!wish.has_value()) return toll;
-
-    for (int n = 0; n < wish->many; n++) {
-        const float sideways = Between(seed_, -kSpread, kSpread) * static_cast<float>(n);
-
-        const Vector2 at = {wish->at.x + sideways, wish->at.y};
-
-        // Each member of a group is placed on its own terms rather than trusted
-        // because the first one was. A sounder put down across a ledge would leave
-        // half of it standing in the hillside.
-        if (n > 0 && !spawn::Suits(world, kinds::Of(wish->kind), at)) continue;
-
-        if (!Put(wish->kind, at)) break;
-    }
+    // And last, because a patch closed while its creatures are still in the herd is a
+    // patch that will wake an empty version of itself next time.
+    warren_.Close(active);
 
     return toll;
+}
+
+void mob::Herd::Census(Rectangle where, std::vector<Life> &out) const {
+    for (const Mob &one : pool_) {
+        if (!one.Live()) continue;
+        if (!CheckCollisionPointRec(one.At(), where)) continue;
+
+        out.push_back(one.Remember());
+    }
+
+    warren_.Census(where, out);
 }
 
 void mob::Herd::Draw(Rectangle view) const {

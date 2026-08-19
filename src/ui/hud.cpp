@@ -120,7 +120,10 @@ void hud::Draw(const World &world, const Grove &grove, const mob::Herd &herd, co
                          grove.DrawnPlants(), grove.RememberedPlants(), world.Light().Rays()),
               10, 70, ink);
 
-    Label(TextFormat("on the ground: %d   creatures: %d", grove.Fallen().Live(), herd.Live()), 10, 160, ink);
+    Label(TextFormat("on the ground: %d   creatures: %d awake, %d resting, %d rolled, %d lost, %d cells",
+                     grove.Fallen().Live(), herd.Live(), herd.Memory().Resting(), herd.Memory().Rolled(),
+                     herd.Memory().Lost(), herd.Memory().Remembered()),
+          10, 160, ink);
 
     const Vector2 centre = player.Centre();
     const auto under     = editor.Under();

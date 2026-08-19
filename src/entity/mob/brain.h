@@ -41,6 +41,23 @@ struct Brain {
     // ever fill in.
     virtual bool WouldStrike(const Sense &, const Wits &) const { return false; }
 
+    // Whether this behaviour ever reads `Sense::seesQuarry`.
+    //
+    // A performance question that had to become a design one. Working out whether a
+    // creature can *see* the player means walking the straight line between the two
+    // and asking the world about every step of it — some thirty lookups, per creature,
+    // per frame, and it was the single most expensive thing a creature did.
+    //
+    // Two of the three behaviours never look at the answer: a drifter notices nothing
+    // by definition, and a skittish animal reacts to being *hit* rather than to being
+    // approached, which is what makes a boar something you can walk up to. Only a
+    // hunter needs it.
+    //
+    // So the brain says, and `Mob::Update` skips the walk. Declaring it here rather
+    // than testing the creature's name anywhere is the same rule the rest of the
+    // module keeps: the fact belongs to whoever it is a fact about.
+    virtual bool Notices() const { return false; }
+
     // A short word for what it is doing, for `--mobs` and the debug overlay.
     //
     // It exists because a behaviour is the one thing in this project that cannot be

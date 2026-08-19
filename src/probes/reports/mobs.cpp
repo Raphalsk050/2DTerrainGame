@@ -1,5 +1,7 @@
 #include "core/registry.h"
 #include "entity/mob/mob_def.h"
+#include "entity/mob/suits.h"
+#include "entity/mob/warren.h"
 #include "probes/report.h"
 #include "world/element.h"
 #include "world/terrain.h"
@@ -62,9 +64,9 @@ struct Tally {
     long wrongClimate = 0;
 };
 
-// The same order `spawn::Suits` uses, taken apart so that each refusal can be
-// counted. Kept deliberately parallel to it: if the two ever disagree, this report
-// is describing a spawner that does not exist.
+// The same order `mob::Suits` uses, taken apart so that each refusal can be counted.
+// Kept deliberately parallel to it: if the two ever disagree, this report is
+// describing a placement rule that does not exist.
 void Judge(const World &world, const mob::Def &def, Vector2 at, Tally &tally) {
     const mob::Haunt &haunt = def.haunt;
 
@@ -78,8 +80,8 @@ void Judge(const World &world, const mob::Def &def, Vector2 at, Tally &tally) {
 
     const float half = def.build.width / 2.0f;
 
-    const Rectangle box = {at.x - half, at.y - def.build.height * 1.25f, def.build.width,
-                           def.build.height * 1.25f};
+    const Rectangle box = {at.x - half, at.y - def.build.height * mob::kHeadroom, def.build.width,
+                           def.build.height * mob::kHeadroom};
 
     if (world.OverlapsSolid(box)) {
         tally.noRoom++;
@@ -253,6 +255,52 @@ int Run(const probes::Bench &bench) {
         for (int r = 0; r < rows; r++) {
             anywhere[static_cast<std::size_t>(r)] += tallies[static_cast<std::size_t>(r)].spots;
         }
+    }
+
+    // And how many actually end up standing there, which is a different question from
+    // how many *could*.
+    //
+    // Every table above is about whether a spot suits a row. None of them says how
+    // thick on the ground the creatures come out, and that is the number a person
+    // actually judges — "there are too many boars" is a statement about density and
+    // there was no way to measure it. So the warren is run over the same stretch and
+    // asked what it settled.
+    //
+    // Read it against Minecraft, which is where the figures on the rows come from: an
+    // animal pack is rolled per chunk at a probability of 0.1, a chunk is 16 blocks,
+    // and a block here is 18 px — so Minecraft's own rate is one pack per 2880 px of
+    // walking, of 4 animals scattered through a 10-by-10 area. In a world with no
+    // depth to scatter them through, the whole pack is in view at once, so the same
+    // *felt* density needs a smaller pack.
+    {
+        WindTo(world, 12.0f);
+
+        mob::Warren warren;
+
+        warren.Configure(world.Settings().seed);
+
+        std::vector<mob::Life> woken;
+
+        for (float x = x0; x < x1; x += 400.0f) {
+            const float surface = terrain::Height(x, world.Settings());
+
+            const Rectangle here = {x - 480.0f, surface - 400.0f, 960.0f, 900.0f};
+
+            world.Update(here);
+            world.StepLight(here);
+
+            woken.clear();
+
+            warren.Wake(world, here, 1.0e6f, woken);
+            warren.Close(here);
+        }
+
+        const float span = x1 - x0;
+
+        std::printf("settled over %.0f px: %d creatures, one every %.0f px\n", span, warren.Rolled(),
+                    (warren.Rolled() > 0) ? span / static_cast<float>(warren.Rolled()) : 0.0f);
+
+        std::printf("  for comparison, Minecraft rolls one pack of 4 every 2880 px of walking\n\n");
     }
 
     if (!sweeping) {

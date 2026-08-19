@@ -1,5 +1,7 @@
 #pragma once
 
+#include "entity/nav/plan.h"
+
 #include <cstdint>
 
 namespace mob {
@@ -34,6 +36,12 @@ struct Wits {
     // the reason the rest of this struct exists: the brain that decides to strike
     // is shared by every creature of its temper.
     float rested = 0.0f;
+
+    // What the navigator has to carry between frames: how long a leap it has
+    // committed to has left to run. One number, and it lives here for the reason the
+    // rest of this struct does — the navigator is a free function shared by every
+    // creature, so it cannot hold anything about any of them. See `nav::Legs`.
+    nav::Legs legs{};
 
     // A stream of its own, set when the creature is born.
     //

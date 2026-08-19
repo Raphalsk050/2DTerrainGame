@@ -56,20 +56,17 @@ struct Haunt {
     int least = 1;
     int most  = 1;
 
-    // How many of this kind may be alive at once, across the whole simulation.
+    // How many arrive together is the whole of the cap now, and it is per cell.
     //
-    // The cap that matters, and it is per kind rather than over the pool: a cave
-    // full of bats must not be able to crowd every boar in the county out of the
-    // world, and one shared number is exactly how that happens.
-    int crowd = 6;
-
-    // Shortest gap, in world pixels, between one of these and the player when it
-    // arrives.
+    // There was a `crowd` here — a ceiling on how many of a kind could be alive at
+    // once anywhere — and it went with the stateless spawner it belonged to. It
+    // cannot survive this model and should not: whether a creature exists is a fact
+    // about the ground it stands on, and a global ceiling would make it depend on how
+    // many others happened to be awake somewhere else. Walk far enough and the same
+    // meadow would hold a different number of boars.
     //
-    // Nothing may appear inside the view it is appearing into. Minecraft's rule is
-    // a radius around the player and this is the same rule in one dimension, which
-    // is the dimension this world has.
-    float keepAway = 320.0f;
+    // What bounds the population now is `most` against the size of a cell, which is a
+    // density rather than a total — and a density is what a country has.
 };
 
 } // namespace mob
