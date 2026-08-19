@@ -1,5 +1,9 @@
 #include "ui/hud.h"
 
+#include "ui/bottom.h"
+#include "ui/hotbar.h"
+#include "ui/vitals.h"
+
 #include "flora/flora.h"
 #include "ui/hotbar.h"
 #include "core/profile.h"
@@ -17,30 +21,34 @@ namespace {
 // world — the ring shows where it is and what it would put down, but not what
 // the last press of the size key did, since a ring four pixels wider is not a
 // thing anyone sees change.
-void BrushSize(const Editor &editor) {
-    // Grey out of reach, which is the same thing the ring in the world says and
-    // is worth saying twice: out there the ring is the only mark on screen, and
-    // a player who has not noticed it is a player wondering why the button
-    // stopped working.
-    const Color color = editor.Reachable() ? Color{190, 198, 212, 255} : Color{120, 126, 138, 255};
+void Hand(const Editor &editor, Rectangle where) {
+    // Grey out of reach, which is the same thing the ring in the world says and is
+    // worth saying twice: out there the ring is the only mark on screen, and a player
+    // who has not noticed it is a player wondering why the button stopped working.
+    const Color colour = editor.Reachable() ? Color{190, 198, 212, 255} : Color{120, 126, 138, 255};
 
-    // The brush has no part in building, so its size is not what this badge is
-    // for while a piece is in hand. It says which hand the player is holding
-    // instead — the grid out in the world already says where, and the size keys
-    // do nothing here.
-    const char *text = TextFormat("brush %dx%d  (- / +)%s", editor.Span(), editor.Span(),
-                                  editor.Building() ? "  |  building" : "");
-    const int width  = MeasureText(text, 14);
+    // What the hand *is*, and nothing about how to change it.
+    //
+    // It read `brush 1x1  (- / +)  |  building` — three things, one of which is a
+    // keyboard hint that is already in the help line at the top of the screen. A badge
+    // over the hotbar is glanced at, not read, and a glance holds about two words.
+    //
+    // The brush has no part in building, so while a piece is in hand the size is not
+    // what this is for: the grid out in the world already says where the block goes and
+    // the size keys do nothing.
+    const char *text = editor.Building() ? "building" : TextFormat("brush %dx%d", editor.Span(), editor.Span());
 
-    // Sat just clear of the bar, which reaches 76 pixels up from the bottom.
-    const Rectangle badge = {(GetScreenWidth() - width) / 2.0f - 8.0f, GetScreenHeight() - 104.0f, width + 16.0f,
-                             22.0f};
+    const int width = MeasureText(text, 14);
 
-    DrawRectangleRec(badge, {30, 34, 42, 220});
-    DrawRectangleLinesEx(badge, 2.0f, color);
-    DrawText(text, static_cast<int>(badge.x + 8.0f), static_cast<int>(badge.y + 4.0f), 14, color);
+    // Right-aligned to the strip, which is the hotbar's own right edge. Minecraft's
+    // hunger sits here; this is the same half of the row used for the same kind of
+    // thing — what is true about you that is not your health.
+    const int x = static_cast<int>(where.x + where.width - width);
+    const int y = static_cast<int>(where.y + (where.height - 14.0f) / 2.0f);
+
+    DrawText(text, x + 1, y + 1, 14, {12, 14, 18, 200});
+    DrawText(text, x, y, 14, colour);
 }
-
 
 } // namespace
 
@@ -79,8 +87,20 @@ void hud::Label(const char *text, int x, int y, Color colour) {
 }
 
 // Everything drawn in the coordinates of the frame rather than of the world.
+void hud::Strip(const Inventory &inventory, const life::Health &health, const Editor &editor, Gamemode mode) {
+    // Laid out once and drawn as one thing. See `ui/bottom.h` for what was wrong with
+    // the three constants this replaced.
+    const bottom::Strip strip = bottom::Of();
+
+    hotbar::Draw(inventory);
+
+    vitals::Draw(health, mode, strip.vitals);
+
+    Hand(editor, strip.hand);
+}
+
 void hud::Draw(const World &world, const Grove &grove, const mob::Herd &herd, const Player &player,
-             const Editor &editor,
+             const Editor &editor, Gamemode mode,
              const Camera2D &camera, const debug_view::Toggles &debug, float lantern, const char *notice,
              float noticeFor) {
     // Outside the camera transform, unlike every other overlay: what it shows is
@@ -171,38 +191,6 @@ void hud::Draw(const World &world, const Grove &grove, const mob::Herd &herd, co
                          damp * 100.0f, filled, soaked, 10 - filled, dry),
               10, 142, damp > 0.66f ? wet : ink);
 
-    // How much the character has left, over the hotbar and nowhere else.
-    //
-    // A bar rather than a number, and it is the same argument the digging bite makes
-    // in CLAUDE.md §13.3: what is wanted is "how much is left" at a glance, and a
-    // figure has to be read. It is drawn only while it means something — a character
-    // at full health has nothing to say, and a bar that is always there is a bar
-    // nobody looks at when it matters.
-    //
-    // Over the hotbar because that is where the eye already is in a fight: the hand
-    // is what the player is changing, and the health is what they are changing it
-    // about.
-    if (player.Vigour().Fraction() < 1.0f) {
-        constexpr float kBarWide = 220.0f;
-        constexpr float kBarTall = 10.0f;
-
-        const float left = (GetScreenWidth() - kBarWide) / 2.0f;
-        const float top  = GetScreenHeight() - 96.0f;
-
-        DrawRectangleRec({left - 2.0f, top - 2.0f, kBarWide + 4.0f, kBarTall + 4.0f}, {20, 22, 28, 200});
-
-        // Red through amber to green, so the colour says the same thing the width
-        // does. Two channels of one ramp rather than three named colours, because
-        // what is wanted is a continuous reading and not three states.
-        const float share = player.Vigour().Fraction();
-
-        const Color blood = {static_cast<unsigned char>(232 - 120 * share),
-                             static_cast<unsigned char>(60 + 150 * share), 70, 255};
-
-        DrawRectangleRec({left, top, kBarWide * share, kBarTall}, blood);
-        DrawRectangleLinesEx({left - 2.0f, top - 2.0f, kBarWide + 4.0f, kBarTall + 4.0f}, 1.0f, {90, 96, 110, 255});
-    }
-
     // Flight suspends gravity and collision both, which is not something to be
     // left on by accident, so it says so where the eye already is.
     if (player.IsFlying()) {
@@ -224,5 +212,4 @@ void hud::Draw(const World &world, const Grove &grove, const mob::Herd &herd, co
         Label(notice, (GetScreenWidth() - width) / 2, GetScreenHeight() - 140, {255, 214, 140, 255});
     }
 
-    BrushSize(editor);
 }

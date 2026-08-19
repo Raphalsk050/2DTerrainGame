@@ -1,6 +1,7 @@
 #include "entity/mob/mob.h"
 
 #include "core/config.h"
+#include "entity/mob/wardrobe.h"
 #include "world/world.h"
 
 #include <algorithm>
@@ -37,6 +38,22 @@ constexpr Color kStung = {255, 96, 96, 255};
 // A creature that is being watched thinks every frame, because a hunter that decided
 // five times a second reads as one that keeps changing its mind.
 constexpr float kFarThink = 0.2f;
+
+// How many frames of the idle a second.
+//
+// Slow. An idle is a breath and a twitch of the ear, and the four frames of it are
+// nearly the same picture — run it fast and a resting animal reads as a nervous one.
+constexpr float kIdleFps = 5.0f;
+
+// Above this it is running rather than walking, as a share of its own walking speed.
+//
+// Its own and not its sprint, because a creature pushed past a walk *is* running
+// whatever it happens to be doing it for — fleeing, or hurrying at a ledge.
+constexpr float kRunsAt = 1.05f;
+
+// Below this it is standing still. A shade over the pixel or two a body drifts by
+// while settling on uneven ground.
+constexpr float kStandsAt = 3.0f;
 
 bool Sees(const World &world, Vector2 from, Vector2 to) {
     const float dx = to.x - from.x;
@@ -226,6 +243,13 @@ bool mob::Mob::Update(const World &world, Vector2 quarry, bool quarryVisible, bo
     // standing still.
     if (std::fabs(body_.Velocity().x) > 1.0f) facing_ = (body_.Velocity().x >= 0.0f) ? 1 : -1;
 
+    // The animation clocks. Ground covered for the legs, seconds for the breath — and
+    // both of them here rather than in `Draw`, because a creature off screen still has
+    // to arrive somewhere in its cycle rather than starting from the first frame the
+    // moment it is looked at.
+    walked_ += std::fabs(body_.Velocity().x) * dt;
+    breath_ += dt;
+
     const bool strikes = (brain_ != nullptr) && brain_->WouldStrike(sense, wits_);
 
     if (strikes) wits_.rested = def.rest;
@@ -236,10 +260,44 @@ bool mob::Mob::Update(const World &world, Vector2 quarry, bool quarryVisible, bo
 void mob::Mob::Draw() const {
     if (!live_) return;
 
-    // Drawn at the world's own texel, so a creature standing beside a wall is drawn
-    // on the lattice the wall is. See CLAUDE.md §12 and `figure::Draw`.
-    figure::Draw(Made().look, {Centre().x, body_.Position().y}, static_cast<float>(config::kPixelSize), facing_,
-                 health_.Stung() ? kStung : WHITE);
+    const Def &def = Made();
+
+    const Color tint = health_.Stung() ? kStung : WHITE;
+
+    // Its feet, which is where a body's own position is.
+    const Vector2 feet = {Centre().x, body_.Position().y};
+
+    const Wardrobe &worn = Dressed(def);
+
+    if (worn.Any()) {
+        const float going = std::fabs(body_.Velocity().x);
+
+        // Which of the three, and the order matters: a creature in the air keeps
+        // whichever gait carried it there rather than snapping to a standing pose
+        // halfway over a hole.
+        const bool moving  = going > kStandsAt || !body_.Grounded();
+        const bool running = going > def.build.runSpeed * kRunsAt;
+
+        const sheet::Strip &clip = !moving         ? worn.idle
+                                   : running       ? worn.run
+                                                   : worn.walk;
+
+        // The walk and the run are counted in ground covered, the idle in seconds. See
+        // `walked_` and `breath_`.
+        const int frame = moving ? static_cast<int>(walked_ / std::max(def.stride, 1.0f))
+                                 : static_cast<int>(breath_ * kIdleFps);
+
+        // One art pixel to one world pixel. The whole of what makes the sprite come out
+        // the size the hand-drawn figure did — see `mob::Def::art`.
+        sheet::Draw(clip.Ready() ? clip : worn.idle, frame, feet, 1.0f, facing_, tint);
+
+        return;
+    }
+
+    // No art for this one. Drawn from its own row at the world's own texel, so a
+    // creature standing beside a wall is drawn on the lattice the wall is. See
+    // CLAUDE.md §12 and `figure::Draw`.
+    figure::Draw(def.look, feet, static_cast<float>(config::kPixelSize), facing_, tint);
 }
 
 const char *mob::Mob::Mood() const {

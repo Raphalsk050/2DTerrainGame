@@ -114,6 +114,15 @@ private:
     body::Intent wish_{};
     float thinkIn_ = 0.0f;
 
+    // Where the animation has got to.
+    //
+    // Two clocks and they are different kinds of thing. The walk is measured in
+    // **ground covered**, so the same legs carry the creature at an amble and at a
+    // bolt without the feet skating; the idle is measured in seconds, because standing
+    // still covers no ground and a breath is a breath.
+    float walked_  = 0.0f;
+    float breath_  = 0.0f;
+
     // Whether something hurt it since the brain was last asked, and where from.
     //
     // Held for exactly one think and then cleared. It is the creature's whole

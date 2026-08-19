@@ -1,6 +1,7 @@
 #include "ui/hotbar.h"
 
 #include "core/picture.h"
+#include "ui/bottom.h"
 
 #include <cmath>
 
@@ -115,19 +116,30 @@ void hotbar::Draw(const Inventory &inventory) {
         DrawText(key, x, y, 10, kKeycap);
     }
 
-    // The name of what is in hand, over the bar.
+    // The name of what is in hand, on its own row above the strip.
     //
-    // The palette printed a name on every slot, which it could because a slot
-    // was always the same material. A slot now holds whatever was put in it, and
-    // nine names under nine pictures is a wall of text under the one thing the
-    // eye actually reads. So it is said once, for the one that matters, and only
-    // when there is something to say.
+    // The palette printed a name on every slot, which it could because a slot was
+    // always the same material. A slot now holds whatever was put in it, and nine names
+    // under nine pictures is a wall of text under the one thing the eye actually reads.
+    // So it is said once, for the one that matters, and only when there is something to
+    // say.
+    //
+    // Where it goes is `bottom::Of`'s to decide and no longer a constant here. It was
+    // twenty pixels over the bar, which is where the brush badge and the health bar
+    // also were — three files each certain they had that space to themselves.
+    //
+    // Minecraft fades this after a couple of seconds and this does not, deliberately:
+    // there it is a reminder while you scroll, and the bar is otherwise stable. Here a
+    // slot can hold a material, an item or a fixture and they are not all obvious from
+    // the picture, so the name earns its line permanently.
     const Stack &held = inventory.Held();
     if (held.Empty()) return;
 
+    const Rectangle where = bottom::Of().name;
+
     const int width = MeasureText(held.Name(), 14);
-    const int x     = static_cast<int>(bar.x + (bar.width - width) / 2.0f);
-    const int y     = static_cast<int>(bar.y - 20.0f);
+    const int x     = static_cast<int>(where.x + (where.width - width) / 2.0f);
+    const int y     = static_cast<int>(where.y + (where.height - 14.0f) / 2.0f);
 
     DrawText(held.Name(), x + 1, y + 1, 14, {12, 14, 18, 200});
     DrawText(held.Name(), x, y, 14, kOutline);

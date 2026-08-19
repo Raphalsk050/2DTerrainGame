@@ -27,9 +27,35 @@ struct Def {
     // referring to this creature names it by.
     const char *name;
 
-    // How it is drawn, at the world's own texel. See `core/figure.h` for why this
-    // is not the six-square `Picture` an item carries.
+    // How it is drawn where there is no art for it, at the world's own texel. See
+    // `core/figure.h` for why this is not the six-square `Picture` an item carries.
+    //
+    // Kept even for a creature that *has* art, and not as a leftover: it is what the
+    // contact sheet draws against, what a missing file falls back to, and the one
+    // description of the creature that cannot go out of date, because it is in the
+    // same file as everything else about it.
     figure::Figure look;
+
+    // The folder under `assets/mobs/` holding `idle.png`, `walk.png` and `run.png`.
+    //
+    // A folder and not three paths, so there is no filename in this table to misspell.
+    // Nothing where the creature is drawn from `look` alone.
+    const char *art = nullptr;
+
+    // How wide one frame of that art is, in pixels.
+    //
+    // Needed rather than derived, because a strip is one row of cells and the height
+    // alone cannot say how many there are — six frames of 28 and 28 frames of 6 are
+    // the same image. `tools/cut_sprites.py` prints the figure it used.
+    int artWide = 0;
+
+    // How far the creature travels between two frames of its walk, in world pixels.
+    //
+    // The animation is driven by *distance* and not by a frame rate, which is the
+    // whole reason this is a number of pixels: feet that turn at a fixed rate skate
+    // over the ground at every speed but one, and a creature that walks and bolts has
+    // two of them. Driven by distance, the same legs carry it at both.
+    float stride = 8.0f;
 
     // How it moves. The same struct the player is built from, so a creature that
     // walks, jumps, swims and steps over ledges gets all four for free — and gets

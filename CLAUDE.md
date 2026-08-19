@@ -2179,7 +2179,208 @@ The knob is one line on the boar's row. Run `--mobs 0 40000 2000` after changing
 
 ---
 
-## 24. Adding an item
+## 24. The first art that came out of a file
+
+Everything drawn in this world up to now was generated: `Picture` for an icon,
+`figure::Figure` for a creature, `canopy` for a tree, and the ground out of
+`marching_squares`. That was a choice each time — procedural paint has no asset to
+keep in step and no size to get wrong.
+
+The boar is drawn from a sprite pack now, and the change is smaller than it looks
+because §12 already left the door open for it: every material is drawn at
+`config::kPixelSize` because varying it opened a pale rind down the side of every
+block (§12.1) — and that argument is about **materials sharing a contour and a
+union**. A sprite drawn over the ground takes part in neither. §12 ends by saying a
+finer texel is "worth it for authored art; not worth it for procedural paint", and
+this is the authored art.
+
+**So a strip's pixels are world pixels, one for one.** A 28-wide boar is 28 world
+pixels across. That is very nearly the 24 the six-texel drawing came out at, which is
+why nothing else on the row had to move — the body is still 20 by 16.
+
+### 24.1 The cut is a tool, not a thing typed once
+
+`tools/cut_sprites.py`. The packs are drawn for a top-down game: four rows of the same
+animation, one per facing, and only the last — the side view — is any use in a
+platformer.
+
+Two decisions live in that file rather than in a shell history:
+
+- **The window.** Across every frame of idle, walk and run the boar occupies x 1..29
+  and y 5..26, and **the feet are on y = 26 in all of them**. So the bottom of the
+  window is the ground line, and one window is used for every animation of a creature.
+  Different windows per clip would mean a boar that changes height and jumps sideways
+  the moment it starts walking.
+- **Nothing is mirrored.** One right-facing strip, mirrored at draw time by a negative
+  source width — the same thing `figure::Draw` already does for the hand-drawn art. A
+  baked left-facing copy is twice the asset and a second thing to keep in step.
+
+### 24.2 A row names a folder, never a file
+
+`mob::Def::art` is `"boar"`, and the three clips inside `assets/mobs/boar/` are always
+called `idle`, `walk` and `run`. There is no filename in the creature table to
+misspell, and a misspelling there would show up as a creature quietly drawn from its
+fallback with nothing saying why.
+
+`mob::Wardrobe` loads them on the first draw and keeps them — a cache on the model of
+`canopy::Sheet`, and asked for **by row** rather than by path. It has to be lazy:
+`content::Open` runs before there is a window, and a texture needs one.
+
+`tried` is distinct from "it worked". A creature with no art and one whose art is
+missing must both stop trying, or a missing file is opened sixty times a second for as
+long as the game runs. The warning is printed once.
+
+**The hand-drawn `look` stays on the row.** Not as a leftover: it is what a missing
+file falls back to, what the contact sheet draws against, and the one description of
+the creature that cannot go out of date, because it is in the same file as everything
+else about it.
+
+### 24.3 The legs are driven by ground covered, not by a frame rate
+
+`Def::stride` is eight pixels, and it is a distance rather than an fps for one reason:
+feet that turn at a fixed rate skate over the ground at every speed but one, and a
+creature that ambles *and* bolts has two. Driven by distance, the same six frames carry
+it at both — the walk cycle is forty-eight pixels of ground, which is a little over two
+of its own body lengths.
+
+The idle is the exception and is counted in seconds, because standing still covers no
+ground and a breath is a breath.
+
+Both clocks are advanced in `Update` and never in `Draw`: a creature off screen still
+has to arrive somewhere in its cycle rather than starting from the first frame the
+moment it is looked at.
+
+### 24.4 What `--critters` proves now
+
+It draws four things on one ground line: the hand-drawn figure both ways round, every
+frame of the walk strip, and — over the collider — **one creature drawn through
+`Mob::Draw` itself**.
+
+That last one is the point. Everything else on the sheet draws the art directly, which
+proves the files are right without proving the game will ever show them: the clip is
+chosen from the creature's own motion and the wardrobe is loaded on the first frame it
+is looked at, and both of those live in `Mob`. A sheet that skipped them would go on
+looking perfect while the world drew nothing at all.
+
+---
+
+## 25. The foot of the screen is one layout, not three
+
+### 25.1 What was wrong
+
+Three files each put something above the hotbar and none of them knew about the
+others: `hotbar.cpp` drew the held item's name twenty pixels up, `hud.cpp` put the
+brush badge at a hundred and four from the bottom and the health bar at ninety-six.
+All three landed inside the same twenty pixels. What that reads as on screen is two
+lines of text touching with a bar behind them — and the only way to find out was to
+launch the game and take a screenshot.
+
+`bottom::Of()` is the whole layout now, as a pure function of the window size, and
+every row is measured **off the hotbar** so that a change to the bar's size or margin
+carries the rest with it. It is computed again in the draw rather than remembered,
+which is §14's rule for every menu screen and is the same rule here.
+
+### 25.2 The arrangement is Minecraft's
+
+```
+        wood plank            <- what is held, centred over everything
+  ♥♥♥♥♥♥♥♥♥♥        brush 1x1 <- vitals left, the hand right
+  [1][2][3][4][5][6][7][8][9] <- the hotbar
+```
+
+Java Edition stacks, from the hotbar up: the experience bar, then health with hunger
+beside it, then armour, with the held item's name floating over the lot. The half of
+the row where hunger sits is "the thing about you that is not your health", and this
+game's version of that is which tool is in hand and how wide it cuts.
+
+**The row is split by what the vitals need, not down the middle.** A half is a guess,
+and the moment a heart changes size the guess is either crowding the row or wasting
+it.
+
+One deliberate departure: **the name does not fade.** Minecraft fades it after a
+couple of seconds because there it is a reminder while you scroll and the bar is
+otherwise stable. Here a slot can hold a material, an item or a fixture and those are
+not all obvious from the picture, so the name earns its line permanently.
+
+There was a second, and it was a mistake worth writing down. The hearts hid themselves
+at full health, on the reasoning that a row which has never moved is furniture. What
+that missed is that **nothing in this game damages the player yet** — the boar's `hits`
+is zero and the hostile that had a number there was taken out — so the health never
+fell, so the row never appeared *once*. A display that is invisible until a condition
+nothing can currently produce is not restraint; it is a feature that looks broken, and
+it was reported as one within a minute of being played.
+
+They are always on in Survival now, as Minecraft has them. The reason is not that
+Minecraft's hearts move more often: a readout has to be somewhere the eye already knows
+*before* the moment it matters, and one that appears for the first time during the
+emergency is one the player has to find while being hit.
+
+### 25.3 Hearts, and why `kHealth` is twenty
+
+A bar says *how much of it* is left; a row of hearts says *how many more hits*, and
+the second is the question a player in trouble is actually asking. It is also
+countable out of the corner of an eye, which a bar at 40% is not.
+
+Ten hearts of two points each, with halves — so a bare fist at `kFistDamage` takes
+exactly half of one. **That is why `player_config::kHealth` is twenty and not a
+hundred.** A hundred is a fine figure for a bar and a useless one for hearts: it makes
+a punch a fiftieth of the row, which is a step nothing can see. The three numbers are
+chosen together and only work together.
+
+A heart is twenty-one pixels against a forty-four pixel slot, which is the proportion
+Minecraft draws — nine against twenty. It was fourteen first and read as decoration:
+at two pixels a cell the notch between the lobes closed up and the row stopped being
+countable.
+
+The outline round each one is not decoration either. A heart is drawn over whatever
+the world happens to be behind the hotbar, and a red shape on a red hillside at sunset
+is not a shape — the same argument `hud::Label` makes about the readout, in a picture
+instead of in text.
+
+### 25.4 Survival only, and drawn as one call
+
+Minecraft hides health, hunger, oxygen, experience and armour outright in Creative,
+and it is right to: a number that cannot change teaches the eye to stop looking, and
+then the one time it does mean something it is missed. The mode is asked for inside
+`vitals::Draw` rather than tested by the caller, so there is one place the rule lives.
+
+The strip is drawn by **one call**, `hud::Strip`. It was two — `hud::Draw` for the
+badge and the health, `hotbar::Draw` for the bar — and that is how the hearts came to
+be drawn *underneath* the inventory panel, the panel replacing only the bar. Anything
+laid out together has to be drawn together, or the layout is a coincidence.
+
+### 25.5 `--hud` exists because this could not be looked at
+
+Every other thing this project draws has a way of being seen without playing:
+`--critters` for a creature, `--probe` for the world, `tools/sheet.cpp` for a tree. The
+head-up display had none, which is exactly why three files could quietly claim the
+same twenty pixels.
+
+```bash
+./build/CppGame.exe --hud out.png [health] [wide] [tall] [creative]
+```
+
+It draws `hud::Strip` itself and never a copy — a probe that reproduced the layout
+would be checking the reproduction. Three things about how it reports:
+
+- **The plate is four bands**, not a flat grey: sky, grass, rock and the dark. The
+  readout is drawn over a moving world and the one thing it has to survive is the
+  background changing under it, so a layout judged against a neutral panel is judged
+  against the one background it will never have.
+- **It prints the rows and the gaps as numbers**, and fails when any gap closes.
+  "The information is too close together" is a statement about pixels, and a picture
+  alone cannot be measured with a ruler.
+- **The mode is an argument** because the Creative rule's whole effect is that
+  something is *not* there, and no single picture shows an absence. Render both and
+  compare.
+
+It also has to ask the window what size it actually got: `config::kMinScreenHeight` is
+a floor, so a size the window refused would give a picture of the strip hanging off
+the bottom of a texture of the wrong shape.
+
+---
+
+## 26. Adding an item
 
 One file. `src/item/items/<name>.h` with the row, and a `.cpp` beside it holding the
 registrar. §16.1's table of what a row buys still holds; what has changed is that

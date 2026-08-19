@@ -14,6 +14,7 @@
 #include "render/lit_layer.h"
 #include "ui/menu.h"
 #include "entity/mob/herd.h"
+#include "entity/mob/wardrobe.h"
 #include "entity/player/player.h"
 #include "probes/probes.h"
 #include "core/profile.h"
@@ -1704,12 +1705,13 @@ int main(int argc, char **argv) {
         {
             PROFILE_ZONE("DrawHud");
 
-            hud::Draw(world, grove, herd, player, editor, camera, debug, lantern, notice, noticeFor);
+            hud::Draw(world, grove, herd, player, editor, mode, camera, debug, lantern, notice, noticeFor);
 
-            // The panel replaces the bar rather than sitting over it, since it draws
-            // those same nine slots as its own bottom row.
+            // The panel replaces the whole strip rather than sitting over it, since it
+            // draws those same nine slots as its own bottom row — and since a row of
+            // hearts showing through from underneath it is the layout leaking.
             if (packOpen) inventory.Draw(mode);
-            else hotbar::Draw(inventory);
+            else hud::Strip(inventory, player.Vigour(), editor, mode);
 
             // Over everything, panel and bar included: an answer that arrived behind the
             // inventory is an answer nobody read.
@@ -1738,6 +1740,11 @@ int main(int argc, char **argv) {
     world.UnloadPainted();
     world.UnloadVista();
     grove.Unload();
+
+    // And the creature art, for the reason the wood's sheet is given back here: a
+    // texture that outlives the window it was made in is a crash on the way out, and
+    // one that only ever happens on somebody else's machine.
+    mob::Undress();
     liquids.Unload();
     lit.Unload();
     backdrop.Unload();

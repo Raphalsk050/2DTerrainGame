@@ -115,12 +115,16 @@ inline constexpr float kSwingArc = 2.2f;
 // will be this line.
 inline constexpr int kFistDamage = 2;
 
-// How much the character can take, and how hard a blow throws it.
+// How much the character can take.
 //
-// The knock is the character's own rather than the attacker's, unlike a creature's,
-// and it has to be: a player thrown a distance chosen by whatever hit them is a
-// player who cannot judge a fight. What a creature's row decides is how much of this
-// it gets, through `Def::knock`.
-inline constexpr int kHealth = 100;
+// Twenty, which is Minecraft's, and it is chosen to be *drawn* rather than to be a
+// round number: the display is ten hearts and a heart is two points, so a bare fist at
+// `kFistDamage` above takes exactly half of one. That correspondence is the whole of
+// what makes a row of hearts readable at a glance — see `ui/vitals.h` — and it holds
+// only while these numbers are chosen together.
+//
+// It was a hundred, which is a fine figure for a bar and a useless one for hearts: it
+// makes a punch a fiftieth of the row, which is a step nothing can see.
+inline constexpr int kHealth = 20;
 
 } // namespace player_config

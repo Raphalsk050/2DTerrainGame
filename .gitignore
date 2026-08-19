@@ -24,5 +24,13 @@ dist/
 # Capturas de tela
 *.png
 
+# ...menos a arte, que e do jogo e nao do experimento.
+#
+# A regra acima existe para os screenshot*.png que se acumulam na raiz, e ela pegava
+# junto tudo que entrasse em assets/. O sintoma disso nao aparece aqui: o jogo roda
+# nesta maquina porque os arquivos estao no disco, e nao roda em nenhum clone, com um
+# javali desenhado pelo desenho de reserva e nada dizendo por que.
+!assets/**/*.png
+
 .DS_Store
 compile_commands.json

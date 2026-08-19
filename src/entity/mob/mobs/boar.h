@@ -35,6 +35,21 @@ inline constexpr mob::Def kBoar = {
                 },
         },
 
+    // The cut-down sprite pack, four idle frames, six of walk and five of run.
+    //
+    // Twenty-eight pixels across and twenty-one tall, drawn one art pixel to one world
+    // pixel — see the head of `core/sheet.h` for why authored art is allowed a finer
+    // texel than the ground it stands on. That comes out the same size as the six-texel
+    // drawing above, which was 24 by 18: near enough that nothing else on the row had
+    // to move.
+    .art     = "boar",
+    .artWide = 28,
+
+    // Eight pixels a frame. The walk is six frames, so a full cycle is forty-eight
+    // pixels of ground — a little over two of its own body lengths, which is what a
+    // short-legged animal covers in a stride.
+    .stride = 8.0f,
+
     // Twenty by sixteen, which is the drawn figure less its margin. A collider
     // wider than the picture is a creature stopped by walls it visibly is not
     // touching; one narrower is a creature standing inside them.

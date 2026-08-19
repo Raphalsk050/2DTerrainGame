@@ -2,6 +2,8 @@
 #include "core/figure.h"
 #include "core/registry.h"
 #include "entity/mob/mob_def.h"
+#include "entity/mob/mob.h"
+#include "entity/mob/wardrobe.h"
 #include "probes/report.h"
 
 #include <cstdio>
@@ -63,7 +65,16 @@ int Run(const probes::Bench &bench) {
         tallest = std::max(tallest, look.height);
     }
 
-    const int cellW = kName + (widest * config::kPixelSize + kPad) * 2 + kPad;
+    // Room for the hand-drawn figure twice and every frame of the walk beside it.
+    int reeled = 0;
+
+    for (int r = 0; r < rows; r++) {
+        const mob::Wardrobe &worn = mob::Dressed(mob::kinds::Of(mob::Kind{r}));
+
+        reeled = std::max(reeled, worn.walk.Ready() ? worn.walk.frames * (worn.walk.wide + 4) : 0);
+    }
+
+    const int cellW = kName + (widest * config::kPixelSize + kPad) * 2 + kPad + reeled + kPad;
     const int cellH = tallest * config::kPixelSize + kPad * 2;
 
     RenderTexture2D sheet = LoadRenderTexture(cellW, cellH * rows);
@@ -97,6 +108,42 @@ int Run(const probes::Bench &bench) {
         figure::Draw(def.look, {rightAt, feet}, texel, 1, WHITE);
         figure::Draw(def.look, {leftAt, feet}, texel, -1, WHITE);
 
+        // And the authored art beside it, on the same ground line and at the same
+        // scale it is drawn in the world.
+        //
+        // Side by side and not on separate sheets, because the one thing that has to be
+        // true of a sprite replacing a drawing is that it is *the same size* — and two
+        // pictures of the same animal on two pages cannot be compared at all.
+        const mob::Wardrobe &worn = mob::Dressed(def);
+
+        if (worn.walk.Ready()) {
+            const float stripAt = leftAt + def.look.width * texel * 0.5f + static_cast<float>(kPad) * 2.0f;
+
+            for (int f = 0; f < worn.walk.frames; f++) {
+                const float at = stripAt + static_cast<float>(f) * (worn.walk.wide + 4.0f) + worn.walk.wide * 0.5f;
+
+                sheet::Draw(worn.walk, f, {at, feet}, 1.0f, 1, WHITE);
+            }
+        }
+
+        // And one drawn through `Mob::Draw` itself, which is the path the game uses.
+        //
+        // Everything above draws the art directly, and that proves the files are right
+        // without proving the game will ever show them: the clip is chosen from the
+        // creature's own motion, the wardrobe is loaded on the first frame it is looked
+        // at, and both of those live in `Mob` rather than here. A sheet that skipped
+        // them would go on looking perfect while the world drew nothing at all.
+        //
+        // Standing still, so what comes out is the idle — which is also the one clip
+        // the game shows most of the time.
+        {
+            mob::Mob one;
+
+            one.Wake(mob::Kind{r}, {rightAt, feet}, 0x5EEDu);
+
+            one.Draw();
+        }
+
         // And the collider it actually has, which is the thing the drawing is
         // supposed to agree with. A figure wider than its box is a creature stopped
         // by walls it visibly is not touching; narrower and it stands inside them.
@@ -129,9 +176,21 @@ int Run(const probes::Bench &bench) {
     for (int r = 0; r < rows; r++) {
         const mob::Def &def = mob::kinds::Of(mob::Kind{r});
 
-        std::printf("  %-10s %2d x %-2d texels = %3.0f x %-3.0f px   body %3.0f x %-3.0f   %s\n", def.name,
+        std::printf("  %-8s drawn %2d x %-2d texels = %3.0f x %-3.0f px   body %3.0f x %-3.0f   %s\n", def.name,
                     def.look.width, def.look.height, def.look.width * texel, def.look.height * texel,
                     def.build.width, def.build.height, def.temper);
+
+        // The art beside the drawing, in the same units, because "the sprite is the
+        // same size as what it replaced" is the one claim that has to be checkable
+        // without opening the picture.
+        const mob::Wardrobe &worn = mob::Dressed(def);
+
+        if (!worn.Any()) continue;
+
+        const sheet::Strip &any = worn.walk.Ready() ? worn.walk : worn.idle;
+
+        std::printf("  %-8s art   %2d x %-2d px%18s   idle %d, walk %d, run %d   stride %.0f px\n", "", any.wide,
+                    any.tall, "", worn.idle.frames, worn.walk.frames, worn.run.frames, def.stride);
     }
 
     return wrote ? 0 : 1;
