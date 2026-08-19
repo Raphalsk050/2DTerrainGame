@@ -542,76 +542,6 @@ struct Settings {
     float ceiling = -620.0f;
     float base    = -300.0f;
 
-    // The far deck: this same weather, further off.
-    //
-    // The sky had one band of cloud near the top of it and nothing at all between
-    // that band and the ground — two thirds of the picture was a gradient with
-    // nothing in it. Distance is what fills it.
-    //
-    // Not a second sky. Every figure here is a *share* of the deck above rather than
-    // a number of its own, because what is being drawn is the same cloud seen from
-    // further away: its shapes compress, it crawls instead of sailing, there is more
-    // air in front of it, and it stacks up towards the horizon the way anything does
-    // that recedes.
-    struct Distance {
-        // The band it stands in. It begins where the near deck's underside is and
-        // runs down towards the horizon, which is the strip that was empty.
-        //
-        // Thin, and deliberately: what recedes gathers into a ribbon rather than
-        // spreading, so a band as tall as the near one reads as a second sky at head
-        // height instead of as the same sky further off.
-        float ceiling = -300.0f;
-        float base    = -120.0f;
-
-        // How large its shapes are against the near deck's. Under one, so a far
-        // cloud is a smaller thing — which is the whole of what makes it read as far
-        // rather than as low.
-        float scale = 0.30f;
-
-        // And how much flatter. Distance foreshortens: a cumulus overhead keeps its
-        // shape, and the same cloud near the horizon is seen edge-on and squashes
-        // into a horizontal ellipse. Above one, so its features are wider than they
-        // are tall.
-        float flatten = 1.9f;
-
-        // And how fast it goes, as a share of the near deck's drift. This is the
-        // parallax and it is the strongest cue of the four: a thing that moves
-        // slower than the thing in front of it is behind it, and the eye reads that
-        // before it reads size or colour.
-        float drift = 0.38f;
-
-        // How far towards the colour of the air it is washed, at the top of the band
-        // and at the bottom of it. Aerial perspective — what is between the eye and a
-        // far thing is air, and the further it is the more of it there is.
-        //
-        // A gradient rather than one figure, because the band itself recedes: its
-        // lower edge is further away than its upper one, which is why a real horizon
-        // fades out rather than stopping. It is also what keeps the deck from ending
-        // in a line where the band does.
-        float haze     = 0.34f;
-        float hazeFar  = 0.72f;
-
-        // And how much of the weather's cover reaches it.
-        //
-        // Over one, which is not a mistake: a distant cloud is seen from the side, so
-        // the same scattered deck that shows as separate lumps overhead runs together
-        // into a ribbon near the horizon. Standing in a field on a fair day, the sky
-        // above is mostly blue and the horizon is mostly cloud.
-        float cover = 0.80f;
-
-        // How sharply its band thins towards the top and bottom, against the near
-        // deck's own taper. Under one, so the far band is fuller — a distant deck
-        // reads as a ribbon with an edge, not as a row of lozenges.
-        float taper = 0.9f;
-
-        // Where in the field it is sampled from, so the two decks are two different
-        // stretches of weather rather than one stretch drawn twice at two sizes.
-        float slice = 4000.0f;
-
-    };
-
-    Distance distance{};
-
     // How much lower the underside hangs in the heaviest weather. A rain cloud sits
     // closer to the ground than a fair-weather one, and this is the visible half of
     // that.
@@ -1208,40 +1138,11 @@ public:
 
     Column ColumnAt(float worldX) const;
 
-    // One deck of cloud, as everything the drawing needs to tell it from another.
-    //
-    // The near deck is this with a scale and a drift of one and no haze, which is
-    // what keeps the two from being two pieces of code: there is one deck-drawing
-    // routine and it is handed two decks.
-    struct Deck {
-        float ceiling = 0.0f;
-        float base    = 0.0f;
-
-        float scale   = 1.0f;
-        float flatten = 1.0f;
-        float taper   = 1.0f;
-        float texel   = 1.0f;
-        float drift   = 1.0f;
-        float cover   = 1.0f;
-        float slice   = 0.0f;
-
-        // The haze at the top of the band and at the bottom of it. Both nought for
-        // the near deck, which has no air in front of it worth drawing.
-        float haze    = 0.0f;
-        float hazeFar = 0.0f;
-    };
-
-    Deck Near() const;
-    Deck Far() const;
-
     // How far the cloud field stands above the cutoff at a point of sky. Positive
     // inside a cloud, negative outside, and the value the layers are thresholded
     // against. The column is passed in so a caller walking a grid can hoist it out
     // of the inner loop.
     float MarginAt(Vector2 world, const Column &column) const;
-
-    // The same, for a deck that is not the near one.
-    float MarginIn(const Deck &deck, Vector2 world, const Column &column) const;
 
     // The same, softened into [0,1]. What "how much cloud is here" means when the
     // answer has to be a share.
@@ -1584,10 +1485,7 @@ private:
     // the colour is decided per cell. It follows the same world anchoring and the
     // same run batching, and it has to: a cloud drawn on a grid of its own would not
     // line up with the ground.
-    void DrawShaded(const Grid &field, Vector2 towards, int bands, const Deck &deck) const;
-
-    // One deck of it, drawn where it stands.
-    void DrawDeck(const Deck &deck, Rectangle view, int spacing) const;
+    void DrawShaded(const Grid &field, Vector2 towards, int bands) const;
 
     // The mood a spell of weather has, drawn from the spell's index. A pure function
     // of it, so the sequence is the same every run of the same world.
