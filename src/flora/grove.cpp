@@ -1357,7 +1357,7 @@ bool Grove::TimberAt(Rectangle probe, float now) const {
     return false;
 }
 
-void Grove::Strike(Rectangle hitbox, float damage, Vector2 from, float now) {
+bool Grove::Strike(Rectangle hitbox, float damage, Vector2 from, float now) {
     for (const flora::Plant &plant : plants_) {
         const std::optional<Rectangle> box = StrikeRect(plant, now);
 
@@ -1382,7 +1382,7 @@ void Grove::Strike(Rectangle hitbox, float damage, Vector2 from, float now) {
             Blow(state, now);
             state.stumpHealth -= damage / std::max(def.growth.toughness * stature * kStumpShare, 0.5f);
 
-            if (state.stumpHealth > 0.0f) return;
+            if (state.stumpHealth > 0.0f) return true;
 
             state.cleared = true;
 
@@ -1394,7 +1394,7 @@ void Grove::Strike(Rectangle hitbox, float damage, Vector2 from, float now) {
             // And the last of the wood, out of the root.
             Yield(plant, state, now, kStumpYield, true);
 
-            return;
+            return true;
         }
 
         // On its way over. A tree in the air is not something an axe can reach,
@@ -1431,7 +1431,7 @@ void Grove::Strike(Rectangle hitbox, float damage, Vector2 from, float now) {
                                state.fallLeft ? -1.0f : 1.0f, now);
             }
 
-            return;
+            return true;
         }
 
         TreeState &state = Remember(plant, now);
@@ -1439,7 +1439,7 @@ void Grove::Strike(Rectangle hitbox, float damage, Vector2 from, float now) {
         Blow(state, now);
         state.health -= damage / std::max(def.growth.toughness * stature, 0.5f);
 
-        if (state.health > 0.0f) return;
+        if (state.health > 0.0f) return true;
 
         state.felledAt = now;
 
@@ -1447,7 +1447,7 @@ void Grove::Strike(Rectangle hitbox, float damage, Vector2 from, float now) {
         // one thing in the world actively trying to land on the player.
         state.fallLeft = from.x > plant.base.x;
 
-        return;
+        return true;
     }
 
     // And the floor under them, after them — the order they are drawn in. A fern
@@ -1488,8 +1488,13 @@ void Grove::Strike(Rectangle hitbox, float damage, Vector2 from, float now) {
         // again until the next Update.
         undergrowth_.erase(undergrowth_.begin() + static_cast<std::ptrdiff_t>(i));
 
-        return;
+        return true;
     }
+
+    // The swing went through nothing that grows. Said rather than assumed, because
+    // what reads this is the axe: a blow that hit no wood must not wear one out, and a
+    // held button over a tree that has already gone over is exactly that blow.
+    return false;
 }
 
 

@@ -1,4 +1,5 @@
 #include "core/content.h"
+#include "item/icon.h"
 #include "item/items/fibre.h"
 #include "weather/backdrop.h"
 #include "flora/canopy.h"
@@ -1619,8 +1620,16 @@ int main(int argc, char **argv) {
                 // under a tree from felling it the moment the cursor wanders onto
                 // the trunk, and a swing that struck whatever it happened to be over
                 // would undo it.
+
+                // What the swing actually met, over both the wood and the creature it
+                // may have gone through, and it is counted rather than assumed: a tool
+                // is worn by work and a swing at open air is not work. A held button
+                // over a tree that has already gone over would otherwise cost an axe a
+                // point of its lifetime every frame.
+                bool landed = false;
+
                 if (editor.Left() == Editor::Hand::Chop) {
-                    grove.Strike(swing, chopBlow, player.Centre(), world.Sky().Time());
+                    landed = grove.Strike(swing, chopBlow, player.Centre(), world.Sky().Time());
                 }
 
                 // And whatever was standing in it, whichever tool the hand became —
@@ -1634,7 +1643,20 @@ int main(int argc, char **argv) {
                 // floor; a sword adds to it rather than replacing it, so a boar at
                 // ten is five punches or two swings and both figures come off the
                 // same line.
-                herd.Strike(swing, player_config::kFistDamage + kit.damage, player.Centre(), kFistKnock, kFistLift);
+                if (herd.Strike(swing, player_config::kFistDamage + kit.damage, player.Centre(), kFistKnock,
+                                kFistLift)
+                    > 0) {
+                    landed = true;
+                }
+
+                // One point for the swing, however much it went through. Minecraft
+                // charges a sword one and every other tool two for hitting something
+                // alive; that distinction is worth having the day a swing is a thing a
+                // player chooses, and today every tool here swings the same way.
+                //
+                // In survival only, for the reason nothing else in creative is spent:
+                // a tool that ran out would be the one thing in that mode that does.
+                if (landed && mode == Gamemode::Survival) inventory.WearHeld();
 
                 // And whatever grass the same swing went through, whichever tool it
                 // was: a handful of grass comes away from a spade as readily as from
@@ -1733,7 +1755,8 @@ int main(int argc, char **argv) {
 
             lit.Capture();
 
-            if (lit.Ready()) render::LitWorld(world, grove, fixtures, herd, player, trail, liquids, world.Light(), camera, debug);
+            if (lit.Ready()) render::LitWorld(world, grove, fixtures, herd, player, inventory.Held(), trail, liquids, world.Light(),
+                                              camera, debug);
 
             lit.Finish();
         }
@@ -1811,6 +1834,11 @@ int main(int argc, char **argv) {
     // texture that outlives the window it was made in is a crash on the way out, and
     // one that only ever happens on somebody else's machine.
     mob::Undress();
+
+    // And the item art, which is the same argument again: an authored picture is a
+    // texture like any other, and the ones a session happened to look at are the ones
+    // that would still be held.
+    icon::Discard();
     liquids.Unload();
     lit.Unload();
     backdrop.Unload();

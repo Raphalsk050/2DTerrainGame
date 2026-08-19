@@ -1258,6 +1258,74 @@ bool World::IsSolidAt(Vector2 world) const {
     return false;
 }
 
+bool World::PaintedAt(Vector2 world) const {
+    const float step = static_cast<float>(spacing_);
+
+    // The cell this point falls in, and how far across it the point lies. Worked out
+    // from the world rather than from a chunk, so it answers the same beyond the
+    // resident area — where `ValueAt` falls back to the noise — as it does inside it.
+    const float u = std::floor(world.x / step);
+    const float v = std::floor(world.y / step);
+
+    const float fx = world.x / step - u;
+    const float fy = world.y / step - v;
+
+    const Vector2 a = {u * step, v * step};
+    const Vector2 b = {a.x + step, a.y};
+    const Vector2 c = {a.x, a.y + step};
+    const Vector2 d = {a.x + step, a.y + step};
+
+    for (std::size_t e = 0; e < kElementCount; e++) {
+        const ElementDef &def = kElements[e];
+
+        if (!def.rules.blocksBodies) continue;
+
+        const Element element = static_cast<Element>(e);
+
+        // Through `marching_squares::Blend` itself, which is what `SampleAt` is made
+        // of. A second copy of the interpolation here would be a second answer to
+        // where the ground is, which is the very fault this function exists to close.
+        const float sample = marching_squares::Blend(ValueAt(element, a), ValueAt(element, b), ValueAt(element, c),
+                                                     ValueAt(element, d), fx, fy);
+
+        if (sample > def.threshold) return true;
+    }
+
+    return false;
+}
+
+bool World::Degenerate(Vector2 world) const {
+    const Vector2 vertex = SnapToLattice(world);
+
+    // Nothing there at all, so there is nothing to be degenerate about.
+    if (!IsSolidAt(vertex)) return false;
+
+    const float step  = static_cast<float>(spacing_);
+    const float pixel = config::kPixelSize;
+
+    // The squares whose centres fall in this vertex's own square, which is the run of
+    // world a body stops against. Walked rather than assumed to be four of them: the
+    // count is `step / pixel` squared and both are configuration, and §10.4 is the
+    // long story of what happens when a size stops dividing.
+    const float from = vertex.x - step * 0.5f;
+    const float upto = vertex.x + step * 0.5f;
+
+    const float top    = vertex.y - step * 0.5f;
+    const float bottom = vertex.y + step * 0.5f;
+
+    for (float y = std::floor(top / pixel) * pixel + pixel * 0.5f; y < bottom; y += pixel) {
+        if (y < top) continue;
+
+        for (float x = std::floor(from / pixel) * pixel + pixel * 0.5f; x < upto; x += pixel) {
+            if (x < from) continue;
+
+            if (PaintedAt({x, y})) return false;
+        }
+    }
+
+    return true;
+}
+
 std::optional<Element> World::OccupantAt(Vector2 world) const {
     std::optional<Element> occupant;
     int rank = 0;
@@ -1425,6 +1493,17 @@ World::Stroke World::ApplyStroke(const Reach &reach, std::optional<Element> plac
     bool turned = false;
 
     const auto finish = [&] {
+        // Nothing that stops a body may be left behind without drawing itself.
+        //
+        // On a dig alone: placing writes the material at the top of its range and
+        // cannot leave a sliver, and the one thing it clears is the liquid it
+        // displaces, which stops nothing. See Undegenerate for the whole of why.
+        //
+        // Inside `finish` rather than at the end of the loop, so that the stroke
+        // running out of budget cannot be a way past it — the same reason the grass
+        // below is told from here.
+        if (!place.has_value()) Undegenerate(reach, edit.freed);
+
         // The band was worked out at the top of the frame, before this stroke
         // existed. Left alone it would draw one frame of established grass over
         // ground the stroke has just turned over — and since a held brush turns
@@ -1570,6 +1649,56 @@ World::Stroke World::ApplyStroke(const Reach &reach, std::optional<Element> plac
     }
 
     return finish();
+}
+
+int World::Undegenerate(const Reach &reach, Yield &yield) {
+    const float step = static_cast<float>(spacing_);
+
+    // Everything the stroke could have left stranded: the vertices it wrote, and the
+    // ring of neighbours round them. A vertex only reaches the squares of the eight
+    // vertices touching it, so one ring is the whole of what a single pass can have
+    // changed — and anything further out is reached by the work list below.
+    std::vector<std::pair<int, int>> queue;
+
+    for (int i = reach.i0 - 1; i <= reach.i1 + 1; i++) {
+        for (int j = reach.j0 - 1; j <= reach.j1 + 1; j++) queue.emplace_back(i, j);
+    }
+
+    int cleared = 0;
+
+    // Walked as a queue rather than as a fixed sweep, so a vertex left stranded by the
+    // one before it is looked at rather than left for the next stroke. The bound is
+    // what actually comes away: nothing is added to the list except round a vertex that
+    // was taken, and a vertex can only be taken once.
+    for (std::size_t at = 0; at < queue.size(); at++) {
+        const auto [i, j] = queue[at];
+
+        const Vector2 vertex = {static_cast<float>(i) * step, static_cast<float>(j) * step};
+
+        if (!Degenerate(vertex)) continue;
+
+        if (!ClearVertex(vertex, yield)) continue;
+
+        // Written into the chunk's journal on its own account, because the stroke was
+        // never asked about this vertex — §11.2's rule, and without it the hole is
+        // clean only until the chunk is dropped. An edited chunk is pinned, so a
+        // session never shows the difference; `--stuck` walks forty thousand pixels
+        // away and back, and reported 43 of them coming back the one time this line
+        // was taken out to see whether the check was worth having.
+        Remember(vertex, std::nullopt, false);
+
+        cleared++;
+
+        for (int di = -1; di <= 1; di++) {
+            for (int dj = -1; dj <= 1; dj++) {
+                if (di == 0 && dj == 0) continue;
+
+                queue.emplace_back(i + di, j + dj);
+            }
+        }
+    }
+
+    return cleared;
 }
 
 World::Reach World::CellReach(int cx, int cy) const {

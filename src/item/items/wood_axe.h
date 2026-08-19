@@ -34,6 +34,10 @@ inline constexpr ItemDef kWoodAxe = {
                 },
         },
 
+    // Drawn from a file rather than from the four tones above. See `ItemDef::art` for
+    // what that means and `item/icon.h` for how the two are drawn to the same size.
+    .art = "blocks/tools/wood_axe",
+
     // One to a slot, as every tool in Minecraft is. A stack of nine identical
     // pickaxes is a thing no player has ever wanted and nine slots of the bar gone.
     .stack = 1,
@@ -42,7 +46,7 @@ inline constexpr ItemDef kWoodAxe = {
     // down as a block is the one thing a right click must not do with it.
     .placement = Placement::None,
 
-    .tool = {.kind = Tool::Axe, .speed = tool::kWood, .damage = 2},
+    .tool = {.kind = Tool::Axe, .speed = tool::kWood, .damage = 2, .lasts = tool::kWoodLasts},
 };
 
 // This row's id. Worked out on the first call, which is after `content::Open` has

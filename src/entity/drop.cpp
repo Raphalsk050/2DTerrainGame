@@ -1,5 +1,7 @@
 #include "entity/drop.h"
 
+#include "item/icon.h"
+
 #include "core/config.h"
 #include "core/picture.h"
 
@@ -167,7 +169,7 @@ void Drops::Scatter(Stack stack, Vector2 from, float away, float now) {
         // already lying here, because the one thing that must not happen is the
         // player's material quietly ceasing to exist.
         if (pickup == nullptr) {
-            Stack rest = {.holds = stack.holds, .what = stack.what, .count = count + each * (pieces - i - 1) + spare};
+            Stack rest = stack.Some(count + each * (pieces - i - 1) + spare);
 
             Spill(rest, from);
             return;
@@ -182,7 +184,7 @@ void Drops::Scatter(Stack stack, Vector2 from, float away, float now) {
         pickup->at       = from;
         pickup->velocity = {away * kThrowSpeed * (0.35f + 0.65f * spread),
                             -kThrowLift * (0.6f + 0.5f * Spray(seed + 5))};
-        pickup->stack    = {.holds = stack.holds, .what = stack.what, .count = count};
+        pickup->stack    = stack.Some(count);
         pickup->bornAt   = now;
         pickup->holdFor  = kSettleDelay;
         pickup->settled  = false;
@@ -389,7 +391,7 @@ void Drops::Draw() const {
         // past it.
         const Vector2 corner = {Snap(pickup.at.x - side * 0.5f), Snap(pickup.at.y - side * 0.5f)};
 
-        DrawPicture(PictureOf(pickup.stack), corner, pixel);
+        icon::Draw(pickup.stack, corner, pixel);
     }
 }
 

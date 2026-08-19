@@ -1,11 +1,13 @@
 #include "item/inventory.h"
 
 #include "ui/hotbar.h"
+#include "item/icon.h"
 #include "core/picture.h"
 #include "ui/skin.h"
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace {
 
@@ -28,20 +30,15 @@ constexpr Color kCount = skin::kAccent;
 constexpr float kTabHigh = 30.0f;
 constexpr float kTabWide = 104.0f;
 
-const char *NameOf(Inventory::Tab tab) {
-    switch (tab) {
-    case Inventory::Tab::Blocks: return "blocks";
-    case Inventory::Tab::Nature: return "nature";
-    case Inventory::Tab::Gear: return "gear";
-    case Inventory::Tab::Count: break;
-    }
-
-    return "";
-}
-
 // The name of what the cursor is over, beside the cursor.
 void DrawTip(const Stack &stack, Vector2 mouse) {
-    const char *text = (stack.count > 1) ? TextFormat("%s  x%d", stack.Name(), stack.count) : stack.Name();
+    // The bar answers "how much is left" at a glance and this answers "how much
+    // exactly", which is the question a player asks once they have decided the answer
+    // matters. Both, rather than either: a bar alone cannot be compared between two
+    // pickaxes, and a number alone is not readable while digging.
+    const char *text = stack.Wears() ? TextFormat("%s  %d/%d", stack.Name(), stack.Left(), stack.Lasts())
+                     : (stack.count > 1) ? TextFormat("%s  x%d", stack.Name(), stack.count)
+                                         : stack.Name();
 
     const float width = static_cast<float>(MeasureText(text, 14));
 
@@ -84,7 +81,7 @@ void Inventory::Fill(Stack &stack, int from, int upto) {
 
         const int fits = std::min(stack.Limit(), stack.count);
 
-        into = {.holds = stack.holds, .what = stack.what, .count = fits};
+        into = stack.Some(fits);
         stack.count -= fits;
     }
 }
@@ -165,7 +162,11 @@ Stack Inventory::Take(int slot, int count) {
     if (from.Empty() || count <= 0) return {};
 
     const int taken = std::min(count, from.count);
-    const Stack away = {.holds = from.holds, .what = from.what, .count = taken};
+
+    // Through Some, so that what comes off a slot is the same *thing* that was in it
+    // — including how worn it is. Built field by field, a pickaxe picked up off the
+    // ground came back as good as new, which is a repair nobody meant to write.
+    const Stack away = from.Some(taken);
 
     from.count -= taken;
 
@@ -187,7 +188,7 @@ Stack Inventory::Put(int slot, Stack stack) {
     if (into.Empty()) {
         const int fits = std::min(stack.Limit(), stack.count);
 
-        into = {.holds = stack.holds, .what = stack.what, .count = fits};
+        into = stack.Some(fits);
         stack.count -= fits;
 
         return (stack.count > 0) ? stack : Stack{};
@@ -223,6 +224,31 @@ Stack Inventory::Release() {
     carried_ = {};
 
     return away;
+}
+
+bool Inventory::WearHeld(int by) {
+    if (by <= 0) return false;
+
+    Stack &held = slots_[static_cast<std::size_t>(selected_)];
+
+    if (held.Empty() || !held.Wears()) return false;
+
+    // Saturating, because `wear` is sixteen bits and the count that comes in is a
+    // number of blows. Nothing in the game can land sixty-five thousand of them in one
+    // frame, and a wrap would hand the player a brand new pickaxe for the last swing of
+    // an old one.
+    const int worn = std::min<int>(held.wear + by, std::numeric_limits<std::uint16_t>::max());
+
+    held.wear = static_cast<std::uint16_t>(worn);
+
+    if (!held.Spent()) return false;
+
+    // Gone, and gone entirely rather than left at a count of zero: an emptied slot that
+    // still remembered what used to be in it would merge with the next one of those to
+    // come past and refuse every other — Take's own reasoning, one line further on.
+    held = {};
+
+    return true;
 }
 
 void Inventory::Clear() {
@@ -298,10 +324,23 @@ Rectangle Inventory::TabBounds(int tab) {
     return {panel.x + static_cast<float>(tab) * (kTabWide + 4.0f), panel.y - kTabHigh + 2.0f, kTabWide, kTabHigh};
 }
 
+const char *Inventory::NameOf(Tab tab) {
+    switch (tab) {
+    case Tab::Blocks: return "blocks";
+    case Tab::Nature: return "nature";
+    case Tab::Gear: return "gear";
+    case Tab::Count: break;
+    }
+
+    return "";
+}
+
 Inventory::Page Inventory::PageOf(Tab tab) {
     Page page;
 
     const auto add = [&page](Stack stack) {
+        page.wanted++;
+
         if (page.count >= static_cast<int>(page.at.size())) return;
 
         page.at[static_cast<std::size_t>(page.count)] = stack;
@@ -436,7 +475,7 @@ Inventory::Gesture Inventory::Update(Gamemode mode) {
     // item, which is the left button's gesture and not this one.
     if (!into.Empty() && !(into.Alike(carried_) && into.Room() > 0)) return gesture;
 
-    Put(over, {.holds = carried_.holds, .what = carried_.what, .count = 1});
+    Put(over, carried_.Some(1));
 
     carried_.count--;
     if (carried_.count <= 0) carried_ = {};
@@ -463,7 +502,7 @@ void Inventory::Draw(Gamemode mode) const {
             DrawRectangleRec(at, face);
             DrawRectangleLinesEx(at, 2.0f, kEdge);
 
-            const char *name = NameOf(static_cast<Tab>(tab));
+            const char *name = Inventory::NameOf(static_cast<Tab>(tab));
             const int wide   = MeasureText(name, 14);
 
             DrawText(name, static_cast<int>(at.x + (at.width - static_cast<float>(wide)) / 2.0f),
@@ -523,7 +562,8 @@ void Inventory::Draw(Gamemode mode) const {
 
     const Vector2 corner = {std::floor(mouse.x - drawn / 2.0f), std::floor(mouse.y - drawn / 2.0f)};
 
-    DrawPicture(PictureOf(carried_), corner, pixel);
+    icon::Draw(carried_, corner, pixel);
+    icon::DrawWear(carried_, corner, pixel);
 
     if (carried_.count <= 1) return;
 

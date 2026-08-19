@@ -98,6 +98,24 @@ inline constexpr float kAttackCooldown = 0.35f;
 inline constexpr float kAttackReach = 22.0f;
 inline constexpr float kAttackSize  = 18.0f;
 
+// How long the tool in the hand is, in world pixels, measured across the whole of the
+// square canvas it was drawn on.
+//
+// The canvas and not the drawing: a pickaxe fills 48 pixels of its 64 and a shovel 28,
+// and scaling each to what it happens to occupy would make the shovel the longer of the
+// two. One figure for the canvas is what keeps fifteen separate files reading as one set
+// — `icon::Draw`'s argument about the slot, and §24.1's about one window per creature.
+//
+// Twenty-two against a character twenty-six tall and twelve wide, which puts the head of
+// a pickaxe at fifteen: a little wider than the body carrying it, which is the
+// proportion a tool held in one hand reads at. **The file is untouched** — the art stays
+// 64 pixels square and only the scale it is drawn at moves.
+//
+// Here rather than in `player.cpp` because it is half of how far the character reaches:
+// `kAttackReach` puts the hand out and this is what sticks out past it, so anything
+// framing the character — `--gear`'s cells today — needs both or it cuts the tool off.
+inline constexpr float kHeldTool = 22.0f;
+
 // How far back the arm is raised at the top of a swing, in radians.
 //
 // A little over a third of a turn, which is enough to read as a swing at this size

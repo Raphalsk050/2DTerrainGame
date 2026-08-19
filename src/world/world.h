@@ -119,6 +119,33 @@ public:
     // the loaded area and does not change as chunks come and go.
     bool IsSolidAt(Vector2 world) const;
 
+    // Whether anything that stops a body is actually *painted* at this point.
+    //
+    // The same test the draw makes, and deliberately not the same test `IsSolidAt`
+    // makes. A square is painted where the field **interpolated at its centre** is
+    // over the threshold; a body collides where the **nearest lattice vertex** is.
+    // Those agree in the middle of a hillside and part company at every edge, and at
+    // one vertex standing on its own they part company completely: the nearest texel
+    // centre sits a quarter of a cell away in each direction, so it reads
+    // nine sixteenths of the vertex's value, and anything between the threshold and
+    // nine fifths of it is a full square of solid ground that nothing paints a pixel
+    // of.
+    //
+    // Which is a block that is invisible and impassable at once — §13.5's fault
+    // exactly, one layer down. That section fixed the hand's half of it, so the
+    // player can dig such a vertex out; this is the half where they cannot see that
+    // there is anything to dig.
+    bool PaintedAt(Vector2 world) const;
+
+    // Whether the vertex nearest `world` is ground that nothing draws.
+    //
+    // Over the threshold — so a body stops against the whole square around it — while
+    // not one of the four squares that make up that square is painted. There is no
+    // arrangement of the game in which that is a thing the world should contain, and
+    // `ApplyStroke` clears them rather than leaving them: see the sweep at the end of
+    // it, and `--stuck`, which is the check.
+    bool Degenerate(Vector2 world) const;
+
     // True where any material stops liquids.
     bool BlocksLiquidAt(Vector2 world) const;
 
@@ -873,6 +900,27 @@ private:
     Stroke ApplyStroke(const Reach &reach, std::optional<Element> place, int budget, Rectangle keepClear);
 
     Reach CellReach(int cx, int cy) const;
+
+    // Takes away every vertex around `reach` that is left stopping a body without
+    // drawing itself, and counts what came off into `yield`.
+    //
+    // Run at the end of a *dig*, and there is nowhere else it could go. A cell at the
+    // contour edge holds one vertex of its nine; a player clears the cells they can see
+    // around it; and the one that is left over is a full square of solid ground with
+    // nothing painted anywhere in it. Measured over forty doorways dug into real
+    // hillsides, better than half of them left one behind — which is the "sometimes"
+    // in the report this came from.
+    //
+    // **Only on a dig.** Placing writes the material at the top of its range and cannot
+    // leave a sliver, and the one thing it does clear is the liquid it displaces, which
+    // stops no body. See `ApplyStroke`.
+    //
+    // A work list rather than a fixed margin, because taking a vertex away lowers what
+    // its neighbours' squares sample and so can leave one of *them* drawing nothing. It
+    // settles almost at once — a vertex inside solid rock has its own value and seven
+    // full neighbours, so the effect damps within a step — but "almost at once" is not
+    // a bound, and a fixed margin would leave the fault sitting one vertex further out.
+    int Undegenerate(const Reach &reach, Yield &yield);
 
     // Whether the square a vertex owns meets a rectangle.
     //

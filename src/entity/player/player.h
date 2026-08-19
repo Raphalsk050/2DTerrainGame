@@ -8,6 +8,7 @@
 #include "raylib.h"
 
 class World;
+struct Stack;
 
 // The character.
 //
@@ -28,7 +29,15 @@ public:
     explicit Player(Vector2 spawn);
 
     void Update(const PlayerInput &input, const World &terrain, float dt);
-    void Draw() const;
+
+    // The character, and whatever is in its hand.
+    //
+    // Handed the slot rather than the inventory, and not to save an include: what the
+    // character is *drawn* holding is one stack, and a draw that could see the whole
+    // pack is a draw that could decide to show something else — which is a second
+    // answer to what the player is holding, kept somewhere nobody would look for it.
+    // The bar along the foot of the screen is the first.
+    void Draw(const Stack &held) const;
 
     // Body in world space. Shrinks vertically while crouching.
     Rectangle Bounds() const { return body_.Bounds(); }
@@ -91,6 +100,14 @@ public:
     void Revive() { health_.Fill(); }
 
 private:
+    // The tool in the hand at the end of the arm, turned to lie along it.
+    //
+    // Split out of Draw rather than written into it because it is the one part of the
+    // character that is about something the character does not own: what is held comes
+    // from the pack, and the arm is worked out here. Two subjects in one function is
+    // how the arm's own arithmetic gets edited by somebody meaning to move a pickaxe.
+    void DrawHeld(const Stack &held, Vector2 hand, Vector2 arm) const;
+
     void UpdateAim(const PlayerInput &input);
     void UpdateAttack(const PlayerInput &input, float dt);
     void UpdateState();

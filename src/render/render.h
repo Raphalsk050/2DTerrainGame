@@ -32,7 +32,7 @@ void ComposeLight(const light::Field &field);
 // Everything the light multiplies, into the layer that holds it. Runs between
 // LitLayer::Capture and Finish, and so before the frame is opened.
 void LitWorld(const World &world, const Grove &grove, const fixture::Fixtures &fixtures, const mob::Herd &herd,
-              const Player &player, const scuff::Trail &trail, const LiquidLayer &liquids,
+              const Player &player, const Stack &held, const scuff::Trail &trail, const LiquidLayer &liquids,
               const light::Field &lights, const Camera2D &camera, const debug_view::Toggles &debug);
 
 // The world in the frame: the sky, the lit layer over it, and the overlays and the

@@ -23,6 +23,22 @@ void DrawFilled(const Grid &grid, float threshold, Color color);
 // the last sample is answered from the edge rather than from nothing.
 float SampleAt(const Grid &grid, Vector2 world);
 
+// The blend that makes one sample out of the four lattice values around it.
+//
+// `a` is the corner at (i, j) and the rest go clockwise from it; `fx` and `fy` are
+// how far across the cell the point lies, both in [0,1].
+//
+// Split out of `SampleAt` rather than left inside it because the world has to ask
+// the identical question without a `Grid` in hand — see `World::PaintedAt`, which
+// answers "is there anything drawn here" for a body rather than for a painter. Two
+// copies of this blend would be two answers to *where the ground is*, and the whole
+// of the bug that put this here is two answers to that question: the drawing
+// interpolated and the collision snapped, so a lattice vertex just over the
+// threshold was a solid square of ground that nothing painted a pixel of.
+inline float Blend(float a, float b, float c, float d, float fx, float fy) {
+    return a * (1.0f - fx) * (1.0f - fy) + b * fx * (1.0f - fy) + c * (1.0f - fx) * fy + d * fx * fy;
+}
+
 // What one square knows about itself before it is painted.
 //
 // Everything here is read off the field the square is being drawn from, so a

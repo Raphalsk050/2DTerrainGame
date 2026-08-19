@@ -2,6 +2,7 @@
 #include "item/item_def.h"
 
 #include <cstring>
+#include <filesystem>
 #include <string>
 
 // What used to be `static_assert`s at the foot of the item table.
@@ -71,7 +72,63 @@ std::string StacksAreUsable() {
     return wrong;
 }
 
+// Every row that names a file has one.
+//
+// The whole reason `ItemDef::art` may be a path rather than a folder is that there is
+// one picture per item and a folder holding one file would say nothing — but the price
+// of a path in a table is a path that can be misspelt, and §16.2b is the long version
+// of what that costs. A row naming a file that is not there does not error and does not
+// warn: the item is quietly drawn from the hand-drawn `picture` beside it, which looks
+// like a perfectly good picture, and nothing anywhere says the art was meant to be
+// used at all.
+//
+// So it is opened here, before the window, where a fault can still stop the program.
+// Existence and not decoding, because decoding needs a graphics device and this runs
+// before there is one — `icon::Art` warns for the rest.
+std::string ArtIsWhereItSaysItIs() {
+    std::string wrong;
+
+    for (const ItemDef *def : item::Table().All()) {
+        if (def->art == nullptr) continue;
+
+        const std::string path = std::string("assets/") + def->art + ".png";
+
+        if (std::filesystem::exists(path)) continue;
+
+        if (!wrong.empty()) wrong += "; ";
+
+        wrong += std::string("item '") + def->name + "' is drawn from '" + path + "', and there is no such file";
+    }
+
+    return wrong;
+}
+
+// Nothing that wears out is carried more than one to a slot.
+//
+// `Stack::wear` is a field on the slot rather than on the item, so a slot holding two
+// of a thing that wears would be two tools sharing one lifetime: use one and the other
+// is worn too, and breaking the pair takes both. There is no arrangement of a stack
+// that makes sense of that, and the merge rules would reach it on their own —
+// `Stack::Room` is what stops two tools ever pouring into one another, and it stops it
+// only because the limit is one.
+std::string WearingThingsDoNotStack() {
+    std::string wrong;
+
+    for (const ItemDef *def : item::Table().All()) {
+        if (!def->tool.Wears() || def->stack <= 1) continue;
+
+        if (!wrong.empty()) wrong += "; ";
+
+        wrong += std::string("item '") + def->name + "' wears out and stacks to " + std::to_string(def->stack)
+                 + " — a stack cannot share one lifetime";
+    }
+
+    return wrong;
+}
+
 const registry::Checker square{PicturesAreSquare};
+const registry::Checker drawn{ArtIsWhereItSaysItIs};
+const registry::Checker alone{WearingThingsDoNotStack};
 const registry::Checker unique{NamesAreUnique};
 const registry::Checker usable{StacksAreUsable};
 

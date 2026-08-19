@@ -158,8 +158,8 @@ float SampleAt(const Grid &grid, Vector2 world) {
     const float fx = std::clamp(u - static_cast<float>(i), 0.0f, 1.0f);
     const float fy = std::clamp(v - static_cast<float>(j), 0.0f, 1.0f);
 
-    return grid.ValueAt(i, j) * (1.0f - fx) * (1.0f - fy) + grid.ValueAt(i + 1, j) * fx * (1.0f - fy) +
-           grid.ValueAt(i, j + 1) * (1.0f - fx) * fy + grid.ValueAt(i + 1, j + 1) * fx * fy;
+    return Blend(grid.ValueAt(i, j), grid.ValueAt(i + 1, j), grid.ValueAt(i, j + 1), grid.ValueAt(i + 1, j + 1), fx,
+                 fy);
 }
 
 void DrawVertices(const Grid &grid, float threshold, float size, Color filledColor, Color emptyColor) {

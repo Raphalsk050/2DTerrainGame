@@ -1,9 +1,28 @@
 #include "entity/player/player.h"
 
+#include "item/icon.h"
 #include "world/world.h"
 
 #include <algorithm>
 #include <cmath>
+
+namespace {
+
+// Where along the canvas the hand closes on the haft, as a share of it from the top.
+//
+// Not the very bottom. Every one of these is drawn with the butt of the haft on the last
+// row of the canvas, so a grip at 1.0 is a tool balanced on a fingertip — and it looked
+// like one: at 0.86 there were three pixels of handle behind the fist and the whole tool
+// read as floating off the end of the arm rather than as being carried by it. Under three
+// quarters there is a visible stub of haft behind the hand, which is what a fist closed
+// round a handle looks like.
+//
+// Here rather than beside `player_config::kHeldTool`, and the split is the point: how
+// long the tool is is a fact about the character's reach and half of what frames it, and
+// where the fist closes on it is a fact about how these particular files were drawn.
+constexpr float kGrip = 0.72f;
+
+} // namespace
 
 Player::Player(Vector2 spawn) : body_(player_config::Build(), spawn) {}
 
@@ -98,7 +117,7 @@ void Player::Update(const PlayerInput &input, const World &terrain, float dt) {
     UpdateState();
 }
 
-void Player::Draw() const {
+void Player::Draw(const Stack &held) const {
     const Rectangle body = Bounds();
 
     const bool flying = body_.Ghost();
@@ -155,4 +174,44 @@ void Player::Draw() const {
 
     DrawLineEx(centre, muzzle, 2.0f, DARKBROWN);
     DrawCircleV(muzzle, 2.0f, DARKBROWN);
+
+    DrawHeld(held, muzzle, arm);
+}
+
+void Player::DrawHeld(const Stack &held, Vector2 hand, Vector2 arm) const {
+    if (held.Empty() || held.holds != Holds::Item) return;
+
+    // Only what was drawn as a thing. A material in the hand is a fistful of hillside
+    // and there is no picture of one being carried; the six-texel icon in the bar is a
+    // label rather than an object, and hanging it off the wrist would read as the
+    // character waving a swatch.
+    const Texture2D *art = icon::Art(Def(held.AsItem()));
+
+    if (art == nullptr) return;
+
+    // Along the arm, head first, because a tool is what the arm ends in. The art is
+    // drawn upright — head at the top of the canvas, butt of the haft at the bottom —
+    // so what has to happen is that the canvas's own up becomes the direction the arm
+    // is pointing.
+    //
+    // Up is (0,-1) and a turn of `angle` clockwise takes it to (sin, -cos), so the
+    // angle wanted is the one whose sine is the arm's x and whose cosine is minus its
+    // y. Rotating about the grip rather than the centre is what keeps the hand on the
+    // haft through the whole of the swing.
+    const float angle = std::atan2(arm.x, -arm.y) * RAD2DEG;
+
+    Rectangle source = {0.0f, 0.0f, static_cast<float>(art->width), static_cast<float>(art->height)};
+
+    // Mirrored by which way the character is facing, and it is a mirror across the haft
+    // rather than across the screen — which is what makes it the right thing to do to a
+    // tool that is already pointing wherever the cursor is. An axe is all on one side of
+    // its own handle, and without this the blade is above the shaft aiming one way and
+    // below it aiming the other.
+    if (facing_ < 0) source.width = -source.width;
+
+    const Rectangle where = {hand.x, hand.y, player_config::kHeldTool, player_config::kHeldTool};
+
+    const Vector2 grip = {player_config::kHeldTool * 0.5f, player_config::kHeldTool * kGrip};
+
+    DrawTexturePro(*art, source, where, grip, angle, WHITE);
 }

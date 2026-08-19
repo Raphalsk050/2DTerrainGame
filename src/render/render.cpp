@@ -57,7 +57,7 @@ void render::ComposeLight(const light::Field &field) {
 // Called between LitLayer::Capture and LitLayer::Finish, so it runs before
 // BeginDrawing like every other capture in the loop.
 void render::LitWorld(const World &world, const Grove &grove, const fixture::Fixtures &fixtures,
-                      const mob::Herd &herd, const Player &player, const scuff::Trail &trail,
+                      const mob::Herd &herd, const Player &player, const Stack &held, const scuff::Trail &trail,
                       const LiquidLayer &liquids, const light::Field &lights, const Camera2D &camera,
                       const debug_view::Toggles &debug) {
     const Rectangle view = view::Bounds(camera);
@@ -153,7 +153,7 @@ void render::LitWorld(const World &world, const Grove &grove, const fixture::Fix
         herd.Draw(view);
     }
 
-    player.Draw();
+    player.Draw(held);
 
     // Rain in front of the world rather than behind it, so it falls past a cliff
     // face instead of behind one. Still inside the light, because rain in an unlit

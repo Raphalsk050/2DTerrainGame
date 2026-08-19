@@ -58,6 +58,27 @@ struct ItemDef {
 
     Picture picture;
 
+    // Where the authored picture for this row lives, under `assets/` and without the
+    // extension: "blocks/tools/wood_pickaxe". Nothing where the row is drawn from the
+    // `picture` above instead, which is most of them.
+    //
+    // **A path and not a folder**, which is where this parts company with
+    // `mob::Def::art` and §24.2's rule that a row names a folder. That rule is what it
+    // is because a creature has three clips inside its folder and naming each of them
+    // in the table would be three things to misspell. An item has exactly one picture,
+    // so the file *is* the thing, and a folder holding one file called something fixed
+    // would be a directory per pickaxe to say nothing at all.
+    //
+    // What the two do share is that a misspelling here must not be discoverable only
+    // by looking: `item_checks.cpp` opens every path at startup and refuses to start
+    // on one that is not there. See §16.2b — a row that looks added and is not costs
+    // the same day of looking in the wrong place every time.
+    //
+    // The `picture` stays on the row even where this is set, and not as a leftover: it
+    // is what a missing file falls back to, and it is the one description of the item
+    // that cannot go out of date, being in the same file as everything else about it.
+    const char *art = nullptr;
+
     int stack;
 
     Placement placement = Placement::None;

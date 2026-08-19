@@ -339,6 +339,54 @@ Rectangle BlockBounds(int cx, int cy, int w, int h) {
 
 } // namespace
 
+float Editor::WorkFor(const World::Yield &cell, const tool::Kit &kit) {
+    // A cell takes as long as the most stubborn thing in it takes, each material
+    // counted over the vertices it actually holds.
+    //
+    // **Not the cell's chief material over all of them**, which is what this was and
+    // what "a shovel goes through rock" turned out to be. `World::ChiefOf` is the right
+    // answer to what a cell *pays out* — nine vertices are one block and they have to go
+    // to somebody, or a cell split five and four banks two fractions and pays out
+    // neither, which is the fault `--dig` was written for. It is the wrong answer to how
+    // long the cell takes: a cell of five vertices of soil and four of rock is chiefly
+    // soil, so it was charged soil's rate over the whole nine, and a spade went through
+    // the rock in it in a sixth of a second with `needsTool` never coming into it. Every
+    // hillside is that cell all the way along the line where soil meets rock, so the
+    // cheapest way into a mountain was to aim at its edge — the same shape of hole
+    // §10.5b closed, where building over a seam of diamond was the cheapest way to mine
+    // it.
+    //
+    // **The maximum and not the sum**, which is the other thing this has been. A sum
+    // charges for the soil *and* the rock and comes out slower than solid rock, which is
+    // a mixed cell being harder than either of the things it is mixed from. The maximum
+    // says a cell is done when its worst part is done, and it keeps §13.2's rule intact:
+    // a ragged edge holding two vertices of nine still costs two ninths, because every
+    // term is over that material's own count and not over the cell.
+    float takes = 0.0f;
+
+    for (std::size_t e = 0; e < kElementCount; e++) {
+        if (cell[e] <= 0 || !kElements[e].rules.occupies) continue;
+
+        const float part =
+            BreakSeconds(static_cast<Element>(e), kit) * static_cast<float>(cell[e]) / kVerticesPerBlock;
+
+        takes = std::max(takes, part);
+    }
+
+    // And whatever is in the cell without being part of a block: the liquid standing in
+    // it, or the wall behind it where the front was already empty. Added rather than
+    // maximised, and at its own rate, because neither is what the block is made of —
+    // they are a second thing in the same square. Water is written at zero hardness, so
+    // it costs nothing and this loop is free in the ordinary case.
+    for (std::size_t e = 0; e < kElementCount; e++) {
+        if (cell[e] <= 0 || kElements[e].rules.occupies) continue;
+
+        takes += BreakSeconds(static_cast<Element>(e), kit) * static_cast<float>(cell[e]) / kVerticesPerBlock;
+    }
+
+    return takes;
+}
+
 void Editor::LetGo() {
     // Nothing was being broken, or nothing had been put into it yet. The second case
     // matters: a click that lands and comes straight off must not flash a bar.
@@ -672,15 +720,11 @@ const char *Editor::Update(World &world, Inventory &inventory, Grove &grove, fix
 
                 world.CellHolds(cx, cy, cell);
 
-                int solid = 0;
-
                 for (std::size_t e = 0; e < kElementCount; e++) {
                     if (cell[e] <= 0) continue;
 
                     holds[e] += cell[e];
                     filled += cell[e];
-
-                    if (kElements[e].rules.occupies) solid += cell[e];
                 }
 
                 // Creative pays nothing for the block, and it is written as a cost of
@@ -690,25 +734,7 @@ const char *Editor::Update(World &world, Inventory &inventory, Grove &grove, fix
                 // creative hand is the same thing — instant, and still a hand.
                 if (mode != Gamemode::Survival) continue;
 
-                // The cell's own material, at its own rate, over every vertex the
-                // cell holds of *anything* that occupies. So a ragged edge still
-                // comes away quickly — the count is what it really holds — while a
-                // mixed cell breaks at one price instead of two added together.
-                if (const std::optional<Element> chief = World::ChiefOf(cell)) {
-                    takes += BreakSeconds(*chief, kit) * static_cast<float>(solid) / kVerticesPerBlock;
-                }
-
-                // And whatever is in the cell without being part of a block: the
-                // liquid standing in it, or the wall behind it where the front was
-                // already empty. Each at its own rate, because neither is what the
-                // block is made of. Water is written at zero hardness, so it costs
-                // nothing and this loop is free in the ordinary case.
-                for (std::size_t e = 0; e < kElementCount; e++) {
-                    if (cell[e] <= 0 || kElements[e].rules.occupies) continue;
-
-                    takes += BreakSeconds(static_cast<Element>(e), kit) * static_cast<float>(cell[e])
-                             / kVerticesPerBlock;
-                }
+                takes += WorkFor(cell, kit);
             }
         }
 
@@ -785,6 +811,21 @@ const char *Editor::Update(World &world, Inventory &inventory, Grove &grove, fix
         // not want a hillside's worth of stone lying at their feet.
         if (mode == Gamemode::Survival) {
             Bank(freed, grove.Fallen(), {at.x + at.width * 0.5f, at.y + at.height * 0.5f}, away, now);
+
+            // And the tool is that much nearer gone. One point per cell, which is
+            // Minecraft's rate — a block broken costs a tool one of its lifetime,
+            // whether or not that tool was the right one for it.
+            //
+            // Per cell and not per stroke, so a wide brush wears a pickaxe as fast as
+            // it digs. That is the same invariant the economy already keeps: a cell
+            // costs one block to place and returns one to dig whatever laid it, and a
+            // span that cleared nine cells for the price of one would make the brush
+            // size a power setting rather than a choice (§10.6).
+            //
+            // Charged here rather than where the bite starts, because the bite is
+            // given back when the aim wanders off the block (§13.4) and a tool worn
+            // by work that was handed back is a tool worn by nothing.
+            inventory.WearHeld((x1 - x0 + 1) * (y1 - y0 + 1));
         }
 
         // Broken, so there is nothing to give back and no bar to fade: cleared

@@ -41,7 +41,7 @@ inline constexpr ItemDef kStoneSword = {
     // down as a block is the one thing a right click must not do with it.
     .placement = Placement::None,
 
-    .tool = {.kind = Tool::Sword, .speed = tool::kStone, .damage = 8},
+    .tool = {.kind = Tool::Sword, .speed = tool::kStone, .damage = 8, .lasts = tool::kStoneLasts},
 };
 
 // This row's id. Worked out on the first call, which is after `content::Open` has

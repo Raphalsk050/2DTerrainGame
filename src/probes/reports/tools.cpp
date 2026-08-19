@@ -134,17 +134,50 @@ int Run(const probes::Bench &bench) {
 
     // What a sword is for, since the grid above cannot show it: a fist and every
     // blade against the same figure.
-    std::printf("%-13s %s\n", "", "damage per swing, over a bare fist");
+    std::printf("%-16s %s\n", "", "damage per swing, over a bare fist");
 
     for (const auto &[name, kit] : hands) {
         if (kit.damage <= 0) continue;
 
-        std::printf("%-13s +%d\n", name.c_str(), kit.damage);
+        std::printf("%-16s +%d\n", name.c_str(), kit.damage);
     }
 
     std::printf("\n");
 
-    return (!idle && !leaking) ? 0 : 1;
+    // And how long each one lasts, which is the half of a tier the grid above cannot
+    // show either — and the half without which the ladder is a lie. Gold is the fastest
+    // thing there is by a distance and gone in thirty-two blows; read the seconds alone
+    // and it is simply the best tool in the game.
+    //
+    // Printed in blows and in what those blows buy, because a count of uses says nothing
+    // on its own. One point of wear is one cell broken — whatever it was made of, which
+    // is Minecraft's rule and `Editor::Update`'s — and one blow into a tree, of which a
+    // mature oak takes `flora::Settings::toughness` times its cadence.
+    std::printf("%-16s %8s   %s\n", "", "blows", "which is");
+
+    bool endless = false;
+
+    for (const auto &[name, kit] : hands) {
+        if (!kit.Any()) continue;
+
+        if (!kit.Wears()) {
+            // Every tool wears out. A row that does not is one where the field was left
+            // off rather than one meant to last for ever, and nothing in the file tells
+            // those two apart.
+            std::printf("ENDLESS: '%s' never wears out\n", name.c_str());
+
+            endless = true;
+
+            continue;
+        }
+
+        std::printf("%-16s %8d   %d cells of ground, or %d blows into a wood\n", name.c_str(), kit.lasts,
+                    kit.lasts, kit.lasts);
+    }
+
+    std::printf("\n");
+
+    return (!idle && !leaking && !endless) ? 0 : 1;
 }
 
 const probes::Report row = {

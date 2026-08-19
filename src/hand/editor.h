@@ -72,6 +72,19 @@ public:
     const char *Update(World &world, Inventory &inventory, Grove &grove, fixture::Fixtures &fixtures,
                        const Camera2D &camera, Rectangle body, Gamemode mode, bool overUi, float now);
 
+    // How long steady work against one cell takes, with `kit` in the hand.
+    //
+    // Public and static because `--dig` reports it, and because a probe that worked it
+    // out for itself would be checking its own copy — the rule §28.7 states about
+    // `Crafting::Draw` and §25.5 about `hud::Strip`. It is worth having a probe on
+    // precisely because the rule inside it is not obvious: a cell can hold two materials
+    // at once, and which of them decides the time is a question with three plausible
+    // answers and only one right one. See the body.
+    //
+    // Takes a `World::Yield` — a count per material over the cell's own vertices — which
+    // is what `World::CellHolds` answers and what `World::ExcavateCell` would take.
+    static float WorkFor(const World::Yield &cell, const tool::Kit &kit);
+
     // Outline of the area the next click affects, drawn in world space so it
     // sits over the material it is about to change.
     //

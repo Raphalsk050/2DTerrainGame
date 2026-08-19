@@ -1,5 +1,7 @@
 #include "ui/crafting.h"
 
+#include "item/icon.h"
+
 #include "core/picture.h"
 #include "ui/hotbar.h"
 #include "ui/skin.h"
@@ -114,8 +116,10 @@ void DrawInside(const Stack &stack, Rectangle at) {
     const float pixel = std::floor(std::min(at.width, at.height) * 0.82f / kPictureSide);
     const float drawn = pixel * kPictureSide;
 
-    DrawPicture(PictureOf(stack),
-                {std::floor(at.x + (at.width - drawn) / 2.0f), std::floor(at.y + (at.height - drawn) / 2.0f)}, pixel);
+    const Vector2 corner = {std::floor(at.x + (at.width - drawn) / 2.0f),
+                            std::floor(at.y + (at.height - drawn) / 2.0f)};
+
+    icon::Draw(stack, corner, pixel);
 }
 
 void DrawWell(Rectangle at, Color frame, float thick) {

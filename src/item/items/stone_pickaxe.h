@@ -37,7 +37,7 @@ inline constexpr ItemDef kStonePickaxe = {
     // down as a block is the one thing a right click must not do with it.
     .placement = Placement::None,
 
-    .tool = {.kind = Tool::Pick, .speed = tool::kStone, .damage = 2},
+    .tool = {.kind = Tool::Pick, .speed = tool::kStone, .damage = 2, .lasts = tool::kStoneLasts},
 };
 
 // This row's id. Worked out on the first call, which is after `content::Open` has

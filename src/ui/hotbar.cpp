@@ -1,6 +1,7 @@
 #include "ui/hotbar.h"
 
 #include "core/picture.h"
+#include "item/icon.h"
 #include "ui/bottom.h"
 #include "ui/skin.h"
 
@@ -69,12 +70,20 @@ void hotbar::DrawSlot(const Stack &stack, Rectangle bounds, bool active) {
     if (!stack.Empty()) {
         const float drawn = kIconPixel * kPictureSide;
 
-        const Picture picture = PictureOf(stack);
+        const Vector2 corner = {std::floor(bounds.x + (bounds.width - drawn) / 2.0f),
+                                std::floor(bounds.y + (bounds.height - drawn) / 2.0f)};
 
-        DrawPicture(picture,
-                    {std::floor(bounds.x + (bounds.width - drawn) / 2.0f),
-                     std::floor(bounds.y + (bounds.height - drawn) / 2.0f)},
-                    kIconPixel);
+        // Whatever the row is drawn from — an authored file or the four tones on the
+        // row — at the same size either way. See `item/icon.h`; the point of asking it
+        // rather than `PictureOf` here is that the bar, the panel, the cursor, the card
+        // and a pickup in the grass cannot come to five different answers.
+        icon::Draw(stack, corner, kIconPixel);
+
+        // And how much of it is left, along the foot of the picture. Under the count
+        // rather than over it: a bar drawn last would cross the number, and the number
+        // is only ever there for something that stacks, which is never something that
+        // wears.
+        icon::DrawWear(stack, corner, kIconPixel);
 
         // Only past one. A count on every slot turns the bar into a spreadsheet,
         // and a lone item is already drawn as one thing.

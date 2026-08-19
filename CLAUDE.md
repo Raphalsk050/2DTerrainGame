@@ -103,9 +103,12 @@ whole phases, never inside a `pool::For` body.
 | `--frame x y [frames]` | the simulation phases only, headless, at a fixed place |
 | `--sun x y` | the solved light as numbers |
 | `--build [cells]` | sets a run of build cells and digs it back out; checks the exchange is exact |
+| `--dig [cells]` | what a cell of two materials pays out, and how long it takes with each tool (§13.6) |
+| `--stuck [holes]` | ground that stops a body and draws nothing (§13.7) |
 | `--wind`, `--caves`, `--ore`, `--covers`, `--woods`, `--settle`, `--column`, `--tones` | generator reports |
 | `--veins out.png [zoom]` | every inclusion at its own width, drawn and measured (§27.5) |
 | `--craft out.png [w] [h]` | the recipe panel in every state it has (§28.7) |
+| `--gear out.png [zoom]` | every item as a slot draws it, the wear bar, and the tool in hand (§29.5) |
 
 `--woods x0 x1` is the companion to `--covers`: it walks the scatter's own cells
 and reports, per species, how many plants grow and what ground each one is
@@ -1009,6 +1012,170 @@ looked up rather than named, so a second wall material needs nothing edited.
 
 A stroke where no cell holds anything does not start a bite at all. The bar must not
 appear over open sky.
+
+### 13.6 A cell takes as long as its most stubborn part, not as long as most of it
+
+Reported from play: *some tools break blocks that are not theirs too quickly.* It was
+true, it was every hillside in the world, and the cause is one line that had been right
+about a different question.
+
+`Editor::Update` used to charge a cell at **its chief material's rate over all of its
+vertices**:
+
+```cpp
+takes += BreakSeconds(*chief, kit) * solid / kVerticesPerBlock;
+```
+
+`World::ChiefOf` is the right answer to what a cell **pays out**. Nine vertices are one
+block and they have to go to somebody, or a cell split five and four banks two fractions
+and pays out neither — which is exactly the fault `--dig` was written for, and the reason
+the collapse exists at all.
+
+It is the wrong answer to **how long the cell takes**, and the two questions had been
+folded together. A cell of five vertices of soil and four of rock is chiefly soil, so it
+was charged soil's rate over the whole nine: a spade cleared the rock in it in a sixth of
+a second, and `needsTool` — the promise that stone gives up nothing without a pickaxe —
+never came into it. Every hillside is that cell all the way along the line where soil
+meets rock, so **the cheapest way into a mountain was to aim at its edge with a shovel.**
+Measured over four hundred cells of real ground: 465 violations, the worst of them a gold
+shovel going through rock 53 times faster than a bare fist manages it.
+
+It is §10.5b's hole one room over — there, building a cobblestone over a seam of diamond
+was the cheapest way to mine the diamond. Both are the same shape: a rule that is correct
+about one thing quietly answering for another, and the answer being a way round every
+figure in the hardness table.
+
+`Editor::WorkFor` is the rule now, and it is **the maximum over the materials present,
+each counted over the vertices it actually holds**:
+
+- **The maximum and not the chief**, so a material that needs a tool cannot be carried
+  out of a cell by a tool that suits something else in the same square.
+- **The maximum and not the sum**, which is the other thing this has been. A sum charges
+  for the soil *and* the rock and comes out slower than solid rock, which is a mixed cell
+  being harder than either of the things it is mixed from.
+- **Each term over its own count**, which is what keeps §13.2 intact: a ragged edge
+  holding two vertices of nine still costs two ninths.
+
+Liquid and the wall behind are still *added* rather than maximised, because they are a
+second thing standing in the same square rather than part of what the block is made of.
+
+**The payout is untouched.** `ChiefOf` still decides what comes out, and `--dig`'s
+original verdict still passes: every full cell pays a whole block, of the material most
+of it was.
+
+**`WorkFor` is public and static so `--dig` can measure the game rather than a copy of
+it** — §28.7's rule about `Crafting::Draw`. That mattered here: the first version of the
+check was written against the *tool* ("a tool that suits nothing in the cell must be no
+quicker than a fist") and **passed while the bug was still in**, because a spade suits a
+cell of soil and rock perfectly well — the soil is soil. The fault was that it took the
+rock too. The check is written against the *material* now:
+
+> A material that needs a tool does not come away without that tool any faster than a
+> bare fist manages it.
+
+Which was checked the only way a guard can be — by putting the old rule back, watching
+`--dig` fail with 465 cells and a named worst offender, and then putting the fix back.
+
+### 13.7 A degenerate block, and the two rules that made one
+
+Reported from play: *sometimes I break a block and get stuck on something invisible.* The
+collider overlay showed a lattice vertex standing on its own in open air. The player's own
+words are the specification — a block like that must not exist — and they are right.
+
+**It is one question asked twice with two different rules.**
+
+| | what it tests |
+|---|---|
+| the draw (`marching_squares::DrawPainted`) | the field **interpolated at a square's centre** is over the threshold |
+| a body (`World::IsSolidAt`) | the **nearest lattice vertex** is over the threshold |
+
+Those agree in the middle of a hillside and part company by up to half a lattice step at
+every edge, which is invisible because there is drawn ground beside it. At a vertex
+standing on its own they part company altogether. The nearest texel centre is a quarter
+of a cell away in each direction, so it reads `0.75 × 0.75 = 0.5625` of the vertex's
+value, while the body reads the vertex itself. Every material in the table crosses at
+0.45, so:
+
+> **a vertex holding anything between 0.45 and 0.80 is a six-pixel square of solid ground
+> with not one pixel painted anywhere in it.**
+
+That is the whole of the bug, and the window is enormous — the values at a contour edge
+are *by definition* just over the threshold.
+
+**Where they come from is digging, and the generator is innocent.** Measured over forty
+doorways cut into real hillsides: **nought** in ground nobody has touched, and **24 after
+digging** — better than one every other doorway. The generator's field is smooth and a
+lone spike is not a shape noise makes; a dug hole is nothing but edges. The mechanism is
+§13.5's cell seen from outside: a cell at the contour edge holds one vertex of its nine,
+the player clears the cells around it because those are the ones they can see, and the one
+that is left is the thing they walk into.
+
+So this is §13.5's fault one layer down. That section fixed the hand's third of
+"invisible, impassable and immovable at once" — `World::CellHolds` counts over the
+vertices the spade would take, so such a vertex *can* be dug. This is the two thirds that
+remained: the player cannot see there is anything to dig, and walks into it instead.
+
+**The fix is that the world does not contain one.** `World::Undegenerate` runs at the end
+of a dig and takes away every vertex left stopping a body without drawing itself. Four
+things about it are decisions:
+
+- **Not "make the body collide with the contour".** That is the other repair, and it is
+  the wrong one here: it would mean sampling the interpolated field on the texel grid in
+  the hottest loop the bodies have — some fifteen times the reads, for every creature,
+  every frame — to fix a state that should not exist in the first place. Removing the
+  state keeps `IsSolidAt` a single read and makes it *true*.
+- **Only on a dig.** Placing writes the material at the top of its range and cannot leave
+  a sliver; the one thing it clears is the liquid it displaces, which stops nothing. A
+  placed wall is never degenerate: a rim vertex blends with the full one beside it and
+  samples 0.75, well over the threshold.
+- **A work list, not a fixed margin.** Taking a vertex away lowers what its neighbours'
+  squares sample, so it can leave one of *them* drawing nothing. It settles almost at once
+  — a vertex inside rock has its own value and seven full neighbours — but "almost at
+  once" is not a bound, and a fixed margin leaves the fault one vertex further out. The
+  list is bounded by what actually comes away, and a vertex can only come away once.
+- **The player is paid for it.** What the sweep clears goes into the stroke's own yield,
+  so `Editor::Bank` carries it like anything else. It is ground that was there.
+
+**`World::PaintedAt` is the shared rule**, and `marching_squares::Blend` came out of
+`SampleAt` so that both read one interpolation. Two copies of that blend would be two
+answers to *where the ground is*, which is exactly what this section is about.
+
+### 13.7b `--stuck`, and why it sweeps three times
+
+```bash
+./build/CppGame.exe --stuck [holes]
+```
+
+It cuts six-by-six doorways into real hillsides through `World::ExcavateCell` itself —
+a probe that wrote the field directly would be measuring a state the game cannot reach —
+and counts vertices that `IsSolidAt` calls solid and `Degenerate` calls unpainted, before
+and after.
+
+**The three sweeps are three different questions**, and a single number would have hidden
+which of them was being answered:
+
+| sweep | asks |
+|---|---|
+| as the world made it | does the generator make them on its own |
+| after digging | does digging make them |
+| and back from memory | does taking them away *stay* taken away |
+
+It was worth asking all three. The first is nought, which is what says the whole world does
+not need re-generating and every reference picture still holds. The third is §11.2's rule
+in another table: the sweep clears vertices the *stroke* was never asked about, so each one
+has to be written into the chunk's journal on its own account — an edited chunk is pinned,
+so a session never shows the difference, and the repro is to walk forty thousand pixels
+away and come back. Taking that one line out reported **43 of them coming back**, which is
+what makes the third sweep worth its runtime.
+
+It counts the solid vertices either side of that trip as well as the stranded ones, because
+a chunk that comes back with *more* ground than it went away with is the journal forgetting
+the sweep — a different fault with the same symptom, and one that a count of stranded
+vertices alone reports as a fresh set of them.
+
+It also refuses to pass on having found nothing to dig — §23.1's lesson, and `--dig`'s own
+guard. A sweep that met no ground has checked nothing and would go on reporting success
+after a change that removed every hillside in it.
 
 ---
 
@@ -2392,6 +2559,11 @@ One file. `src/item/items/<name>.h` with the row, and a `.cpp` beside it holding
 registrar. §16.1's table of what a row buys still holds; what has changed is that
 there is no `kItems[]` to insert into and no `enum class Item` to extend.
 
+§29 added two fields to that row and both follow the same rule: `art` names an
+authored picture and the item is drawn from it everywhere without any caller being told
+(§29.1), and `tool.lasts` says how many blows it has in it and the durability bar,
+the tooltip and the three things that wear a tool all read the one number (§29.2).
+
 A row's id is reached through an accessor written beside it:
 
 ```cpp
@@ -2702,3 +2874,200 @@ right-hand border and over it, and the shading over an unaffordable recipe was h
 enough that the silhouette it was supposed to be teaching had gone. The first is why
 the card wraps rather than trusting the table to be brief; the second is why the
 scrim is just over half and not two thirds.
+
+---
+
+## 29. A tool is a drawing, a lifetime and a pose
+
+Fifteen tool sprites arrived at once — pickaxe, axe and shovel in wood, copper, iron,
+gold and diamond — and they turned out to be three separate pieces of work wearing one
+coat. Each is worth writing down on its own.
+
+### 29.1 The file keeps its size; only the scale it is drawn at moves
+
+`ItemDef::art` names a path under `assets/`, without the extension, and `item/icon.h`
+is the one answer to "draw this stack". Every caller that used to reach for
+`DrawPicture(PictureOf(stack), ...)` — the bar, the panel, the cursor carrying a stack,
+the recipe card, a pickup lying in the grass — goes through `icon::Draw` now. Five
+callers each deciding whether a row has a file is five places for one material to be
+drawn one way in the bar and another on the ground: §25.1's complaint about the foot of
+the screen, one layer in.
+
+**Both kinds fill the same box.** The file is 64 pixels square and a `Picture` is six
+texels, and neither number reaches a caller: what is drawn is `kPictureSide * pixel` on
+a side either way. That is what makes the art a drop-in — a slot does not change size
+because somebody drew a pickaxe.
+
+**The whole canvas, never the drawing's own bounding box.** A pickaxe fills 48 pixels of
+its 64, an axe 29 and a shovel 28, and fitting each to what it happens to occupy would
+draw the shovel half again as wide as the pickaxe it hangs beside. One window for every
+tool is §24.1's argument about one window per creature met from the other side, and it
+is what keeps fifteen separate files reading as one set.
+
+**It is the one thing in this project that is not point sampled**, and that is a
+deliberate exception rather than an oversight. Everything else drawn from a file is
+drawn at one texel per world pixel, where nearest sampling is not an approximation but
+the exact answer (§5.5). This is the opposite case: 64 pixels have to become 36, so
+better than half the source is not going to survive whatever is done to it. Nearest
+picks which pixels live by where the grid falls, which eats the one-pixel black outline
+the art is drawn with in some columns and keeps it in others. A mip chain averages,
+which is what a smaller copy of a drawing *is*. **The assets are untouched** — nothing
+is resaved smaller, and `GenTextureMipmaps` is called once on load.
+
+**A row names a file, where a creature names a folder.** §24.2's rule is what it is
+because a creature has three clips inside its folder; an item has exactly one picture,
+so the file is the thing and a directory per pickaxe would say nothing. The price of a
+path in a table is a path that can be misspelt, so `item_checks.cpp` opens every one at
+startup and refuses to start on a file that is not there. Without that the failure is
+silent in the worst way: the item is quietly drawn from the hand-drawn `picture` beside
+it, which looks like a perfectly good picture (§16.2b).
+
+### 29.2 A tier is a rate *and* a lifetime, and gold is the proof
+
+`tool::Kit::lasts`, beside the speed rather than on a table of its own. Minecraft's own
+durability figures — wood 59, stone 131, iron 250, gold 32, diamond 1561.
+
+It is beside the speed because that is the one place the ladder stops being monotone:
+gold is the fastest material in the game and lasts a third as long as wood. Read the
+speeds alone and gold is simply the best tool there is, which is not the trade Minecraft
+offers and not the one these rows describe. Two tables would be two things to keep in
+step; on one row they cannot disagree, and `--tools` prints both.
+
+**Copper is not Minecraft's**, because Minecraft has no copper tool. It is here because
+there is copper in the ground already and there is now a head drawn for it, and the only
+honest place to put it is between the two it sits between in the world: speed 5 against
+stone's 4 and iron's 6, and 190 blows against 131 and 250. **Its damage is stone's
+exactly**, and that is a decision rather than an oversight — a point of damage is half a
+heart and there is no half step to give it, so what copper buys is the rate and the
+lifetime.
+
+**The ore itself and not an ingot.** Smelting is a furnace, a fuel and a fire, and there
+is none of the three here yet, so a metal tool is made of what came out of the ground —
+exactly as a stone one is made of the cobble that came out of the rock rather than of
+anything done to it afterwards. The day there is a furnace, twelve recipe rows gain an
+ingot and nothing else moves.
+
+### 29.3 Wear is on the slot, and one function moves a stack
+
+`Stack::wear`. On the slot and not on the row, and that is the whole difference between
+a tier and a tool: `lasts` is shared by every diamond pickaxe there has ever been, and
+this says what has happened to the one in this slot. It costs nothing — `holds` and
+`what` are a byte each and `count` wants four, so there were already two bytes of
+padding between them and `sizeof(Stack)` has not moved.
+
+**It caught four call sites the moment it was added**, and this is the lesson. `Fill`,
+`Take`, `Put` and the panel's put-one-down all rebuilt a stack field by field:
+
+```cpp
+into = {.holds = stack.holds, .what = stack.what, .count = fits};
+```
+
+Every one of them silently dropped the new field, and what that *is* is a worn pickaxe
+repaired by being dropped on the ground and picked back up. They all go through
+`Stack::Some(count)` now — one choke point, so the next field added to `Stack` is
+impossible to forget.
+
+**Only the inventory may empty a slot.** `Inventory::WearHeld` is where a tool is used
+up and where the slot is cleared, for `World::PlaceCell`'s reason (§10.5): there are
+three things that wear a tool — a block broken, a tree struck, a creature hit — and they
+must not be three answers to what happens on the last blow.
+
+**A tool that wears may not stack**, checked at startup. `wear` is one number per slot,
+so two tools in one slot would share one lifetime: use one and the other is worn, break
+the pair and both go. Nothing else would catch it — `Stack::Room` is what stops two
+tools pouring into one another, and it stops it only because the limit is one.
+
+**What is charged, and where.** One point per cell broken, which is Minecraft's rate — a
+block broken costs a tool one of its lifetime whether or not that tool was the right one
+for it. Per *cell* and not per stroke, so a wide brush wears a pickaxe as fast as it
+digs: the same invariant §10.6 keeps about the economy, or `Editor::span_` becomes a
+power setting rather than a choice. Charged where the block actually comes away and not
+where the bite starts, because a bite is given back when the aim wanders off (§13.4) and
+a tool worn by work that was handed back is a tool worn by nothing.
+
+**And a swing has to land.** `Grove::Strike` returns whether it hit anything now, for
+exactly this: a held button over a trunk that has already gone over is a blow every
+frame, and an axe worn out by swinging at the air where a tree used to be is a fault
+nobody would think to look for.
+
+**Scale is deliberately uncorrected, the same way §13.1's hardness table is.** A cell is
+about a quarter of a Minecraft block by area, so a wooden pickaxe's 59 blows clear about a
+quarter of the volume Minecraft's would. If the hardness table is ever divided by four,
+this is the second table that goes with it, and `--tools` prints both so they can be read
+together.
+
+**The bar is drawn even at full**, where Minecraft hides it until the tool is damaged.
+The difference is what the two are for: there it is a warning, and here it is also the
+answer to "does this thing run out", which a player holding their first pickaxe has no
+other way to find. §25.2's lesson about the hearts — a readout that appears for the
+first time during the emergency is one the player has to find while it matters. The
+tooltip carries the number beside it, because a bar cannot be compared between two
+pickaxes and a number is not readable while digging.
+
+### 29.4 The tool in the hand is the arm's own arithmetic
+
+`Player::DrawHeld`. The art is drawn upright — head at the top of the canvas, butt of
+the haft at the bottom — so what has to happen is that the canvas's own up becomes the
+direction the arm is pointing. Up is `(0,-1)` and a turn of `t` clockwise takes it to
+`(sin t, -cos t)`, so the angle wanted is `atan2(arm.x, -arm.y)`; and it rotates about
+the grip rather than the centre, so the hand stays on the haft through the whole swing.
+
+**Mirrored across the haft and not across the screen.** An axe is all on one side of its
+own handle; without the mirror the blade is above the shaft aiming one way and below it
+aiming the other. Because the sprite is already rotated to lie along the arm, a flip in
+sprite x is a reflection that keeps the head at the far end and only swaps which side
+the blade is on — which is exactly what is wanted.
+
+**`player_config::kHeldTool` is 22 and lives with the character**, not in `player.cpp`,
+because it is half of how far the character reaches: `kAttackReach` puts the hand out
+and this is what sticks out past it. Anything framing the character needs both, and
+§29.5 is what happens when something has only one of them.
+
+**The grip is 0.72, and it was settled by looking.** At 0.86 there were three pixels of
+handle behind the fist and the whole tool read as floating off the end of the arm rather
+than as being carried by it.
+
+### 29.5 `--gear`, and the cell that was too small
+
+```bash
+./build/CppGame.exe --gear out.png [zoom]
+```
+
+Three bands: every item as a slot draws it, one pickaxe at six amounts of wear, and the
+character holding a tool at six aims. Three verdicts, and each is about a fault a
+picture of the other two would not show.
+
+- **Every row that names a file has one that loaded.**
+- **The bar is shorter at every step and never nothing.** Measured off the exported
+  image rather than recomputed from `Stack::Whole`, because what is being checked is the
+  *drawing*: arithmetic that is right and a bar drawn at a fixed width would pass any
+  check of the arithmetic. Never nothing is the other half — a tool with one blow left
+  and a bar rounded away is a tool the player believes is gone, and they put it down.
+- **The tool is drawn in the character's hand.** §24.4's argument. Everything else on
+  the sheet draws an icon directly, which proves the files are right without proving the
+  game will ever show them — what puts a tool in the hand is `Player::Draw`, and a sheet
+  that reproduced the pose would go on looking perfect while the game drew nothing at
+  all. Measured as the pixels between two identical poses, one holding a pickaxe and one
+  not, aimed through `Player::Update` so the mirroring is exercised rather than assumed.
+
+**The fault it found on its first render was its own.** The pose cells were a fixed 120
+pixels and the zoom was 4, so the arm ran off the edge of its own box and the tool was
+drawn entirely outside it — which looks exactly like a tool that is not drawn at all,
+and was read that way for a while. The cell is worked out from
+`kAttackReach + kHeldTool` now. **A probe whose frame is chosen rather than derived is a
+probe that can report the absence of something it merely cropped.**
+
+`Inventory::PageOf` gained a `wanted` count in the same commit, and
+`inventory_checks.cpp` counts pages rather than the whole item table. It used to weigh
+every item against one page, which was a fair proxy at nineteen items; twelve tools took
+the table to thirty-one and failed a build in which no page was three quarters full. **A
+check that refuses a correct change is a check that gets deleted**, and the next silent
+overflow after that goes unnoticed.
+
+### 29.6 What has no art yet
+
+Five rows still draw from the four tones on the row: `stone axe`, `stone pickaxe`,
+`stone shovel`, `wood sword` and `stone sword`. Nothing is wrong with them and the
+fallback is the design — but they are visibly a different hand beside the fifteen that
+are drawn, and the fix is a file and one field each. `--gear` is where the difference is
+seen in one glance.

@@ -41,9 +41,34 @@ namespace tool {
 inline constexpr float kHand    = 1.0f;
 inline constexpr float kWood    = 2.0f;
 inline constexpr float kStone   = 4.0f;
+inline constexpr float kCopper  = 5.0f;
 inline constexpr float kIron    = 6.0f;
 inline constexpr float kDiamond = 8.0f;
 inline constexpr float kGold    = 12.0f;
+
+// Copper is *not* Minecraft's, because Minecraft has no copper tool, and it is here
+// for the reason every other number in this file is not invented: there is copper in
+// the ground already — `world/elements/copper.h` — and there is now a head drawn for
+// it. A tier had to be chosen and the only honest place to choose it is between the
+// two it sits between in the world: stone comes off a hillside and iron is dug for.
+// Five is the one value that keeps every gap in the ladder at least one whole step.
+
+// How many blows one tool has in it before it is gone.
+//
+// Minecraft's own durability figures, from the wiki's tools article, and they are the
+// half of a tier that the speed above does not say: gold is the fastest material in
+// the game *and* the most fragile, and neither number means anything without the
+// other. A ladder written in speed alone would make gold strictly the best tool
+// there is, which is precisely the trade Minecraft does not offer.
+//
+// Copper again has no figure to take, and again sits where it sits: between stone's
+// hundred and thirty and iron's two hundred and fifty.
+inline constexpr int kWoodLasts    = 59;
+inline constexpr int kStoneLasts   = 131;
+inline constexpr int kCopperLasts  = 190;
+inline constexpr int kIronLasts    = 250;
+inline constexpr int kGoldLasts    = 32;
+inline constexpr int kDiamondLasts = 1561;
 
 // What one held thing is worth to a hand.
 //
@@ -67,9 +92,27 @@ struct Kit {
     // about what a slot holds.
     int damage = 0;
 
+    // How many blows it has in it, and nought where it never wears out.
+    //
+    // Here beside the speed rather than on a table of its own, because the two are
+    // the same fact seen twice — what a tier *is* is a rate and a lifetime together,
+    // and gold is the proof: it is the fastest thing in the game and lasts a third
+    // as long as wood. Split across two tables they would be two things to keep in
+    // step; on one row they cannot disagree.
+    //
+    // Nought means "does not wear", which is what nearly every row says. It is the
+    // same "says nothing" `nullptr` means in the tables that name each other, and it
+    // is what makes a torch and a hide answer this question without being asked it.
+    int lasts = 0;
+
     // Whether this is a tool at all, for the palette and for the checks. A row that
     // says nothing is not a tool, which is the great majority of them.
     constexpr bool Any() const { return kind != Tool::Hand || speed > kHand || damage > 0; }
+
+    // Whether it wears out with use. See `Stack::wear`, which is where the count of
+    // how much of that has happened to *one particular tool* lives — this row is
+    // shared by every copy of it there has ever been and cannot hold that.
+    constexpr bool Wears() const { return lasts > 0; }
 };
 
 } // namespace tool

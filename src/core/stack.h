@@ -5,6 +5,7 @@
 #include "item/item_def.h"
 #include "core/picture.h"
 
+#include <algorithm>
 #include <cstdint>
 
 // What one slot holds, and what a block is worth.
@@ -73,6 +74,19 @@ struct Stack {
     // and a slot is a thing there are thirty-six of before anything is in them.
     std::uint8_t what = 0;
 
+    // How much of this particular tool has been used up.
+    //
+    // On the *slot* and not on the row, and that is the whole of the difference
+    // between a tier and a tool: `tool::Kit::lasts` says what a diamond pickaxe is
+    // worth and is shared by every diamond pickaxe there has ever been, while this
+    // says what has happened to the one in this slot. Two pickaxes in two slots are
+    // the same row and different things, and only a field here can tell them apart.
+    //
+    // It costs nothing. `holds` and `what` are a byte each and `count` wants four, so
+    // there were already two bytes of padding sitting between them; this is exactly
+    // those two bytes and `sizeof(Stack)` has not moved.
+    std::uint16_t wear = 0;
+
     int count = 0;
 
     bool Empty() const { return holds == Holds::Nothing || count <= 0; }
@@ -114,6 +128,42 @@ struct Stack {
 
     // How many more of it this slot could take.
     int Room() const { return Empty() ? 0 : Limit() - count; }
+
+    // How many blows this kind of thing has in it, and nought where it never wears.
+    //
+    // A material is never one of them: a block of cobblestone in the hand is a block,
+    // and it is spent by being placed rather than worn by being used.
+    int Lasts() const {
+        if (holds != Holds::Item) return 0;
+
+        return item::Table().At(what).tool.lasts;
+    }
+
+    bool Wears() const { return Lasts() > 0; }
+
+    // How many blows are left in it, floored at nothing.
+    int Left() const { return std::max(0, Lasts() - static_cast<int>(wear)); }
+
+    // What share of it is left, in [0,1]. One for anything that does not wear, so a
+    // caller drawing a bar gets a full one rather than a division by zero.
+    float Whole() const {
+        const int lasts = Lasts();
+
+        return (lasts > 0) ? static_cast<float>(Left()) / static_cast<float>(lasts) : 1.0f;
+    }
+
+    // Worked to nothing. The one frame on which a tool stops being a thing the player
+    // has.
+    bool Spent() const { return Wears() && Left() <= 0; }
+
+    // The same thing, in a different number of it.
+    //
+    // Every place that moves part of a stack somewhere else goes through this, and
+    // that is not tidiness: `wear` was added to a struct that four call sites already
+    // rebuilt field by field, and every one of them would have quietly reset it —
+    // which is a worn pickaxe repaired by being dropped and picked back up. One
+    // choke point is what makes the next field added here impossible to forget.
+    Stack Some(int many) const { return {.holds = holds, .what = what, .wear = wear, .count = many}; }
 };
 
 inline constexpr Stack BlocksOf(Element element, int count) {

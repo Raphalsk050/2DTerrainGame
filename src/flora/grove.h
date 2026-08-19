@@ -152,7 +152,12 @@ public:
     // Called only on the frame a swing begins. Player::AttackHitbox is live for
     // the whole strike window, so a caller reading that instead lands nine blows
     // per swing.
-    void Strike(Rectangle hitbox, float damage, Vector2 from, float now);
+    // A blow into the wood. Returns whether it landed on anything at all.
+    //
+    // The answer is what the axe is worn by: a swing that met no tree costs a tool
+    // nothing, and a held button over a trunk that has already gone over is that swing
+    // sixty times a second.
+    bool Strike(Rectangle hitbox, float damage, Vector2 from, float now);
 
     // Whether there is anything here a swing would connect with — a standing
     // trunk, a sapling, or a stump left to clear.

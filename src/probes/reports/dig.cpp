@@ -1,6 +1,8 @@
 #include "core/registry.h"
 #include "core/stack.h"
 #include "core/tool.h"
+#include "hand/editor.h"
+#include "item/item_def.h"
 #include "probes/report.h"
 #include "world/element.h"
 #include "world/world.h"
@@ -9,6 +11,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <optional>
+#include <string>
+#include <vector>
 
 // `--dig [cells]` — what a cell made of two materials is worth.
 //
@@ -94,6 +98,69 @@ int Collapsed(const World::Yield &freed) {
     return Scattered(onto);
 }
 
+// Every tool in the game, in the table's own order, so that a row added tomorrow is
+// measured without this file being opened.
+//
+// A `Kit` and a name, because what decides a break is the kit and what a reader needs is
+// the name. Gathered rather than written out: the whole complaint this section answers
+// arrived the week twelve tools were added at once.
+struct Hand {
+    const char *name;
+    tool::Kit kit;
+};
+
+std::vector<Hand> Hands() {
+    std::vector<Hand> hands{{"bare hand", tool::Kit{}}};
+
+    for (const ItemDef *def : item::Table().All()) {
+        if (!def->tool.Any()) continue;
+
+        hands.push_back({def->name, def->tool});
+    }
+
+    return hands;
+}
+
+// The longest a cell may take to clear, given what is in it and what is held.
+//
+// The rule, said the way a player would: **a material that needs a tool does not come
+// away without that tool any faster than a bare fist manages it.** `needsTool` is the
+// game's own promise — it is where punching stone for seven and a half seconds comes
+// from — and a cell is only ever a bag of materials, so the promise has to hold for
+// every one of them over the vertices it holds.
+//
+// So the floor is the slowest such term. Anything under it is a cell coming away on a
+// rate that belongs to something else in the same square.
+//
+// **It is deliberately not "a tool that suits nothing in the cell",** which is what this
+// check said first and which passed while the bug was still in. A cell of six soil and
+// three rock suits a spade perfectly well — the soil is soil — and the fault was that
+// the spade took the *rock* with it. A check written against the tool rather than
+// against the material never looks at that cell at all.
+float SlowestAllowed(const World::Yield &cell, const tool::Kit &kit) {
+    float floorSeconds = 0.0f;
+
+    for (std::size_t e = 0; e < kElementCount; e++) {
+        if (cell[e] <= 0) continue;
+
+        const ElementDef &def = kElements[e];
+
+        if (!def.rules.occupies || !def.needsTool) continue;
+
+        // Held the tool this asks for, so it is allowed to be quick about it.
+        if (def.tool != Tool::Hand && kit.kind == def.tool) continue;
+
+        const auto element = static_cast<Element>(e);
+
+        const float bare =
+            BreakSeconds(element, tool::Kit{}) * static_cast<float>(cell[e]) / kVerticesPerBlock;
+
+        floorSeconds = std::max(floorSeconds, bare);
+    }
+
+    return floorSeconds;
+}
+
 int Run(const probes::Bench &bench) {
     World &world = *bench.world;
 
@@ -109,6 +176,19 @@ int Run(const probes::Bench &bench) {
     long moved   = 0; // Where the two rules disagree at all.
 
     long chiefWrong = 0;
+
+    // The fault this second half is for, reported from play as "some tools break blocks
+    // that are not theirs too quickly". A cell can hold two materials at once, so which
+    // of them decides how long it takes is a real question — and the answer used to be
+    // "whichever there is most of", which let a spade through the rock in any cell that
+    // was mostly soil. Every hillside is that cell along the line where the two meet.
+    const std::vector<Hand> hands = Hands();
+
+    // Worst offender seen, kept so the report can name one rather than count them.
+    long cheated      = 0;
+    double worstRatio = 1.0;
+
+    std::string worstWhere;
 
     std::printf("\n%-9s %-9s %6s  %-22s %5s %5s\n", "at x", "at y", "solid", "holds", "was", "now");
 
@@ -147,6 +227,29 @@ int Run(const probes::Bench &bench) {
             }
 
             if (!chief || cell.holds[ElementIndex(*chief)] != most) chiefWrong++;
+
+            // Measured through `Editor::WorkFor` itself and never a copy of it —
+            // §28.7's rule about `Crafting::Draw`, and the only thing that makes this a
+            // check of the game rather than of a second implementation of it.
+            for (const Hand &hand : hands) {
+                const float least = SlowestAllowed(cell.holds, hand.kit);
+
+                if (least <= 0.0f) continue;
+
+                const float took = Editor::WorkFor(cell.holds, hand.kit);
+
+                if (took >= least - 0.001f) continue;
+
+                cheated++;
+
+                const double ratio = static_cast<double>(least) / std::max(took, 0.0001f);
+
+                if (ratio > worstRatio) {
+                    worstRatio = ratio;
+                    worstWhere = std::string(hand.name) + " at " + std::to_string(static_cast<int>(x)) + ", "
+                                 + std::to_string(static_cast<int>(y));
+                }
+            }
 
             const int was = Scattered(cell.holds);
             const int now = Collapsed(cell.holds);
@@ -193,6 +296,15 @@ int Run(const probes::Bench &bench) {
     std::printf("%s\n\n", sound ? "every full cell pays a whole block, of the material most of it was"
                                 : "a full cell can still break for nothing");
 
+    // And the second verdict, which is about time rather than about payout.
+    if (cheated > 0) {
+        std::printf("WRONG TOOL: %ld cells gave up a material that needs a tool, without it\n", cheated);
+        std::printf("            worst was %s, %.1f times quicker than a bare hand manages that material\n\n",
+                    worstWhere.c_str(), worstRatio);
+    } else {
+        std::printf("nothing that needs a tool comes away faster without it than a fist manages\n\n");
+    }
+
     // Nothing found is not a pass. A sweep that met no boundary has checked nothing,
     // and would go on reporting success after a change that removed every one of
     // them — which is §23.1's lesson about printing the count.
@@ -202,7 +314,7 @@ int Run(const probes::Bench &bench) {
         return 1;
     }
 
-    return sound ? 0 : 1;
+    return (sound && cheated == 0) ? 0 : 1;
 }
 
 const probes::Report row = {

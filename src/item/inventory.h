@@ -91,9 +91,28 @@ public:
     struct Page {
         std::array<Stack, kColumns * kRows> at{};
         int count = 0;
+
+        // How many wanted on, against `count` which is how many fitted.
+        //
+        // The two are the same number in every build that is allowed to start, and
+        // that is exactly what makes the difference worth carrying: overflowing a page
+        // is silent — the tail is simply not listed, and the row that fell off looks
+        // perfectly fine in the file it was added to. Counting the ones turned away is
+        // what lets `inventory_checks.cpp` say so, and it lets it say so about the
+        // *page* rather than about the table, which is the constraint that is actually
+        // real. Twelve tools arrived in one commit and took the item table past the
+        // twenty-seven a page holds while no page was anywhere near full.
+        int wanted = 0;
     };
 
     static Page PageOf(Tab tab);
+
+    // What a tab is called, on its own label and in anything that reports about it.
+    //
+    // A member rather than a helper beside the panel because the startup check names
+    // the tab it is refusing, and a second copy of these three words is a second thing
+    // to rename.
+    static const char *NameOf(Tab tab);
 
     // A page is the grid, and everything in the game has to fit on one.
     //
@@ -156,6 +175,20 @@ public:
     // The slot the bar points at, which is what the brush and the hand act
     // through.
     const Stack &Held() const { return slots_[static_cast<std::size_t>(selected_)]; }
+
+    // Puts `by` blows' worth of wear on whatever is in hand, and takes it away when
+    // there is nothing left in it. Returns whether it broke on this one.
+    //
+    // Here rather than at each hand that swings, and that is the same argument
+    // `World::PlaceCell` makes about refusing a cell: an inventory is the only thing
+    // that may empty one of its own slots, and a caller doing it for itself is a
+    // caller that can leave a slot holding a row with a count of nothing. There are
+    // three things that wear a tool — a block broken, a tree struck, a creature hit —
+    // and they must not be three answers to what happens on the last blow.
+    //
+    // Nothing at all where what is held does not wear, which is most of what a player
+    // carries and every material.
+    bool WearHeld(int by = 1);
 
     void Clear();
 
