@@ -64,11 +64,11 @@ void hotbar::Update(Inventory &inventory, bool wheelTaken) {
     }
 }
 
-void hotbar::DrawSlot(const Stack &stack, Rectangle bounds, bool active) {
+void hotbar::DrawSlot(const Stack &stack, Rectangle bounds, bool active, float pixel, bool dim) {
     DrawRectangleRec(bounds, kSlot);
 
     if (!stack.Empty()) {
-        const float drawn = kIconPixel * kPictureSide;
+        const float drawn = pixel * kPictureSide;
 
         const Vector2 corner = {std::floor(bounds.x + (bounds.width - drawn) / 2.0f),
                                 std::floor(bounds.y + (bounds.height - drawn) / 2.0f)};
@@ -77,13 +77,13 @@ void hotbar::DrawSlot(const Stack &stack, Rectangle bounds, bool active) {
         // row — at the same size either way. See `item/icon.h`; the point of asking it
         // rather than `PictureOf` here is that the bar, the panel, the cursor, the card
         // and a pickup in the grass cannot come to five different answers.
-        icon::Draw(stack, corner, kIconPixel);
+        icon::Draw(stack, corner, pixel);
 
         // And how much of it is left, along the foot of the picture. Under the count
         // rather than over it: a bar drawn last would cross the number, and the number
         // is only ever there for something that stacks, which is never something that
         // wears.
-        icon::DrawWear(stack, corner, kIconPixel);
+        icon::DrawWear(stack, corner, pixel);
 
         // Only past one. A count on every slot turns the bar into a spreadsheet,
         // and a lone item is already drawn as one thing.
@@ -103,6 +103,12 @@ void hotbar::DrawSlot(const Stack &stack, Rectangle bounds, bool active) {
     }
 
     DrawRectangleLinesEx(bounds, active ? 3.0f : 1.0f, active ? kOutline : Fade(kOutline, 0.4f));
+
+    // Over the finished square rather than by drawing the picture faded, so a dimmed
+    // slot and a lit one are the same drawing with a scrim between them. Faded pictures
+    // would have to be threaded through `icon::Draw`, which every other caller would
+    // then be able to get wrong.
+    if (dim) DrawRectangleRec(bounds, {16, 18, 22, 170});
 }
 
 void hotbar::Draw(const Inventory &inventory) {

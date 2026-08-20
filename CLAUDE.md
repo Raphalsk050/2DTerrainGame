@@ -109,6 +109,9 @@ whole phases, never inside a `pool::For` body.
 | `--veins out.png [zoom]` | every inclusion at its own width, drawn and measured (§27.5) |
 | `--craft out.png [w] [h]` | the recipe panel in every state it has (§28.7) |
 | `--gear out.png [zoom]` | every item as a slot draws it, the wear bar, and the tool in hand (§29.5) |
+| `--chest out.png [w] [h]` | the store at every size it joins to, and what a break pays out (§30.11) |
+| `--saves` | a world written down, read back, and written again (§31.3) |
+| `--menu out.png [w] [h]` | every screen in front of the game, with worlds in the list (§31.9) |
 
 `--woods x0 x1` is the companion to `--covers`: it walks the scatter's own cells
 and reports, per species, how many plants grow and what ground each one is
@@ -3071,3 +3074,534 @@ Five rows still draw from the four tones on the row: `stone axe`, `stone pickaxe
 fallback is the design — but they are visibly a different hand beside the fifteen that
 are drawn, and the fix is a file and one field each. `--gear` is where the difference is
 seen in one glance.
+
+---
+
+## 30. A chest is a fixture that remembers
+
+Seven rules were asked for: a chest keeps items, three of them join into one store,
+each holds thirty-two, a button sorts, a second button says how, breaking one drops
+only its own, and the right button opens it in front of everything else. They came out
+as two fields on a table, one file of pouring rules moved, and one layout — which is the
+sense in which this was a small change, and the sense in which it was not.
+
+### 30.1 It is a fixture, and the table was already the right shape
+
+A chest is put in a cell by a player. It stands on a surface. It comes down when that
+surface is dug away. It is made from an item and taken back as one. It has a picture of
+a *thing* rather than of a material's face. Every one of those sentences was already
+written in `entity/fixture.h` for the torch, and §11.3 is the argument for why that
+table exists at all.
+
+So what a chest adds is two fields — `Def::slots` and `Def::joins` — and one member on
+`Placed`, which is the contents. It is not a fourth table, it is not an entity, and
+nothing in the world knows it is different from a torch except the two places that read
+those fields.
+
+**The one thing it did break was already broken.** `Fixtures::Remove` handed back a
+`Kind`, and both callers then wrote `items::Torch()` into a `Scatter`. That was correct
+for exactly as long as there was one row in the table, and a chest dug up would have
+paid out a torch — §16.2b's fault, sitting in two files at once with the fuse lit.
+`fixture::ItemOf` is the one answer now, and `Remove` hands back the whole record
+because a store that is taken down has to pay out what was in it.
+
+### 30.2 A bank is derived, and the fourth chest is refused
+
+`Fixtures::Run` is the maximal horizontal run of same-kind neighbours through a cell,
+capped by the row's `joins`. Nothing is written down: no group id, no membership, no
+"which of these belongs to which".
+
+That is the whole of why it can be trusted, and the alternative is where the bug would
+have been. Stored membership has to answer *what happens when the middle of a run of
+three is dug out*, and every answer to that is two chests sharing one bag across a hole
+in the wall. A maximal run of neighbours has no such question in it: dig the middle one
+and there are two stores of one, each still holding what it held.
+
+**A placement that would make a run of four is refused**, with a notice, rather than
+placed and quietly left out of the bank. Minecraft does the second — a chest beside a
+double chest simply stays single — and it can afford to because its bank is two. At
+three, "which three of these four are one store" would have exactly one honest answer,
+which is *the order they happened to be built in*, and there is nowhere to write that
+down that survives one of them being dug up. A run that cannot grow says so, and the
+player leaves a gap.
+
+**Horizontal, and that is the art's doing as much as the code's.** A chest is drawn
+front-on (§30.10) and joins along its front. A stack of them going up a wall is a wall
+of separate chests, which is how a store room is built anyway.
+
+### 30.3 Thirty-two is four rows of eight, and the eight is load-bearing
+
+`slots::kAcross` is 8 and it lives beside the pouring rules rather than in the panel
+that draws the grid, which looks like the wrong home for a drawing constant and is not.
+
+A sorting rule is about a **row**. A row has to belong to exactly one chest, or the rule
+would have nowhere to live that survives the bank being taken apart — the same argument
+§30.2 makes about membership, one level down. Thirty-two over eight is four rows to a
+unit, so row `r` belongs to chest `r / 4` and `Fixtures::Rules` can hand out a pointer
+into the very chest whose slots that row is drawn from. Dig up the middle chest of
+three and the other two keep their rules, still about the rows they were always about.
+
+`fixture_checks.cpp` refuses to start on a row whose `slots` is not a whole number of
+rows of eight, and on one that joins more units than a `slots::Bank` has parts. Both are
+silent failures otherwise: the first draws two slots past the end of the grid that
+nothing can reach, and the second loses the last chest of a run with the player's things
+in it.
+
+Thirty-two rather than Minecraft's twenty-seven because a cell here is about a quarter
+of a Minecraft block by area (§13.1) and a bag fills several times as fast for it. Three
+joined is ninety-six, which is two and a half times what the player can carry — the
+point at which a store stops being somewhere to put the overflow and starts being
+somewhere to keep things.
+
+### 30.4 The pouring rules left the inventory, because there are two containers now
+
+`item/slots.h`. `Fill`, `Add`, `Room`, `Tally`, `Remove`, `Take` and `Put` were
+`Inventory`'s and were the whole of what an inventory did: top up an alike stack before
+filling an empty one, never merge two holes, take part of a stack away through
+`Stack::Some` so its wear goes with it, empty a slot all the way back to nothing rather
+than leaving it holding a row with a count of zero.
+
+Every one of those is a rule somebody got wrong once before it was written down, and
+§29.3 is the account of the last of them — four call sites rebuilding a `Stack` field by
+field, every one of them repairing a worn pickaxe by dropping it on the ground. A second
+copy of that list inside a chest is a second set of answers, and the two would part
+company the first time either was touched.
+
+**A bank is parts and not a span**, and that is rule six of the chest showing up in the
+data structure. Three joined chests are one store to the player and three separate
+arrays in memory, because breaking one has to drop *that one's* contents and leave the
+rest. Pour them into a single buffer when they join and there is no honest way to take
+one back out.
+
+### 30.5 Two panels are one layout, and the slots shrink together
+
+`ui/pack.h` is §25.1 met a second time, and the arithmetic is what forced it.
+
+Three chests is twelve rows. At the bar's own forty-four-pixel slot that is six hundred
+and fifty pixels of grid, beside a pack that is four hundred and fifty-six wide, in a
+window that opens at 1000 x 600 and may be dragged to 640 x 400. There is no fixed slot
+size at which that fits, and a store with a row off the bottom of the screen is things
+the player put away and cannot get back — invisible in any screenshot taken at the
+developer's window size.
+
+So `pack::Of` derives the texel: the largest **whole** number of screen pixels at which
+the whole arrangement fits the frame, walked down from six. Whole always, for
+`hotbar.h`'s reason — a picture authored on a six-texel grid drawn at a fraction of a
+pixel comes out with its columns alternating two pixels wide and three. A slot is
+`pixel * kPictureSide + 8`, which at six is exactly the bar's forty-four, so **a pack
+opened with no chest in front of it is laid out precisely as it always was.**
+
+Measured: 1600 x 900 keeps texel 6 at every size; 1000 x 600 falls to 4 for three
+chests; 640 x 400 falls to 3, and to 2 for three. Every slot is on screen at all of
+them, which is what `--chest` asserts.
+
+Two things are reserved whether or not they are showing — the rules column beside the
+grid and the line of words under it — so turning the rules on does not shift the grid
+out from under the player's hand. The second of those was found by the probe: the hint
+was drawn wherever there happened to be room under the panel, and at 1000 x 600 it
+landed on the frame's last pixel row. A line of text placed by the panel that draws it
+is a line nothing else knows about.
+
+### 30.6 The right button opens before it places
+
+`Editor::Opening` is worked out every frame beside `buildable_` and `footing_`, so the
+cursor promises it before the click — a cool blue outline where every other mark this
+cursor makes is warm, because what it promises is not a change to the world at all.
+
+It is tested **before the material in hand**, which is what "priority over everything,
+over placing blocks" means and is also the only order that leaves a chest reachable: the
+commonest thing to be holding while standing in a store room is a stack to put away, and
+a stack to put away is very often a hand full of material. Under any other order,
+opening a chest would mean emptying your hand first.
+
+**On the press and never on the hold**, so a wall dragged out along a ledge does not
+stop at every chest it passes.
+
+The hand **reports** and the loop acts, which is the arrangement `Editor::Left` already
+has with the axe. Opening a panel stops the world (§14), and a gate hidden inside the
+thing it gates is a gate nobody finds.
+
+**The lid runs outside that gate.** `Fixtures::Animate` is called beside `world.Update`,
+on the frame clock, for the digging bar's reason (§13.4): a lid is a message to the
+player about a panel that is open, not a thing happening in the world. Inside the gate
+it would be a chest that never finishes opening, because opening it is what stopped the
+clock.
+
+### 30.7 Sorting is one order, and a row set aside is a promise
+
+`slots::Sort` pours alike stacks together and lays the rest out by `(holds, what)` —
+materials before items, alphabetical within each. Nobody chose alphabetical:
+`content::Open` hands out ids by sorting on each row's own name (§19.1), so sorting on
+the id *is* sorting by name and there is no second ordering written down anywhere to
+fall out of step with the first.
+
+Stacks are **lifted whole and put back**, never rebuilt from a kind and a total. That is
+the one subtlety: a stack carries `wear`, and two pickaxes worn differently are two
+things. Rebuilding from `(kind, count)` hands the player a pair of brand new ones, which
+is §29.3's repair-by-being-dropped in another costume.
+
+A row with a rule holds that kind and nothing else, and keeps its slack — an unruled
+material poured into the gap at the end of the cobblestone row is exactly what the row
+was reserved to stop. Everything else fills what is left, and takes the slack **only**
+where there is nowhere else to go, because the alternative is losing it. That branch is
+unreachable in a bank that was not already full to the brim, and "cannot happen" is not
+a place to put something the player dug for.
+
+**Rows and not columns**, and the reason is §30.3: a row belongs to one chest and can be
+written into it, while a column crosses every unit in the bank and could not be stored
+anywhere that survives one of them being dug up.
+
+### 30.8 The search dims and never filters
+
+These squares *are* the storage. Filtering the view would make a click land in a
+different slot from the one it appears to be over, which is a whole indirection between
+the grid and the chest for the sake of hiding some squares. What a search does here is
+say which of them to look at.
+
+**An empty slot is never dimmed.** It cannot answer a search — there is nothing in it to
+be the wrong thing — and with ninety-six slots mostly empty, shading them turns the
+whole panel dark and buries the handful of squares the search was asked to point at.
+That was visible in the first `--chest` sheet and invisible in the code.
+
+### 30.9 The bin, and the one place a tip is shown over a full hand
+
+A click on it cannot be taken back, so it is a dark red well with a paler lid rather
+than a slot — a slot that is always empty reads as a slot the player has failed to fill.
+The left button destroys the whole stack and the right button one at a time, which makes
+it usable for trimming a stack rather than only for losing one.
+
+It is the **one** place this panel breaks its own rule about tooltips. Everywhere else a
+tip is hidden while something is on the cursor, because the hand is already over the
+slot it is about to go into. Over the bin, that is the only moment the question matters:
+a red square is not self-evident, and what the player needs to know is whether letting go
+here destroys what they are holding.
+
+### 30.10 The art is front-on, and switching it on is one field
+
+`fixture::Def::art` names a folder under `assets/fixtures/`, and the strips inside are
+always called `alone`, `left`, `middle` and `right` — §24.2's rule, so there is no
+filename in the table to misspell. Each strip's **frames are the lid opening**: nought
+shut, the last one wide open, and the lid is a play-head between them. A one-frame strip
+is a chest that never appears to open and is still correct; a missing `left` falls back
+to `alone`, so a bank drawn before the ends exist is three identical chests.
+
+**It is drawn front-on and never mirrored.** A fixture has no facing at all —
+`sheet::Draw` is always handed `+1` — and that is not a simplification: a chest seen from
+the side could not show which of its neighbours it had joined with, which is the whole of
+what a bank has to say for itself.
+
+`assets/fixtures/chest/README.md` is the contract, and the row's `art` is still
+`nullptr` today so that nothing warns about a file nobody has drawn yet. The hand-drawn
+`picture` on the row is what it falls back to, and §24.2's reason for keeping it holds
+here too: it is the one description of the chest that cannot go out of date, being in the
+same file as everything else about it.
+
+### 30.10b The fallback joins too, and that is `Def::joined`
+
+Reported from play: *combine the chest sprites.* Three chests standing side by side were
+drawn as three boxes with two seams down them, and what the player had built was one
+store. The piece machinery was already there — `Piece`, `Wardrobe::For` — and it was
+being asked for **only after the art check**, so a bank with no authored art fell back to
+three copies of one face.
+
+`Def::joined` is three more pictures on the row: the left end, the middle, and the right
+end. The units that continue into a neighbour drop the border on that edge, and the lid,
+the iron band and the body run straight through the join. `FaceOf` is the one answer to
+which face a unit shows, asked by the draw and by the contact sheet alike.
+
+Written out by hand rather than derived from `picture` by a rule, on `Picture::art`'s own
+argument: at six texels a side the whole face is thirty-six characters, which is easier to
+change by eye than any rule that could have produced it — and a rule that opened one edge
+would be wrong the first time a fixture had a shape it did not expect.
+
+**Nothing dark may stand at a seam**, and that is the rule the rest follows from. These
+pictures are bordered in their darkest tone, so *any* dark texel where two units meet
+reads as a border — which is the fault being fixed. Two things came out of measuring it:
+
+- **The first draft put half a clasp on each inner edge.** It was centred for a run of two
+  and symmetrical for a run of three, and it looked exactly like a seam. `--chest` counts
+  the border texels left at a join and said four. The clasp moved to the middle of the
+  *middle* face, which puts it dead centre of a run of three.
+- **And the check was wrong before the art was.** Its first version counted dark texels
+  touching at the join, which flagged the iron band — a band that is *meant* to run
+  straight through. A border is dark at the edge with something lighter beside it: a
+  vertical line rather than part of a horizontal one, and that is what it measures now.
+
+A third thing the sheet showed and no code could: at six texels the single chest's latch,
+notched into the body in the darkest tone, read as a **doorway**. It is a pale lock on the
+dark band now, which is Minecraft's arrangement and reads as metal on wood.
+
+### 30.11 `--chest`, and the four things it asserts
+
+```bash
+./build/CppGame.exe --chest out.png [wide] [tall]
+```
+
+It exists for `--craft`'s reason (§28.7): **no single screenshot of a session shows the
+mechanic.** Getting a bank of three on screen means felling a wood, making twenty-four
+planks, crafting three chests and standing them in a row — and the sizes that break are
+exactly the ones nobody reaches by accident. It draws through `Inventory::Draw` and
+`Store::Draw` themselves and lays out through `pack::Of`, never a copy of any of them.
+
+| verdict | the fault it is about |
+|---|---|
+| every slot is inside the frame | a row of a chest off the bottom of the screen, at a window size the developer never used |
+| no two parts of the layout touch | §25.1, in a layout with two panels, a bin, a field, three buttons and a column of headers |
+| sorting keeps every count | counted **per kind**, because a total is blind to two kinds swapped |
+| breaking one takes its own | rule six, through `Place`, `Run`, `Store` and `Remove` rather than by reasoning about them |
+
+`Store::Ruling` and `Store::Seeking` are settable from outside for `Crafting::Open`'s
+reason: the panel reaches those states from a click, a probe has no mouse, and a probe
+that reproduced them would be photographing the reproduction.
+
+**Both faults it found on its first two renders were its own, and both were worth it.**
+The per-unit fill wrote through `Fixtures::Run`, which answers with the *whole* joined
+run for any cell of it — so three chests were filled into one, and the break test read
+nine where it should have read twenty-seven. And writing straight into a slot goes round
+the stack limit `Fill` keeps, so a stack of seven wood shovels went in, the sort
+correctly split it back out into sevens of one, and the sheet came out a wall of
+shovels. A probe that cannot be read is not an instrument.
+
+---
+
+## 31. A save is the difference between the seed and the world
+
+Five rules were asked for: the player can save, and what is saved is every change to
+the world, the pack, every chest, and every creature. They came out as one file format
+and six `Save`/`Load` pairs, each beside the fields it writes — plus a saves screen
+that had been drawn and refused since the menu was written.
+
+### 31.1 What is written is what cannot be worked out again
+
+The generator is a pure function of position and seed. That is the whole design of the
+world (§5.5, §8, §21.2), and it is what makes a save small: a country is its seed plus
+the journal of what the player changed; a wood is its scatter plus the trees that have
+been touched; a county's animals are a function of the cell plus the record of which
+cells have been asked and what became of what was in them.
+
+So the file holds `World::edits_`, `Grove::remembered_`, every fixture and its
+contents, the thirty-six slots, the character's position and health, and the warren's
+patches. Nothing else. Chunks, silhouettes, the light, the chunk pictures, the water —
+every one of those is derived, and **derived state is not history**. Writing it would
+make the file large, make it brittle against every change to how a chunk is built, and
+make it possible for a save to hold two answers to one question.
+
+**And what is not written is state a fraction of a second old.** A swing halfway
+through, a creature mid-leap, a hurt flash, a stack on the cursor, the timers on
+`life::Health`. A world you load is a world you *arrive* in, standing still. Every one
+of those fields would be the game telling you about a moment you did not see — and it
+is the same argument `mob::Life` already makes about a creature (§21.2): what is kept
+is history, not description.
+
+Two things are deliberately dropped that look like history and are not: `World::mown_`
+and `World::sown_`, which are a tuft growing back and turned earth greening over. They
+are timers on the weather clock. A world you come back to has settled, which is what a
+world you come back to looks like.
+
+### 31.2 Names, never indices — and the format follows from that
+
+§19.1 is the reason and it says so outright: *a row's id ends up in `Stack::what` and
+will end up in save data, so it has to be the same number on every build of the same
+content.* Ids are a function of the **set** of rows, so they move the day a material is
+added. A binary save keyed on them is a world that quietly turns to stone where the
+diamond was.
+
+Every reference in the file is the row's own name — materials, items, fixtures,
+species, creatures. From there the rest follows:
+
+- **A record is a line**: a tag, then its fields, with anything that could hold a space
+  in quotes ("wood plank" is one). `save::Writer` and `save::Reader` are the whole of
+  the syntax and live in `save/record.h`.
+- **The contents live with the module that holds them.** `World::Save` writes the
+  journal, `Grove::Save` the wood, `Fixtures::Save` what is standing and what is in it,
+  `Warren::Save` the patches. Adding a field to `TreeState` means editing the file you
+  were already editing. The alternative is one enormous writer that reaches into six
+  others' privates, and the first thing it does is make every one of those fields
+  public.
+- **Sections are self-delimiting**, through one record of pushback (`Reader::Again`),
+  and carry no counts. A count on a header is a number that has to agree with the lines
+  under it, and the first hand-edited save has it disagree.
+- **A record with no case for it is skipped**, which is what makes the format additive:
+  a save written by a later build with a section this one has never heard of loads as
+  the world without that section. The version number on line one is what says when that
+  stops being safe.
+
+**Everything is sorted before it is written** — edits by row then column, patches and
+fixtures by cell, trees by key. Not tidiness: a save has to be a function of the
+*world* and not of a hash table's iteration order, or two saves of the same country are
+two different files and the round trip below has nothing to compare.
+
+**A name that resolves to nothing stops the read.** Not for the settled bits and not
+for a creature — those are dropped, deliberately, because §21.1 removed three creature
+rows in one commit and refusing there would break every save ever written by a build
+that had them. Everywhere else it is a refusal: a hillside missing the one material the
+reader did not recognise is a world that is quietly not the saved one.
+
+### 31.3 The round trip is §2's bar, pointed at the one file a player cannot remake
+
+`--saves` writes a world, reads it back, writes it again, and compares the two files
+byte for byte. Anything dropped on the way in comes out as a shorter second file;
+anything mangled comes out as a different line, and the check names the line.
+
+That is CLAUDE.md §2's discipline applied where it matters most, and it matters most
+here for a reason the rest of the project does not have: **a save's faults are
+invisible until the player has already lost something.** A chest whose contents are
+written but not read looks perfect for the whole session it was filled in.
+
+The `written` record is the one line skipped, because it is seconds since the epoch at
+the moment of writing — a fact about the room rather than about the world, and a check
+that demanded two writes match on it would fail on being correct.
+
+Four more verdicts beside it, and each is about something the file check cannot see:
+
+| verdict | what it catches |
+|---|---|
+| the world read back is the world written | a reader that parses every line perfectly and throws the result away |
+| a name this build does not know is refused | §19.2's rule — a guard nobody has watched fire is not a guard |
+| renaming changes the name and nothing else | which is what makes it safe on a world played for a week |
+| both worlds are found by the listing | a head `Read` understands and `Peek` does not — a save that loads and cannot be found |
+
+**It found a real bug on its first run**, and the bug is the shape this section is
+about. `Warren::Save` wrote the patches and, for each, the live creatures standing in
+it. A creature put down by hand — the console's `/spawn`, or a probe — is in the herd
+immediately and its cell has no patch record until the view has left it, so it was
+filed under a patch that did not exist and dropped. The counts said `0 patches, 1
+creature` on the way in and would have said nothing at all on the way out.
+
+The fix is one merged sorted list of cells rather than two passes, and the merge is
+load-bearing: written in two passes, the *second* save would have those cells as real
+records and would put them in a different order — so the round trip would have caught
+the fix as a new fault.
+
+### 31.4 A write never destroys what it replaces
+
+`save::Write` writes to `world.txt.part` and moves it into place. A save is the one
+thing in this program a player cannot make again, and a write that stops halfway — the
+window closed, the disk full, the machine off — must not be allowed to leave the old
+save destroyed and the new one truncated. The only way to be sure is never to open the
+real file until there is a whole one to put in its place. `save::Rename` goes the same
+way round for the same reason.
+
+The preview picture is the one part that may fail without the save failing: a world
+written without a thumbnail lists perfectly well, and losing a session over one would
+be absurd.
+
+### 31.5 Three moments write, and only one of them is a button
+
+- **When a world is made.** Not a convenience: until it is written it is not in the
+  list, so a player who makes a world and closes the window has made nothing, and there
+  is no moment at which that is what they meant.
+- **On the pause screen**, which is the button.
+- **On the way out**, which is Minecraft's rule and is there for its reason: there is no
+  such thing as quitting a world without saving it, because the alternative is somebody
+  who closed the window after an hour and finds an hour ago.
+
+The explicit button is not made redundant by the last of those. That one is *when you
+choose*; the exit write is the one nobody has to remember.
+
+**Leaving a world drops both copies of which save is being played** — the menu's and
+the loop's — and the second one is not tidiness. Without it, the write on the way out
+would put back a world the player had left and then deleted from the list, which is a
+save that comes back from the dead.
+
+### 31.6 The preview is the last thing the player looked at
+
+Taken with `LoadImageFromScreen` after `EndDrawing`, on the frame the game is paused,
+and never on a timer. The world is still drawn on that frame — the gate that stops it
+was tested at the top — so it is the last frame there is anything to photograph, and
+the only way to reach "save" is through the pause screen, so it is always the picture
+they were looking at when they stopped.
+
+After `EndDrawing` and not inside it, because what is wanted is the whole frame as the
+player saw it — the world, the character, the bar, the hearts. Shrunk to 480 px on the
+way in rather than on the way out: it is drawn at a third of a menu's width and read on
+every listing, and a full-screen PNG per world is several megabytes to hold a thumbnail.
+
+### 31.7 Loading is making a world with one stage in the middle of it
+
+The staged rebuild §14.1b describes gained one stage: after the ground is measured and
+everything that remembers the last country is cleared, and *before* the character is
+stood up. That ordering is the only one that works — the journal has to land in a world
+whose own edits have just been dropped, and the save is what says where the player was
+standing, so a loaded world skips the "find you somewhere to stand" stage entirely.
+
+Making and loading are one path because every other stage is the same work in the same
+order: calibrate, measure, clear, stand up, stream, paint. Two copies would drift the
+first time one gained a stage.
+
+**A save this build cannot read is played anyway**, on the country the seed describes,
+with a line in the console saying so. The ground is still the player's; a silent empty
+world would look like the save was never written.
+
+### 31.8 The saves screen, and the one place this module breaks its own rule
+
+The screen was drawn and refused — `load`, `edit` and `delete` were there and dead,
+because "the store is a system of its own and is deliberately not being invented here".
+It is invented now: a list of what is on disk, newest first, with the name on top and
+the mode, the seed and how long ago it was played under it; a preview; and four buttons
+that all work.
+
+Three things about it are decisions rather than layout:
+
+- **Renaming happens in the row**, not on a screen of its own. What is being renamed is
+  the row the player is looking at, and moving them somewhere else to type would take it
+  off the screen.
+- **Deleting asks first, and the question is a field rather than a screen.** That is the
+  exception to §14's stack: a confirm is not a place the player has *gone* — it is a
+  question about the screen they are on — and pushing it would make the back arrow mean
+  "cancel" on one screen and "go up" on every other.
+- **The pause screen is the title screen.** The same four buttons meaning four
+  different things, because it *is* the same screen: the title standing on a world
+  rather than on nothing, which is exactly what the stack already says (`Paused`). Two
+  layouts would be two things to keep the same size and a second place to add a button
+  to.
+
+The list is selected **by id and never by position**. A save that was deleted moves
+every row under it up one, and a remembered position would quietly select whatever slid
+into it — which is the row the next click deletes.
+
+**The picture box is the shape of the screen the picture was taken of.** It was a fixed
+share of the panel's height, and a screenshot is the shape of the window — so a preview
+fitted into it came out as a strip floating in a hole, with a band of empty panel above
+and below. Taken from *this* window rather than from the picture, so the layout stays a
+pure function of the frame and does not move when the selection does; a save written at
+another shape is still fitted inside and centred, which is the rare case rather than
+every case. `--menu` measures the share of the box a picture of the window's shape
+covers, and it is a hundred per cent or the check fails.
+
+### 31.9 `--menu`, and why the interesting states cannot be played to
+
+```bash
+./build/CppGame.exe --menu out.png [wide] [tall]
+```
+
+Six screens on one sheet: the title, the saves list with a world picked, a world being
+renamed in place, the delete question standing over the list, the new-world form, and
+the pause screen. It exists for `--craft`'s reason (§28.7) and `--hud`'s (§25.5): **an
+empty saves list is what a developer sees on every run.** A list with six worlds in it,
+one of them mid-rename, takes a session of play to reach and is exactly where a layout
+goes wrong.
+
+The saves it lists are **real files**, written and swept up afterwards — a mock list
+would be a picture of the mock, and the one thing worth checking is that what
+`save::List` hands over is what gets drawn. They hold a head and nothing else, because
+the head is all this screen ever reads.
+
+`Menu::Renaming` and `Menu::Asking` are settable from outside for `Crafting::Open`'s
+reason: those states are reached by a click, a probe has no mouse, and a probe that
+reproduced them would be photographing the reproduction.
+
+Two faults it caught on its first render, both invisible in code: the title screen wore
+a back arrow pointing at itself (the probe's own doing — it pushed a screen that was
+already on top, which is worth knowing because the game does not), and every row of the
+list said "1009 days ago" because the fixture used a fixed timestamp. The second is the
+better lesson: a probe whose data is constant photographs the probe rather than the
+screen. The rows now spread through the past so all four of the phrasings appear at
+once — which is how "1 hours ago" was found and made singular.
+
+A third came from running it beside a world somebody was actually playing: the count read
+**"7 of 6"**, because `Menu::Listed` counts everything on the disk and the disk had a real
+save on it. The probe counts only its own prefix now. A check that counts other people's
+things is a check that fails for the wrong reason — and the two sweeps in this project
+that remove save folders are written against their own prefixes for the same reason, so
+that neither can ever take a player's world with it.

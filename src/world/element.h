@@ -3,6 +3,7 @@
 #include "world/element_def.h"
 
 #include <iterator>
+#include <optional>
 #include <string_view>
 
 #include "world/elements/rock.h"
@@ -59,6 +60,21 @@ inline constexpr ElementDef kElements[] = {
 // The size assert catches the commoner mistake on its own: a row added to one list
 // and forgotten in the other.
 static_assert(std::size(kElements) == kElementCount, "every Element needs exactly one row, and no row needs two");
+
+// The material of that name, or nothing.
+//
+// Here rather than beside whoever needed it first, for `ElementDef::loose`'s reason
+// (§16.1): a question about the table belongs to the table. It exists because a save
+// names materials rather than numbering them — a row's position is a function of the
+// source order and moves the day one is inserted, which would turn a saved diamond
+// into whatever now stands where it used to (§19.1).
+inline std::optional<Element> ElementNamed(std::string_view name) {
+    for (std::size_t e = 0; e < kElementCount; e++) {
+        if (name == kElements[e].name) return static_cast<Element>(e);
+    }
+
+    return std::nullopt;
+}
 
 static_assert(std::string_view(kElements[ElementIndex(Element::Rock)].name) == "rock",
               "kElements is out of step with enum class Element at rock");

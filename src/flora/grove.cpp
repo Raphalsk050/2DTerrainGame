@@ -3,6 +3,8 @@
 #include "item/items/wood.h"
 #include "flora/grove.h"
 
+#include "save/record.h"
+
 #include "core/config.h"
 #include "world/marching_squares.h"
 
@@ -553,6 +555,119 @@ void Grove::Configure(const flora::Settings &settings, const terrain::Settings &
     meanWater_ = std::max(sky.MeanRain(), 1e-3f);
 
     sheet_.Create();
+}
+
+void Grove::Save(save::Writer &out) const {
+    // Sorted by key, for `World::Save`'s reason: a save has to be a function of the
+    // wood and not of the order a hash table happened to hand its buckets over.
+    std::vector<const std::pair<const std::int64_t, TreeState> *> all;
+
+    all.reserve(remembered_.size());
+
+    for (const auto &entry : remembered_) all.push_back(&entry);
+
+    std::sort(all.begin(), all.end(), [](const auto *a, const auto *b) { return a->first < b->first; });
+
+    out.Tag("trees").Int(nextPlanted_).Done();
+
+    for (const auto *entry : all) {
+        const TreeState &tree = entry->second;
+
+        out.Tag("tree")
+            .Int(entry->first)
+            .Real(tree.plantedAt)
+            .Real(tree.updatedAt)
+            .Real(tree.struckAt)
+            .Real(tree.felledAt)
+            .Real(tree.fruitAt)
+            .Real(tree.growth)
+            .Real(tree.health)
+            .Real(tree.stumpHealth)
+            .Flag(tree.fallLeft)
+            .Flag(tree.dropped)
+            .Flag(tree.cleared)
+            .Flag(tree.planted);
+
+        // A planted tree is the one kind whose species and position the scatter cannot
+        // answer for, so those are written and everything else is not. By name, because
+        // `flora::Species` is still an enum over a central table and a row inserted into
+        // the middle of it would move every number after it (§19.4).
+        out.Text(tree.planted ? flora::Def(static_cast<flora::Species>(tree.species)).name : "")
+            .Real(tree.at.x)
+            .Real(tree.at.y);
+
+        // The blows still in the air. Three of them, as a ring — see `kBlows`.
+        for (const float at : tree.blowAt) out.Real(at);
+
+        out.Int(tree.blowSlot).Done();
+    }
+}
+
+void Grove::Load(save::Reader &in) {
+    // The section's own field, read here because this is entered standing on it.
+    //
+    // A planted tree is keyed from a base no cell index can reach and numbered in
+    // order, so the next number has to come back with them — otherwise the first tree
+    // planted after a load lands on the key of one already in the map and replaces it.
+    nextPlanted_ = in.Int();
+
+    while (in.Next()) {
+        if (!in.Is("tree")) {
+            in.Again();
+            break;
+        }
+
+        const std::int64_t key = in.Int();
+
+        TreeState tree;
+
+        tree.plantedAt   = in.Real();
+        tree.updatedAt   = in.Real();
+        tree.struckAt    = in.Real();
+        tree.felledAt    = in.Real();
+        tree.fruitAt     = in.Real();
+        tree.growth      = in.Real();
+        tree.health      = in.Real();
+        tree.stumpHealth = in.Real();
+        tree.fallLeft    = in.Flag();
+        tree.dropped     = in.Flag();
+        tree.cleared     = in.Flag();
+        tree.planted     = in.Flag();
+
+        const std::string species = in.Text();
+
+        tree.at.x = in.Real();
+        tree.at.y = in.Real();
+
+        for (float &at : tree.blowAt) at = in.Real();
+
+        tree.blowSlot = static_cast<int>(in.Int());
+
+        if (!in.Ok()) return;
+
+        if (tree.planted) {
+            bool known = false;
+
+            for (std::size_t k = 0; k < flora::kSpeciesCount; k++) {
+                if (species != flora::kSpecies[k].name) continue;
+
+                tree.species = static_cast<std::uint8_t>(k);
+                known        = true;
+
+                break;
+            }
+
+            // A species this build has never heard of. Refused for the reason a
+            // material is: a planted tree that came back as the wrong kind, or as
+            // nothing, is a world that is quietly not the saved one.
+            if (!known) {
+                in.Fail();
+                return;
+            }
+        }
+
+        remembered_[key] = tree;
+    }
 }
 
 void Grove::Clear() {

@@ -1094,6 +1094,19 @@ public:
     // is the one number; the weather below is derived from it and cached because
     // every column would otherwise ask for the same answer.
     void Advance(float dt);
+
+    // Puts the clock where a save left it.
+    //
+    // Through `Advance` rather than by writing `time_`, because everything the sky
+    // derives from the clock — the daylight, the hour, the weather's own turn — is
+    // worked out *by* Advance and held rather than recomputed on every read (see
+    // `time_`). Setting the field alone would give a world loaded at midnight a noon
+    // sky until the first frame ticked it over.
+    void SetTime(float when) {
+        time_ = 0.0f;
+
+        Advance(when);
+    }
     float Time() const { return time_; }
 
     const Settings &Config() const { return settings_; }

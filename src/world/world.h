@@ -28,6 +28,11 @@
 // Two kinds of chunk break that property and are pinned in memory instead:
 // those the player edited, and those holding liquid. Neither follows from the
 // noise any more.
+namespace save {
+class Writer;
+class Reader;
+} // namespace save
+
 class World {
 public:
     // Cells along one chunk side.
@@ -396,6 +401,31 @@ public:
     void StepWeather(float dt);
 
     const weather::Sky &Sky() const { return sky_; }
+
+    // Puts the sky's clock where a save left it, so a world saved at midnight comes
+    // back at midnight.
+    void SetClock(float when) { sky_.SetTime(when); }
+
+    // Everything this world holds that its own noise cannot produce.
+    //
+    // Which is exactly `edits_` and nothing else — the whole design of the generator
+    // is that a chunk is a pure function of position and seed, so the journal *is* the
+    // difference between the country the seed describes and the one the player has
+    // been living in. Nothing about chunks, silhouettes, pictures or the light is
+    // written down, because every one of those is derived and would be rebuilt
+    // identically from the same journal.
+    //
+    // `mown_` and `sown_` are deliberately not saved. They are timers, not
+    // modifications: turned earth greening over and a tuft growing back, both measured
+    // on the weather clock. A world you come back to has settled, which is what a
+    // world you come back to looks like.
+    void Save(save::Writer &out) const;
+
+    // Reads that journal back. Entered on the section's own record, and it consumes
+    // the lines under it. The world must already have been rebuilt for this seed:
+    // `Reset` clears the journal, so loading into an unrebuilt world would leave the
+    // last country's edits standing in the new one.
+    void Load(save::Reader &in);
 
     // The ranges standing behind the world.
     //

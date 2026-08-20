@@ -10,6 +10,9 @@
 #include "entity/fixture.h"
 #include "flora/grove.h"
 #include "ui/crafting.h"
+#include "save/save.h"
+#include "ui/pack.h"
+#include "ui/store.h"
 #include "ui/hotbar.h"
 #include "ui/hud.h"
 #include "render/liquid_layer.h"
@@ -967,6 +970,25 @@ int main(int argc, char **argv) {
     // hidden inside the thing it gates is a gate nobody finds.
     bool packOpen = false;
 
+    // The chest standing open beside it, and the panel that draws it.
+    //
+    // The run rather than the cell, because what the player opened is a *store* and a
+    // store is up to three chests joined — worked out once when the chest is opened and
+    // then held, since nothing can move it while the world is stopped behind the panel.
+    //
+    // Out here with `packOpen` and for its reason: what is on the screen is the state of
+    // the screen, and the loop is where the screen is decided.
+    fixture::Joined opened{};
+
+    Store store;
+
+    // What the chest panel is looking at, rebuilt each frame it is drawn.
+    //
+    // Rebuilt and never kept, which is `slots::Bank`'s own instruction: a bank points
+    // into the chests themselves, so one held across a frame is a bank pointing at a
+    // chest that may have been dug up.
+    std::vector<slots::Kind *> rules;
+
     // Whether the brush is waiting for the hand to come off the button.
     //
     // A click outside the panel dismisses it, and the button is still down for
@@ -993,6 +1015,41 @@ int main(int argc, char **argv) {
     menu::Menu menu;
 
     Gamemode mode = Gamemode::Survival;
+
+    // Which save the world being played came from, and what it is called.
+    //
+    // Out here with the mode and for its reason: it is a fact about the sitting rather
+    // than about the ground. The menu is told it so the pause screen can name what it
+    // is about to write to, and this is the copy that decides where.
+    save::Slot playing;
+
+    // The whole world, by reference, for the two calls that write and read it.
+    //
+    // Built once and kept, because every one of these objects lives for the length of
+    // the program — `World::Rebuild` puts a different country into the same object
+    // rather than making a second one (§14.1), which is exactly what makes a bundle of
+    // pointers safe to hold.
+    const save::Game whole = {.world  = &world,
+                              .grove  = &grove,
+                              .chests = &fixtures,
+                              .herd   = &herd,
+                              .pack   = &inventory,
+                              .player = &player};
+
+    // The last look the player had at the world, kept for the save's preview.
+    //
+    // Taken on the frame the game is paused and never on a timer, and that is the
+    // whole of the design: the only way to reach "save" is through the pause screen,
+    // so the picture a save carries is the one the player was looking at when they
+    // stopped. A rolling capture would cost a framebuffer read every few seconds to
+    // produce a worse answer.
+    Image shot{};
+
+    bool grabShot = false;
+
+    // What a save is stamped with. The name is the player's, the seed and the mode are
+    // the world's, and none of the three is a thing the world itself keeps.
+    save::Stamp stamp;
 
     // Whether the pointer is on a panel rather than on the world.
     //
@@ -1031,6 +1088,18 @@ int main(int argc, char **argv) {
         int said  = -1;
 
         Gamemode mode = Gamemode::Survival;
+
+        // The save being read, where this is a load rather than a fresh world.
+        //
+        // The two paths are one path with a stage in the middle of it, and that is not
+        // a shortcut: making a world and loading one differ in exactly what is put into
+        // the world after the ground is measured, and every other stage — calibrating,
+        // clearing, standing the player up, streaming, painting — is the same work in
+        // the same order. Two copies of it would drift the first time one gained a
+        // stage.
+        bool loading = false;
+
+        save::Slot from;
     } making;
 
     // Straight into the world when nobody is at the keys. A profile of the title
@@ -1104,6 +1173,54 @@ int main(int argc, char **argv) {
 
                     if (wish.quit) break;
 
+            if (wish.save) {
+                // Written before the menu is allowed to move, so that "save and quit"
+                // is one thing rather than two that can half happen.
+                if (!playing.id.empty()) {
+                    stamp.name = playing.name;
+                    stamp.seed = settings.seed;
+                    stamp.mode = mode;
+
+                    save::Write(playing, stamp, whole, (shot.data != nullptr) ? &shot : nullptr);
+                }
+
+                // Leaving drops the world as well as the screen.
+                //
+                // Both copies of which save is being played, and the second one matters:
+                // without it the write on the way out would put back a world the player
+                // had left and then deleted from the list, which is a save that comes
+                // back from the dead.
+                if (wish.leaving) {
+                    playing = {};
+
+                    menu.Home();
+                }
+            }
+
+            if (wish.load) {
+                save::Slot slot;
+
+                if (save::Peek(wish.slot, slot)) {
+                    settings.seed = slot.seed;
+
+                    terrain::Calibrate(settings);
+
+                    world.BeginRebuild(settings);
+
+                    making = {};
+
+                    making.running = true;
+                    making.mode    = slot.creative ? Gamemode::Creative : Gamemode::Survival;
+                    making.loading = true;
+                    making.from    = slot;
+
+                    playing = slot;
+
+                    menu.Playing(slot);
+                    menu.Open(menu::Screen::Loading);
+                }
+            }
+
             if (wish.create) {
                 // A new country in the object every other system already points at
                 // — see World::BeginRebuild for why it is done this way round and
@@ -1123,6 +1240,15 @@ int main(int argc, char **argv) {
                 making.running = true;
                 making.mode    = wish.mode;
 
+                // The folder is chosen here rather than when the world is first
+                // written, so that two worlds made with the same name in one sitting
+                // get two folders. `save::Fresh` asks the disk, and the disk does not
+                // know about a world that has not been written yet.
+                playing      = {};
+                playing.id   = save::Fresh(wish.name);
+                playing.name = wish.name;
+
+                menu.Playing(playing);
                 menu.Open(menu::Screen::Loading);
             }
 
@@ -1147,9 +1273,13 @@ int main(int argc, char **argv) {
                 switch (making.stage) {
                 case 0: doing = "reading the shape of the land"; share = 0.0f; break;
                 case 1: doing = "measuring what this world holds"; share = kMeasured; break;
-                case 2: doing = "growing the woods"; share = 0.84f; break;
-                case 3: doing = "finding you somewhere to stand"; share = 0.88f; break;
-                case 4: doing = "cutting the caves under your feet"; share = 0.94f; break;
+                case 2: doing = "growing the woods"; share = 0.82f; break;
+                case 3:
+                    doing = making.loading ? "reading back what you left here" : "clearing the ground";
+                    share = 0.86f;
+                    break;
+                case 4: doing = "finding you somewhere to stand"; share = 0.90f; break;
+                case 5: doing = "cutting the caves under your feet"; share = 0.95f; break;
                 default: doing = "painting the ground"; share = 1.0f; break;
                 }
 
@@ -1195,15 +1325,55 @@ int main(int argc, char **argv) {
                         herd.Memory().Configure(settings.seed);
                         inventory.Clear();
 
+                        // And what was standing open in front of them. A bank names
+                        // cells in the country that has just gone.
+                        opened = {};
+                        store.Shut();
+
                         making.stage++;
                         break;
 
                     case 3:
+                        // Everything the player did to this country, put back on top of
+                        // the country the seed describes.
+                        //
+                        // After the clearing above and before the character is stood up,
+                        // which is the one ordering that works: the journal has to land
+                        // in a world whose own edits have just been dropped, and the
+                        // save carries where the player was standing.
+                        if (making.loading) {
+                            save::Stamp read;
+
+                            if (save::Read(making.from, read, whole)) {
+                                playing.name = read.name;
+                                making.mode  = read.mode;
+
+                                menu.Playing(playing);
+                            } else {
+                                // Said out loud and played anyway, on the country the
+                                // seed describes. A save this build cannot read is a
+                                // world the player still owns the ground of, and a
+                                // silent empty world would look like the save was never
+                                // written.
+                                chat.Say("that save could not be read - the ground is here, what was on it is not",
+                                         console::Tone::Failed);
+
+                                making.loading = false;
+                            }
+                        }
+
+                        making.stage++;
+                        break;
+
+                    case 4:
                         mode = making.mode;
 
                         // Dropped in above the ground at the origin, as at startup:
-                        // the surface there is wherever this seed's relief put it.
-                        player = Player({0.0f, terrain::Height(0.0f, settings) - 96.0f});
+                        // the surface there is wherever this seed's relief put it. A
+                        // loaded world skips it — the save says where the player was,
+                        // and standing them at the origin would be the one thing about
+                        // a world that does not come back.
+                        if (!making.loading) player = Player({0.0f, terrain::Height(0.0f, settings) - 96.0f});
 
                         camera.target = player.Centre();
                         camera.offset = {GetScreenWidth() / 2.0f, GetScreenHeight() / 2.0f + GetScreenHeight() / 4.0f};
@@ -1214,7 +1384,7 @@ int main(int argc, char **argv) {
                         making.stage++;
                         break;
 
-                    case 4:
+                    case 5:
                         // The chunks the player will be standing in. Done here rather
                         // than left to the first frame of play, which is where it used
                         // to land: a game that opens on a stutter is a game that opens
@@ -1224,7 +1394,7 @@ int main(int argc, char **argv) {
                         making.stage++;
                         break;
 
-                    case 5:
+                    case 6:
                         // And their pictures, for the same reason. PaintChunks opens a
                         // render target, so it has to run outside a frame — which is
                         // where this is.
@@ -1236,7 +1406,23 @@ int main(int argc, char **argv) {
                     default:
                         making.running = false;
 
-                        chat.Say(TextFormat("world %d, %s", settings.seed, NameOf(mode)), console::Tone::Done);
+                        // A world that was just made is written before it is played.
+                        //
+                        // Not a convenience: until it is written it is not in the list,
+                        // so a player who makes a world and closes the window has made
+                        // nothing — and there is no moment at which that is what they
+                        // meant. A world that was *loaded* is already on disk and is
+                        // left exactly as it was until they ask.
+                        if (!making.loading && !playing.id.empty()) {
+                            stamp.name = playing.name;
+                            stamp.seed = settings.seed;
+                            stamp.mode = mode;
+
+                            save::Write(playing, stamp, whole, nullptr);
+                        }
+
+                        chat.Say(TextFormat("%s - world %d, %s", playing.name.c_str(), settings.seed, NameOf(mode)),
+                                 console::Tone::Done);
 
                         menu.Play();
                         break;
@@ -1261,7 +1447,12 @@ int main(int argc, char **argv) {
         if (!chat.IsOpen() && !packOpen && IsKeyPressed(KEY_T)) chat.Open();
 
         // Everything below asks whether the player is typing before it reads a key.
-        const bool typing = chat.IsOpen();
+        //
+        // The chest's search field counts, and it has to: while somebody is spelling out
+        // what they are looking for, Tab must not shut the panel and the number row must
+        // not move the bar under their hand. It is exactly the console's own claim on
+        // the keyboard, made by a second thing that takes letters.
+        const bool typing = chat.IsOpen() || store.Typing();
 
         if (typing) {
             const std::string sent = chat.Read();
@@ -1295,7 +1486,15 @@ int main(int argc, char **argv) {
         // now, which is the whole of the ordering: the toggle clears `packOpen` in
         // this same frame, so a test written after it would see a shut panel and
         // pause the game on the very press that closed one.
-        if (!typing && IsKeyPressed(KEY_ESCAPE) && !packOpen) menu.Open(menu::Screen::Title);
+        if (!typing && IsKeyPressed(KEY_ESCAPE) && !packOpen) {
+            menu.Open(menu::Screen::Title);
+
+            // And take a picture of what they were looking at, at the end of this
+            // frame. The world is still drawn on the frame the menu opens — the test
+            // that gates it ran at the top — so this is the last frame there is
+            // anything to photograph.
+            grabShot = true;
+        }
 
         // Read before the gate below, since it is the one key that has to work on
         // both sides of it. Escape closes the panel as well, which it can only do
@@ -1315,8 +1514,34 @@ int main(int argc, char **argv) {
                     grove.Fallen().Toss(held, player.Centre(), GetScreenToWorld2D(GetMousePosition(), camera),
                                         world.Sky().Time());
                 }
+
+                // And the chest shuts with the pack, because the pack is what it was
+                // drawn beside. Told to the fixtures as well as forgotten here: the lid
+                // is on the fixture and it has to know to swing back down.
+                opened = {};
+
+                fixtures.Shut();
+                store.Shut();
             }
         }
+
+        // Where both panels stand this frame, worked out for the pair at once.
+        //
+        // Computed here and handed to everything that needs it rather than each panel
+        // deciding for itself — CLAUDE.md §25.1, which is the account of what happens
+        // when three things lay themselves out over the same twenty pixels. It is also
+        // recomputed every frame rather than remembered, because the window can be
+        // resized between any two of them and because how many rows the chest has
+        // changes the size of every slot on the screen (see `ui/pack.h`).
+        const pack::Layout laid = pack::Of(packOpen ? fixtures.Rows(opened) : 0);
+
+        // The lids, on the frame clock and outside the gate below.
+        //
+        // A lid is a message to the player about a panel that is open and not a thing
+        // happening in the world — the digging bar's ease is kept out here for the same
+        // reason (§13.4). Inside the gate it would be a chest that never finishes
+        // opening, because opening it is what stopped the clock.
+        fixtures.Animate(GetFrameTime());
 
         // Streaming carries on with the panel up. It is the one step that is
         // about where the view is rather than about time passing, the view is not
@@ -1325,7 +1550,21 @@ int main(int argc, char **argv) {
         world.Update(active);
 
         if (packOpen) {
-            const Inventory::Gesture gesture = inventory.Update(mode);
+            // The chest first, and the pack after it.
+            //
+            // Order matters for one reason: a click that misses both panels throws what
+            // is on the cursor into the world, and the pack is what decides that. If the
+            // pack went first it would read a click aimed at the chest as a click aimed
+            // at the sky, and the player would watch their own stack fly out of the
+            // window — the same argument that puts the recipe strip before the hand.
+            slots::Bank bank = fixtures.Store(opened);
+
+            fixtures.Rules(opened, rules);
+
+            const Store::Gesture kept = store.Update(inventory, bank, rules, laid);
+
+            const Inventory::Gesture gesture =
+                kept.took ? Inventory::Gesture{} : inventory.Update(mode, laid, bank.Empty() ? nullptr : &bank);
 
             if (!gesture.thrown.Empty()) {
                 grove.Fallen().Toss(gesture.thrown, player.Centre(), GetScreenToWorld2D(GetMousePosition(), camera),
@@ -1335,6 +1574,17 @@ int main(int argc, char **argv) {
             if (gesture.close) {
                 packOpen = false;
                 holdOff  = true;
+                opened   = {};
+
+                fixtures.Shut();
+                store.Shut();
+
+                const Stack held = inventory.Release();
+
+                if (!held.Empty()) {
+                    grove.Fallen().Toss(held, player.Centre(), GetScreenToWorld2D(GetMousePosition(), camera),
+                                        world.Sky().Time());
+                }
             }
         }
 
@@ -1423,6 +1673,24 @@ int main(int argc, char **argv) {
                     notice    = said;
                     noticeFor = kNoticeTime;
                 }
+
+                // A chest the right hand asked to open.
+                //
+                // The hand reports and the loop acts, which is the arrangement the axe
+                // already has with `Editor::Left`: what a panel does is the loop's
+                // business because opening one stops the world, and a gate hidden inside
+                // the thing it gates is a gate nobody finds (§14).
+                if (const std::optional<Editor::Cell> chest = editor.Opened(); chest.has_value()) {
+                    opened = fixtures.Run(chest->cx, chest->cy);
+
+                    if (opened.Any()) {
+                        packOpen = true;
+                        holdOff  = true;
+
+                        fixtures.Opened(opened);
+                        store.Shut();
+                    }
+                }
             }
         }
 
@@ -1476,6 +1744,12 @@ int main(int argc, char **argv) {
         if (!typing && IsKeyPressed(KEY_R)) {
             world.Reset();
             fixtures.Clear();
+
+            // The chest that was open went with them. `Fixtures::Clear` forgets its own
+            // side of it; this is the loop's copy, which is the one the panel draws
+            // from.
+            opened = {};
+            store.Shut();
         }
 
         // An action rather than a state, so it is read here beside the other one and
@@ -1789,7 +2063,21 @@ int main(int argc, char **argv) {
             // draws those same nine slots as its own bottom row — and since a row of
             // hearts showing through from underneath it is the layout leaking.
             if (packOpen) {
-                inventory.Draw(mode);
+                inventory.Draw(mode, laid);
+
+                // The chest beside it, then the carried stack over both. The stack is
+                // last because it *is* the pointer while it is held, so anything the
+                // cursor can be over has to be drawn under it — which now includes a
+                // second panel, and is why it came out of `Inventory::Draw`.
+                {
+                    slots::Bank bank = fixtures.Store(opened);
+
+                    fixtures.Rules(opened, rules);
+
+                    store.Draw(inventory, bank, rules, laid);
+                }
+
+                inventory.DrawCarried(laid);
             } else {
                 hud::Strip(inventory, player.Vigour(), editor, mode);
 
@@ -1815,6 +2103,34 @@ int main(int argc, char **argv) {
 
             EndDrawing();
         }
+
+        // The picture a save will carry, taken off the finished frame.
+        //
+        // After `EndDrawing` and not inside it: what is wanted is the whole frame as
+        // the player saw it — the world, the character, the bar, the hearts — and
+        // reading it back before the frame is finished would photograph half of it.
+        //
+        // Once, on the frame the game is paused, and never on a timer. A framebuffer
+        // read is a millisecond or two at full screen, which is nothing once and a
+        // sixth of a frame if it were done every second for a picture nobody has asked
+        // for yet.
+        if (grabShot) {
+            grabShot = false;
+
+            if (shot.data != nullptr) UnloadImage(shot);
+
+            shot = LoadImageFromScreen();
+
+            // Shrunk on the way in rather than on the way out. The preview is drawn at
+            // a third of the width of a menu and stored beside a save that is read on
+            // every listing, and a full-screen PNG per world is several megabytes to
+            // hold a thumbnail.
+            constexpr int kShotWide = 480;
+
+            if (shot.data != nullptr && shot.width > kShotWide) {
+                ImageResize(&shot, kShotWide, shot.height * kShotWide / shot.width);
+            }
+        }
     }
 
     if (profiling) {
@@ -1828,12 +2144,38 @@ int main(int argc, char **argv) {
 
     world.UnloadPainted();
     world.UnloadVista();
+    // The world written on the way out.
+    //
+    // Minecraft does the same and for the same reason: there is no such thing as
+    // quitting a world without saving it, because the alternative is a player who
+    // closed the window after an hour and finds an hour ago. The explicit "save" on the
+    // pause screen is not made redundant by it — that one is *when you choose*, and
+    // this is the one nobody has to remember.
+    //
+    // Only where there is a save to write to, which is every world that has been made
+    // or loaded and none that has not.
+    if (!playing.id.empty()) {
+        stamp.name = playing.name;
+        stamp.seed = settings.seed;
+        stamp.mode = mode;
+
+        save::Write(playing, stamp, whole, (shot.data != nullptr) ? &shot : nullptr);
+    }
+
+    menu.Unload();
+
+    if (shot.data != nullptr) UnloadImage(shot);
+
     grove.Unload();
 
     // And the creature art, for the reason the wood's sheet is given back here: a
     // texture that outlives the window it was made in is a crash on the way out, and
     // one that only ever happens on somebody else's machine.
     mob::Undress();
+
+    // And the fixtures', which are strips loaded exactly as a creature's are and would
+    // otherwise be the one rack left holding textures on the way out.
+    fixture::Undress();
 
     // And the item art, which is the same argument again: an authored picture is a
     // texture like any other, and the ones a session happened to look at are the ones

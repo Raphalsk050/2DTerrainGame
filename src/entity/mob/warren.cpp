@@ -1,5 +1,7 @@
 #include "entity/mob/warren.h"
 
+#include "save/record.h"
+
 #include "entity/mob/brains/whim.h"
 #include "entity/mob/suits.h"
 #include "world/terrain.h"
@@ -268,6 +270,200 @@ bool mob::Warren::Sleeping(Rectangle active, Vector2 at) const {
                             active.height + kSleepOut * 2.0f};
 
     return !CheckCollisionPointRec(at, keep);
+}
+
+namespace {
+
+// One creature, written down. Shared by the two places a `Life` reaches the file —
+// the ones already resting and the ones the herd is still walking about — because
+// they are the same record and a second copy of these ten fields is a second thing to
+// forget a field on.
+void PutLife(save::Writer &out, const mob::Life &life) {
+    out.Tag("rest")
+        .Text(mob::kinds::Of(life.kind).name)
+        .Real(life.at.x)
+        .Real(life.at.y)
+        .Int(life.health)
+        .Int(life.wits.mood)
+        .Real(life.wits.holds)
+        .Real(life.wits.since)
+        .Real(life.wits.lean)
+        .Real(life.wits.rested)
+        .Int(life.wits.seed)
+        .Done();
+
+    // `wits.legs` is deliberately not written. It is a leap already in the air, which
+    // is a fraction of a second of state — and a creature that was mid-jump when the
+    // game was saved is a creature that was, from the world's point of view, about to
+    // be asleep anyway. The navigator re-plans on the first frame and nothing can see
+    // the difference.
+}
+
+} // namespace
+
+void mob::Warren::Save(save::Writer &out, const std::vector<Life> &living) const {
+    // One entry per cell that has anything to say, which is every cell with a record
+    // *and* every cell a live creature is standing in.
+    //
+    // The second half is not an edge case, and leaving it out was a real bug the round
+    // trip caught: a creature put down by hand — the console's `/spawn`, or a probe —
+    // is in the herd immediately and its cell has no record until the view leaves it.
+    // Written against the patches alone, that creature is filed under a patch that does
+    // not exist yet and is simply dropped.
+    //
+    // Merged into one sorted list rather than written in two passes, because the second
+    // save of the same world *would* have those cells as records — so two passes would
+    // put them in a different order the second time round and the round trip would
+    // disagree with itself.
+    struct Cell {
+        int cx = 0;
+        int cy = 0;
+
+        const Patch *patch = nullptr;
+    };
+
+    std::vector<Cell> cells;
+
+    cells.reserve(patches_.size() + living.size());
+
+    for (const auto &[key, patch] : patches_) cells.push_back({.cx = patch.cx, .cy = patch.cy, .patch = &patch});
+
+    for (const Life &life : living) {
+        const int cx = ColumnOf(life.at.x);
+        const int cy = RowOf(life.at.y);
+
+        if (patches_.find(Key(cx, cy)) != patches_.end()) continue;
+
+        bool already = false;
+
+        for (const Cell &cell : cells) already = already || (cell.cx == cx && cell.cy == cy);
+
+        if (!already) cells.push_back({.cx = cx, .cy = cy, .patch = nullptr});
+    }
+
+    // Sorted, for `World::Save`'s reason.
+    std::sort(cells.begin(), cells.end(), [](const Cell &a, const Cell &b) {
+        if (a.cy != b.cy) return a.cy < b.cy;
+
+        return a.cx < b.cx;
+    });
+
+    out.Tag("patches").Done();
+
+    for (const Cell &cell : cells) {
+        out.Tag("patch")
+            .Int(cell.cx)
+            .Int(cell.cy)
+            .Real((cell.patch != nullptr) ? cell.patch->askAgainAt : 0.0f)
+            .Int((cell.patch != nullptr) ? cell.patch->rolled : 0)
+            .Int((cell.patch != nullptr) ? cell.patch->lost : 0)
+            .Done();
+
+        if (cell.patch != nullptr) {
+            // The settled bits, by name. A bitmask written as a number would be read by
+            // the next build as a different set of creatures the moment a row is added,
+            // which is a meadow that suddenly holds animals it has already been hunted
+            // clear of — §21.2's whole design, undone by one integer.
+            for (int k = 0; k < kinds::Count(); k++) {
+                if ((cell.patch->settled & (1u << k)) == 0) continue;
+
+                out.Tag("settled").Text(kinds::Of(Kind{k}).name).Done();
+            }
+
+            for (const Life &life : cell.patch->asleep) PutLife(out, life);
+        }
+
+        // And whatever the herd is still walking about in this cell.
+        for (const Life &life : living) {
+            if (ColumnOf(life.at.x) != cell.cx || RowOf(life.at.y) != cell.cy) continue;
+
+            PutLife(out, life);
+        }
+    }
+}
+
+void mob::Warren::Load(save::Reader &in) {
+    Patch *into = nullptr;
+
+    while (in.Next()) {
+        if (in.Is("patch")) {
+            const int cx = static_cast<int>(in.Int());
+            const int cy = static_cast<int>(in.Int());
+
+            Patch patch;
+
+            patch.cx         = cx;
+            patch.cy         = cy;
+            patch.askAgainAt = in.Real();
+            patch.rolled     = static_cast<int>(in.Int());
+            patch.lost       = static_cast<int>(in.Int());
+
+            // Asleep, always. See the head of `Save`.
+            patch.awake = false;
+
+            if (!in.Ok()) return;
+
+            into = &patches_.insert_or_assign(Key(cx, cy), std::move(patch)).first->second;
+
+            rolled_ += into->rolled;
+            lost_ += into->lost;
+
+            continue;
+        }
+
+        if (in.Is("settled")) {
+            const std::string name = in.Text();
+
+            if (!in.Ok()) return;
+
+            const std::optional<Kind> kind = kinds::Find(name.c_str());
+
+            // A creature this build has never heard of. The bit is dropped rather than
+            // the save refused, and it is the one place in the whole format that a
+            // missing name is survivable: what the bit says is "this cell has already
+            // been asked about wolves", and a build with no wolves in it will never ask.
+            // Refusing here would make removing a creature row (§21.1 did exactly that
+            // to three of them) break every save ever written.
+            if (kind.has_value() && into != nullptr) into->settled |= 1u << kind->index;
+
+            continue;
+        }
+
+        if (in.Is("rest")) {
+            const std::string name = in.Text();
+
+            Life life;
+
+            life.at.x        = in.Real();
+            life.at.y        = in.Real();
+            life.health      = static_cast<int>(in.Int());
+            life.wits.mood   = static_cast<std::uint8_t>(in.Int());
+            life.wits.holds  = in.Real();
+            life.wits.since  = in.Real();
+            life.wits.lean   = in.Real();
+            life.wits.rested = in.Real();
+            life.wits.seed   = static_cast<std::uint32_t>(in.Int());
+
+            if (!in.Ok()) return;
+
+            const std::optional<Kind> kind = kinds::Find(name.c_str());
+
+            // Likewise dropped rather than refused, and for the same reason one step
+            // on: a save holding a creature this build no longer has is a save whose
+            // world is still entirely playable without it.
+            if (!kind.has_value() || into == nullptr) continue;
+
+            life.kind = *kind;
+
+            into->asleep.push_back(life);
+            resting_++;
+
+            continue;
+        }
+
+        in.Again();
+        break;
+    }
 }
 
 void mob::Warren::Rest(const Life &life) {

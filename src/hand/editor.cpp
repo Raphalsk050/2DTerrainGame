@@ -1,4 +1,3 @@
-#include "item/items/torch.h"
 #include "hand/editor.h"
 
 
@@ -17,6 +16,12 @@ constexpr Color kDigColor = {235, 84, 84, 255};
 // And over wood, where the left hand becomes an axe. Warm rather than red, so the
 // two read as different tools at a glance and not as two states of one.
 constexpr Color kChopColor = {242, 196, 106, 255};
+
+// And over a store the right hand would open. Cool, where every other mark on this
+// cursor is warm, because what it promises is not a change to the world at all: the
+// other four say something is about to be taken apart, cut down, planted or laid, and
+// this one says a panel is about to come up.
+constexpr Color kOpenColor = {126, 198, 232, 255};
 
 // And over ground that is out of reach. Grey and faint, because what it is
 // saying is that neither hand can act here — a coloured ring out there would be
@@ -457,6 +462,12 @@ const char *Editor::Update(World &world, Inventory &inventory, Grove &grove, fix
     if (smaller) span_ = std::max(span_ - 1, kMinSpan);
     if (larger) span_ = std::min(span_ + 1, kMaxSpan);
 
+    // Cleared first, so what comes back is an answer about this frame. A latch here
+    // would open the same chest again on the frame after the one that opened it, which
+    // is a panel that cannot be shut while the button is still down.
+    opened_.reset();
+    opening_ = false;
+
     // The latch comes off the moment the button does, wherever this frame returns
     // from. A mode that outlived its press would make the *next* click inherit the
     // last one's tool.
@@ -510,6 +521,16 @@ const char *Editor::Update(World &world, Inventory &inventory, Grove &grove, fix
     // sees and the click that follows it have to be one answer.
     World::ToCell(target, cellX_, cellY_);
     onCell_ = true;
+
+    // And whether what is in that cell is a store. Asked every frame rather than on the
+    // press, because the cursor has to promise it *before* the click — the same
+    // one-answer rule `buildable_` and `footing_` follow, and the reason the square goes
+    // its own colour as the hand comes near.
+    if (reachable_) {
+        const std::optional<fixture::Kind> here = fixtures.At(cellX_, cellY_);
+
+        opening_ = here.has_value() && fixture::Of(*here).Remembers();
+    }
 
     // Whether there is anything in the block to break — see holding_. Worked out
     // before the reach test below returns, because the cursor is drawn out there
@@ -661,7 +682,7 @@ const char *Editor::Update(World &world, Inventory &inventory, Grove &grove, fix
         // taking it and the wall behind it in one click would make a torch
         // impossible to move.
         {
-            fixture::Kind what = fixture::Kind::Torch;
+            fixture::Placed what{};
 
             if (fixtures.Remove(cellX_, cellY_, what)) {
                 // No resistance and no bar. A torch is hung on a surface rather
@@ -670,13 +691,29 @@ const char *Editor::Update(World &world, Inventory &inventory, Grove &grove, fix
                 LetGo();
 
                 const Rectangle where = World::CellBounds(cellX_, cellY_);
+                const Vector2 at      = {where.x + where.width * 0.5f, where.y + where.height * 0.5f};
 
                 // On the ground like everything else taken off the world — see
                 // Bank. A torch is the one of these that is an item rather than a
                 // material, and there is no reason for it to be the one thing that
                 // teleports into the bag.
-                grove.Fallen().Scatter(ItemsOf(items::Torch(), 1),
-                                       {where.x + where.width * 0.5f, where.y + where.height * 0.5f}, away, now);
+                //
+                // The item comes off the fixture's own row rather than being written
+                // into this call. It used to be `items::Torch()` here and again in
+                // `Fixtures::Undermine`, which was right for exactly as long as there
+                // was one fixture in the game and would have paid out a torch for a
+                // chest — §16.2b's fault, in two places at once.
+                const std::optional<Item> made = fixture::ItemOf(what.kind);
+
+                if (made.has_value()) grove.Fallen().Scatter(ItemsOf(*made, 1), at, away, now);
+
+                // And whatever was inside it. This unit's contents and only this
+                // unit's, which is the whole of the chest's sixth rule: its neighbours
+                // are separate records, they are still standing, and what is in them is
+                // still in them.
+                for (const Stack &stack : what.kept) {
+                    if (!stack.Empty()) grove.Fallen().Scatter(stack, at, away, now);
+                }
 
                 return nullptr;
             }
@@ -836,6 +873,23 @@ const char *Editor::Update(World &world, Inventory &inventory, Grove &grove, fix
         return nullptr;
     }
 
+    // A store under the cursor answers the right button before anything in hand does.
+    //
+    // Before a material, before a sapling, before a torch — which is what "it has
+    // priority over everything, over placing blocks" means, and it is also the only
+    // reading that leaves a chest reachable at all: the commonest thing to be holding
+    // while standing in a store room is a stack to put away, and a stack to put away is
+    // very often a hand full of material. Under any other order, opening a chest would
+    // mean emptying your hand first.
+    //
+    // On the press and never on the hold, so a wall dragged out along a ledge does not
+    // stop at every chest it passes.
+    if (opening_ && IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) {
+        opened_ = Cell{.cx = cellX_, .cy = cellY_};
+
+        return nullptr;
+    }
+
     const Stack &held = inventory.Held();
 
     // Ground and pieces go down the same way now that the brush is square: whole
@@ -869,6 +923,14 @@ const char *Editor::Update(World &world, Inventory &inventory, Grove &grove, fix
 
         if (fixtures.At(cellX_, cellY_).has_value()) return "there is already something here";
         if (!fixture::Fixtures::Holds(world, *kind, cellX_, cellY_)) return "nothing here to fix it to";
+
+        // The join cap, spoken rather than left as a click that does nothing. A run of
+        // chests that has reached its length is the one refusal in here a player cannot
+        // see the reason for — the ground is fine, the cell is empty, and the piece
+        // simply does not go down.
+        if (!fixtures.Joins(*kind, cellX_, cellY_)) {
+            return TextFormat("%d is as many as will stand together — leave a gap", fixture::Of(*kind).joins);
+        }
 
         if (!fixtures.Place(*kind, cellX_, cellY_)) return "there is already something here";
 
@@ -1055,6 +1117,20 @@ void Editor::DrawCursor(const Inventory &inventory, const Grove &grove, flora::S
 
             return;
         }
+    }
+
+    // A store under the cursor, which the right button opens whatever is in hand.
+    //
+    // Drawn *before* the test below and not after it, because the cell a chest stands in
+    // holds no ground at all — `holding_` is false there, so a mark that waited for it
+    // would never appear over the one thing on the hillside the cursor most has to
+    // promise. It is one cell and never the block, since opening is not a stroke.
+    if (opening_) {
+        const Rectangle box = World::CellBounds(cellX_, cellY_);
+
+        DrawRectangleLinesEx(box, 2.0f / zoom, kOpenColor);
+
+        return;
     }
 
     // Nothing in the block to take apart, so nothing is claimed. The mark says what

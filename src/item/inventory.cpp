@@ -3,6 +3,8 @@
 #include "ui/hotbar.h"
 #include "item/icon.h"
 #include "core/picture.h"
+#include "ui/pack.h"
+#include "save/record.h"
 #include "ui/skin.h"
 
 #include <algorithm>
@@ -11,11 +13,6 @@
 
 namespace {
 
-// The panel's own spacing. The slots are the bar's, so that a row of the grid
-// and the bar under it are the same row twice and not two rows that happen to
-// look alike.
-constexpr float kGap = 14.0f;
-
 // The interface's own, from `ui/skin.h`. See the head of that file for why they are
 // not written out here.
 constexpr Color kPanel = skin::kPanel;
@@ -23,15 +20,20 @@ constexpr Color kEdge  = skin::kEdge;
 constexpr Color kTip   = skin::kTip;
 constexpr Color kCount = skin::kAccent;
 
-// The tabs' own metrics: how tall the strip over the panel is and how wide one
-// tab is. Written here rather than shared with the slots, because a tab is a
-// label and a slot is a picture and nothing is gained by making them the same
-// size.
-constexpr float kTabHigh = 30.0f;
-constexpr float kTabWide = 104.0f;
+// The bin's own colour, and the one place in this interface that red is not a
+// requirement being unmet.
+//
+// It has to be told apart from a slot at a glance and without being read, because
+// unlike every other square on the panel a click on it cannot be undone: what goes in
+// is gone. A dark red well with a paler lid drawn over it is the whole of the picture,
+// which is enough — Minecraft's is a fire and Terraria's a bin, and both are read by
+// their colour long before their shape.
+constexpr Color kBinWell = {62, 30, 34, 245};
+constexpr Color kBinLid  = {188, 96, 88, 255};
 
-// The name of what the cursor is over, beside the cursor.
-void DrawTip(const Stack &stack, Vector2 mouse) {
+} // namespace
+
+void Inventory::DrawTip(const Stack &stack, Vector2 mouse, int font) {
     // The bar answers "how much is left" at a glance and this answers "how much
     // exactly", which is the question a player asks once they have decided the answer
     // matters. Both, rather than either: a bar alone cannot be compared between two
@@ -40,9 +42,9 @@ void DrawTip(const Stack &stack, Vector2 mouse) {
                      : (stack.count > 1) ? TextFormat("%s  x%d", stack.Name(), stack.count)
                                          : stack.Name();
 
-    const float width = static_cast<float>(MeasureText(text, 14));
+    const float width = static_cast<float>(MeasureText(text, font));
 
-    Rectangle box = {mouse.x + 14.0f, mouse.y + 14.0f, width + 16.0f, 24.0f};
+    Rectangle box = {mouse.x + 14.0f, mouse.y + 14.0f, width + 16.0f, static_cast<float>(font) + 10.0f};
 
     // Held inside the frame. A tip that runs off the edge is unreadable for
     // exactly the slots at the edge, which are as likely to be the ones being
@@ -52,38 +54,33 @@ void DrawTip(const Stack &stack, Vector2 mouse) {
 
     DrawRectangleRec(box, kTip);
     DrawRectangleLinesEx(box, 1.0f, kEdge);
-    DrawText(text, static_cast<int>(box.x + 8.0f), static_cast<int>(box.y + 5.0f), 14, skin::kText);
+    DrawText(text, static_cast<int>(box.x + 8.0f), static_cast<int>(box.y + 5.0f), font, skin::kText);
 }
 
-} // namespace
+void Inventory::Sweep(int slot, slots::Bank *store) {
+    slots::Bank run = Run();
 
-void Inventory::Fill(Stack &stack, int from, int upto) {
-    if (stack.Empty()) return;
+    Stack moving = run.Take(slot, At(slot).count);
+    if (moving.Empty()) return;
 
-    // Onto a stack of the same thing before an empty slot.
-    //
-    // Topping up first is the half that matters: filling empty slots first would
-    // scatter one material over four of them while a half-full one of it sat in
-    // the bar.
-    for (int slot = from; slot < upto && stack.count > 0; slot++) {
-        Stack &into = slots_[static_cast<std::size_t>(slot)];
-        if (!into.Alike(stack)) continue;
-
-        const int fits = std::min(into.Room(), stack.count);
-
-        into.count += fits;
-        stack.count -= fits;
+    // Into the chest first where one is open. That is what a shift-click means in
+    // every game that has a chest, and it is also the only reading that does not
+    // waste the gesture: the two halves of the pack are both on screen and a stack can
+    // be dragged between them, while the store is the container the player opened the
+    // panel to fill.
+    if (store != nullptr && !store->Empty()) {
+        store->Fill(moving, 0, store->Size());
+    } else if (OnHand(slot)) {
+        run.Fill(moving, kOnHand, kSlots);
+    } else {
+        run.Fill(moving, 0, kOnHand);
     }
 
-    for (int slot = from; slot < upto && stack.count > 0; slot++) {
-        Stack &into = slots_[static_cast<std::size_t>(slot)];
-        if (!into.Empty()) continue;
-
-        const int fits = std::min(stack.Limit(), stack.count);
-
-        into = stack.Some(fits);
-        stack.count -= fits;
-    }
+    // Whatever the other side had no room for goes back where it came from,
+    // which is empty again by now. A sweep that half worked has to leave the
+    // remainder somewhere, and the slot the player pointed at is the one place
+    // they will think to look.
+    if (moving.count > 0) run.Put(slot, moving);
 }
 
 int Inventory::Add(Stack stack) {
@@ -91,127 +88,27 @@ int Inventory::Add(Stack stack) {
     // is at the front of it. That puts what was just dug where the hand already
     // is, which is the answer for a player who was digging in order to build —
     // and a player who wanted it elsewhere moves it once.
-    Fill(stack, 0, kSlots);
-
-    return stack.count;
-}
-
-void Inventory::Sweep(int slot) {
-    Stack moving = Take(slot, At(slot).count);
-    if (moving.Empty()) return;
-
-    if (OnHand(slot)) Fill(moving, kOnHand, kSlots);
-    else Fill(moving, 0, kOnHand);
-
-    // Whatever the other half had no room for goes back where it came from,
-    // which is empty again by now. A sweep that half worked has to leave the
-    // remainder somewhere, and the slot the player pointed at is the one place
-    // they will think to look.
-    if (moving.count > 0) Put(slot, moving);
+    return Run().Add(stack);
 }
 
 int Inventory::Room(const Stack &stack) const {
-    if (stack.Empty()) return 0;
-
-    int room = 0;
-
-    for (const Stack &slot : slots_) {
-        if (slot.Alike(stack)) room += slot.Room();
-        else if (slot.Empty()) room += stack.Limit();
-    }
-
-    return room;
+    return const_cast<Inventory *>(this)->Run().Room(stack);
 }
 
 int Inventory::Tally(const Stack &like) const {
-    int held = 0;
-
-    for (const Stack &slot : slots_) {
-        if (slot.Alike(like)) held += slot.count;
-    }
-
-    return held;
+    return const_cast<Inventory *>(this)->Run().Tally(like);
 }
 
 bool Inventory::Remove(const Stack &what) {
-    if (what.Empty() || Tally(what) < what.count) return false;
-
-    int owing = what.count;
-
-    // From the back, so what is spent comes out of the store before it comes out
-    // of the bar. The bar is what the player arranged; the grid is where the
-    // spare went.
-    for (int slot = kSlots - 1; slot >= 0 && owing > 0; slot--) {
-        Stack &from = slots_[static_cast<std::size_t>(slot)];
-        if (!from.Alike(what)) continue;
-
-        const int taken = std::min(from.count, owing);
-
-        from.count -= taken;
-        owing -= taken;
-
-        if (from.count <= 0) from = {};
-    }
-
-    return true;
+    return Run().Remove(what);
 }
 
 Stack Inventory::Take(int slot, int count) {
-    Stack &from = slots_[static_cast<std::size_t>(slot)];
-
-    if (from.Empty() || count <= 0) return {};
-
-    const int taken = std::min(count, from.count);
-
-    // Through Some, so that what comes off a slot is the same *thing* that was in it
-    // — including how worn it is. Built field by field, a pickaxe picked up off the
-    // ground came back as good as new, which is a repair nobody meant to write.
-    const Stack away = from.Some(taken);
-
-    from.count -= taken;
-
-    // Emptied all the way back to nothing rather than left holding a row with a
-    // count of zero. Alike() and Empty() both read the count, but an empty slot
-    // that still remembers what used to be in it would merge with the next stack
-    // of that thing to come past and refuse every other, which is a slot that is
-    // full of nothing in particular.
-    if (from.count <= 0) from = {};
-
-    return away;
+    return Run().Take(slot, count);
 }
 
 Stack Inventory::Put(int slot, Stack stack) {
-    Stack &into = slots_[static_cast<std::size_t>(slot)];
-
-    if (stack.Empty()) return {};
-
-    if (into.Empty()) {
-        const int fits = std::min(stack.Limit(), stack.count);
-
-        into = stack.Some(fits);
-        stack.count -= fits;
-
-        return (stack.count > 0) ? stack : Stack{};
-    }
-
-    if (into.Alike(stack)) {
-        const int fits = std::min(into.Room(), stack.count);
-
-        into.count += fits;
-        stack.count -= fits;
-
-        // What is left over stays on the cursor rather than going anywhere else.
-        // A stack that overflowed into some other slot the player was not
-        // looking at is a stack that has moved on its own.
-        return (stack.count > 0) ? stack : Stack{};
-    }
-
-    // Two different things, so they exchange places. This is what makes a slot
-    // reachable in one gesture when it is already occupied.
-    const Stack displaced = into;
-    into                  = stack;
-
-    return displaced;
+    return Run().Put(slot, stack);
 }
 
 void Inventory::Select(int slot) {
@@ -251,6 +148,48 @@ bool Inventory::WearHeld(int by) {
     return true;
 }
 
+void Inventory::Save(save::Writer &out) const {
+    out.Tag("pack").Int(selected_).Done();
+
+    // Only what is in them, and each with its index. A run of thirty-six lines mostly
+    // saying "nothing" is a file that is nine tenths padding, and an index means the
+    // reader does not have to trust the count.
+    for (int slot = 0; slot < kSlots; slot++) {
+        if (slots_[static_cast<std::size_t>(slot)].Empty()) continue;
+
+        out.Tag("slot").Int(slot);
+
+        save::PutStack(out, slots_[static_cast<std::size_t>(slot)]);
+
+        out.Done();
+    }
+}
+
+void Inventory::Load(save::Reader &in) {
+    selected_ = static_cast<int>(in.Int());
+
+    // Clamped rather than trusted, because this one is read straight into an index the
+    // hand acts through: a selected slot past the end of the bar is every swing, every
+    // placement and every wear check reading off the end of the array.
+    Select(selected_);
+
+    slots_.fill({});
+
+    while (in.Next()) {
+        if (!in.Is("slot")) {
+            in.Again();
+            break;
+        }
+
+        const long long slot = in.Int();
+        const Stack stack    = save::GetStack(in);
+
+        if (!in.Ok()) return;
+
+        if (slot >= 0 && slot < kSlots) slots_[static_cast<std::size_t>(slot)] = stack;
+    }
+}
+
 void Inventory::Clear() {
     slots_.fill({});
     carried_ = {};
@@ -272,56 +211,6 @@ void Inventory::Stock() {
     constexpr int kFew = 12;
 
     for (int i = 0; i < item::Count(); i++) Add(ItemsOf(Item{i}, kFew));
-}
-
-Rectangle Inventory::Bounds() {
-    const float side = hotbar::kSlotSide;
-    const float pad  = hotbar::kPadding;
-
-    const float width = kColumns * side + (kColumns + 1) * pad;
-
-    // Three rows, the gap, and the bar row under it.
-    //
-    // Each grid row costs a slot and the padding after it, which is what
-    // SlotBounds steps by — counting the padding between rows instead leaves the
-    // total one short, and the bar row comes out flush with the bottom edge with
-    // its counts running into the border.
-    const float height = pad + kRows * (side + pad) + kGap + side + pad;
-
-    // Centred on the frame rather than sat above the bar, and the bar is not
-    // drawn behind it while it is open — the panel carries its own copy of those
-    // nine slots, and two of them on screen at once is two places to click for
-    // one thing.
-    return {std::floor((GetScreenWidth() - width) / 2.0f), std::floor((GetScreenHeight() - height) / 2.0f), width,
-            height};
-}
-
-Rectangle Inventory::SlotBounds(int slot) {
-    const Rectangle panel = Bounds();
-
-    const float side = hotbar::kSlotSide;
-    const float pad  = hotbar::kPadding;
-
-    const int column = OnHand(slot) ? slot : (slot - kOnHand) % kColumns;
-    const int row    = OnHand(slot) ? kRows : (slot - kOnHand) / kColumns;
-
-    // The bar row is one row further down plus the gap, which is what sets it
-    // apart as the row that is also on screen when the panel is not.
-    const float gap = OnHand(slot) ? kGap : 0.0f;
-
-    return {panel.x + pad + column * (side + pad), panel.y + pad + row * (side + pad) + gap, side, side};
-}
-
-bool Inventory::Contains(Vector2 screen) {
-    return CheckCollisionPointRec(screen, Bounds());
-}
-
-Rectangle Inventory::TabBounds(int tab) {
-    const Rectangle panel = Bounds();
-
-    // Sitting on the panel's top edge and overlapping it by a hair, so the one in
-    // front reads as part of the panel rather than as a button floating over it.
-    return {panel.x + static_cast<float>(tab) * (kTabWide + 4.0f), panel.y - kTabHigh + 2.0f, kTabWide, kTabHigh};
 }
 
 const char *Inventory::NameOf(Tab tab) {
@@ -377,7 +266,7 @@ Inventory::Page Inventory::PageOf(Tab tab) {
     return page;
 }
 
-Inventory::Gesture Inventory::Update(Gamemode mode) {
+Inventory::Gesture Inventory::Update(Gamemode mode, const pack::Layout &at, slots::Bank *store) {
     Gesture gesture{};
 
     const bool left  = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
@@ -387,19 +276,46 @@ Inventory::Gesture Inventory::Update(Gamemode mode) {
 
     const Vector2 mouse = GetMousePosition();
 
-    // The tabs stand outside the panel's own rectangle, so they are asked about
-    // before the test that decides a click was aimed at the world.
+    // The tabs and the bin stand outside the panel's own rectangle, so both are asked
+    // about before the test that decides a click was aimed at the world.
     if (mode == Gamemode::Creative && left) {
         for (int tab = 0; tab < kTabs; tab++) {
-            if (!CheckCollisionPointRec(mouse, TabBounds(tab))) continue;
+            if (!CheckCollisionPointRec(mouse, at.Tab(tab))) continue;
 
             tab_ = static_cast<Tab>(tab);
+
+            gesture.took = true;
             return gesture;
         }
     }
 
-    if (!Contains(mouse)) {
-        // Outside the panel. With a full hand that is a throw and the panel
+    // The bin. Only ever with a full hand: it is the one square on the panel a click
+    // cannot be taken back from, so it does nothing at all to an empty one rather than
+    // opening some second gesture over it.
+    //
+    // Destroying rather than reporting, unlike a stack thrown at the sky. A thrown
+    // stack lands on the ground and can be picked up again, which is the whole
+    // difference between the two and the reason both exist.
+    if (CheckCollisionPointRec(mouse, at.trash)) {
+        gesture.took = true;
+
+        if (left && !carried_.Empty()) carried_ = {};
+
+        // One at a time off the right button, which is the gesture the panel already
+        // uses for putting one down and is what makes a bin usable for trimming a
+        // stack rather than only for losing one.
+        if (right && !carried_.Empty()) {
+            carried_.count--;
+
+            if (carried_.count <= 0) carried_ = {};
+        }
+
+        return gesture;
+    }
+
+    if (!CheckCollisionPointRec(mouse, at.panel)) {
+        // Outside the panel — and outside the chest beside it, which the caller has
+        // already had its turn at. With a full hand that is a throw and the panel
         // stays open; with an empty one it is a dismissal.
         //
         // Both were asked for on the same gesture, and this is the only reading
@@ -418,10 +334,12 @@ Inventory::Gesture Inventory::Update(Gamemode mode) {
         return gesture;
     }
 
+    gesture.took = true;
+
     int over = -1;
 
     for (int slot = 0; slot < kSlots; slot++) {
-        if (CheckCollisionPointRec(mouse, SlotBounds(slot))) {
+        if (CheckCollisionPointRec(mouse, at.Slot(slot))) {
             over = slot;
             break;
         }
@@ -455,7 +373,7 @@ Inventory::Gesture Inventory::Update(Gamemode mode) {
     if (left) {
         const bool sweeping = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
 
-        if (sweeping && carried_.Empty()) Sweep(over);
+        if (sweeping && carried_.Empty()) Sweep(over, store);
         else carried_ = carried_.Empty() ? Take(over, into.count) : Put(over, carried_);
 
         return gesture;
@@ -483,8 +401,8 @@ Inventory::Gesture Inventory::Update(Gamemode mode) {
     return gesture;
 }
 
-void Inventory::Draw(Gamemode mode) const {
-    const Rectangle panel = Bounds();
+void Inventory::Draw(Gamemode mode, const pack::Layout &at) const {
+    const Rectangle panel = at.panel;
 
     const bool creative = mode == Gamemode::Creative;
 
@@ -495,19 +413,32 @@ void Inventory::Draw(Gamemode mode) const {
         // The tabs first, so the panel's own border is drawn over their bottom edge
         // and the page reads as hanging from the one in front.
         for (int tab = 0; tab < kTabs; tab++) {
-            const Rectangle at   = TabBounds(tab);
+            const Rectangle box  = at.Tab(tab);
             const bool showing   = static_cast<Tab>(tab) == tab_;
             const Color face     = showing ? kPanel : Color{18, 20, 26, 245};
 
-            DrawRectangleRec(at, face);
-            DrawRectangleLinesEx(at, 2.0f, kEdge);
+            DrawRectangleRec(box, face);
+            DrawRectangleLinesEx(box, 2.0f, kEdge);
 
             const char *name = Inventory::NameOf(static_cast<Tab>(tab));
-            const int wide   = MeasureText(name, 14);
+            const int wide   = MeasureText(name, at.metric.font);
 
-            DrawText(name, static_cast<int>(at.x + (at.width - static_cast<float>(wide)) / 2.0f),
-                     static_cast<int>(at.y + 8.0f), 14, showing ? skin::kText : skin::kMuted);
+            DrawText(name, static_cast<int>(box.x + (box.width - static_cast<float>(wide)) / 2.0f),
+                     static_cast<int>(box.y + (box.height - at.metric.font) / 2.0f), at.metric.font,
+                     showing ? skin::kText : skin::kMuted);
         }
+    }
+
+    // The bin. Drawn as a well with a lid over it rather than as a slot with a picture
+    // in it, because it is the one square here that never holds anything — a slot that
+    // is always empty reads as a slot the player has failed to fill.
+    {
+        const Rectangle bin = at.trash;
+        const float lid     = std::floor(bin.height * 0.22f);
+
+        DrawRectangleRec(bin, kBinWell);
+        DrawRectangleRec({bin.x + 2.0f, bin.y + lid, bin.width - 4.0f, lid}, kBinLid);
+        DrawRectangleLinesEx(bin, 1.0f, kEdge);
     }
 
     // The grid: the player's own slots in survival, and the page of the palette in
@@ -522,42 +453,70 @@ void Inventory::Draw(Gamemode mode) const {
                                ? ((index < page.count) ? page.at[static_cast<std::size_t>(index)] : Stack{})
                                : slots_[static_cast<std::size_t>(slot)];
 
-        hotbar::DrawSlot(stack, SlotBounds(slot), false);
+        hotbar::DrawSlot(stack, at.Slot(slot), false, at.metric.pixel);
     }
 
     // The bar keeps its ring while the panel is open, so that putting something
     // into the slot that is in hand is a thing that can be aimed at.
     for (int slot = 0; slot < kOnHand; slot++) {
-        hotbar::DrawSlot(slots_[static_cast<std::size_t>(slot)], SlotBounds(slot), slot == selected_);
+        hotbar::DrawSlot(slots_[static_cast<std::size_t>(slot)], at.Slot(slot), slot == selected_, at.metric.pixel);
     }
 
     const Vector2 mouse = GetMousePosition();
 
+    // What the bin is, in words, whenever the pointer is over it.
+    //
+    // Said even with a full hand, unlike everything else here — which is the one place
+    // this panel breaks its own rule and does it deliberately. A tip about the slot
+    // under a carried stack answers a question nobody asked; a tip about the bin answers
+    // the only question that matters at that moment, which is whether letting go here
+    // destroys what is being held. A red square is not self-evident and nothing about
+    // this one can be taken back.
+    if (CheckCollisionPointRec(mouse, at.trash)) {
+        const char *says = carried_.Empty() ? "bin — drop a stack here to destroy it" : "destroy it";
+        const float wide = static_cast<float>(MeasureText(says, at.metric.font));
+
+        Rectangle box = {mouse.x + 14.0f, mouse.y + 14.0f, wide + 16.0f, static_cast<float>(at.metric.font) + 10.0f};
+
+        box.x = std::floor(std::min(box.x, static_cast<float>(GetScreenWidth()) - box.width - 4.0f));
+        box.y = std::floor(std::min(box.y, static_cast<float>(GetScreenHeight()) - box.height - 4.0f));
+
+        DrawRectangleRec(box, kTip);
+        DrawRectangleLinesEx(box, 1.0f, kEdge);
+        DrawText(says, static_cast<int>(box.x + 8.0f), static_cast<int>(box.y + 5.0f), at.metric.font, kBinLid);
+
+        return;
+    }
+
     // The name of what is under the cursor, but not while something is on the
     // cursor: the hand is already over the slot it is about to go into, and a
     // tip about the slot underneath is an answer to a question nobody asked.
-    if (carried_.Empty()) {
-        for (int slot = 0; slot < kSlots; slot++) {
-            if (!CheckCollisionPointRec(mouse, SlotBounds(slot))) continue;
+    if (!carried_.Empty()) return;
 
-            const int index = slot - kOnHand;
+    for (int slot = 0; slot < kSlots; slot++) {
+        if (!CheckCollisionPointRec(mouse, at.Slot(slot))) continue;
 
-            const Stack &stack = (creative && !OnHand(slot))
-                                   ? ((index < page.count) ? page.at[static_cast<std::size_t>(index)] : Stack{})
-                                   : slots_[static_cast<std::size_t>(slot)];
+        const int index = slot - kOnHand;
 
-            if (!stack.Empty()) DrawTip(stack, mouse);
+        const Stack &stack = (creative && !OnHand(slot))
+                               ? ((index < page.count) ? page.at[static_cast<std::size_t>(index)] : Stack{})
+                               : slots_[static_cast<std::size_t>(slot)];
 
-            break;
-        }
+        if (!stack.Empty()) DrawTip(stack, mouse, at.metric.font);
+
+        break;
     }
+}
 
+void Inventory::DrawCarried(const pack::Layout &at) const {
     if (carried_.Empty()) return;
+
+    const Vector2 mouse = GetMousePosition();
 
     // Last of all, and centred on the pointer rather than offset from it. The
     // stack is what the pointer *is* while it is held, so anything the cursor is
     // over it has to be drawn over as well.
-    const float pixel = hotbar::kIconPixel;
+    const float pixel = at.metric.pixel;
     const float drawn = pixel * kPictureSide;
 
     const Vector2 corner = {std::floor(mouse.x - drawn / 2.0f), std::floor(mouse.y - drawn / 2.0f)};

@@ -2,10 +2,20 @@
 
 #include "world/element.h"
 #include "item/item_def.h"
+#include "item/slots.h"
 #include "core/mode.h"
 #include "core/stack.h"
 
 #include <array>
+
+namespace pack {
+struct Layout;
+}
+
+namespace save {
+class Writer;
+class Reader;
+} // namespace save
 
 // Everything the player is carrying.
 //
@@ -18,6 +28,12 @@
 // It is also what makes the row along the bottom of the screen a *view* of the
 // first nine slots rather than a store of its own, so there is exactly one
 // answer to what the player has and the bar cannot disagree with the panel.
+//
+// **What it is not is the rules of pouring.** Those moved to `item/slots.h` the day
+// there was a second container in the game, and everything below that reads like an
+// inventory doing arithmetic is a call through to there. See the head of that file:
+// a chest and a bag pour by exactly the same rules, and two copies of them would part
+// company the first time either was touched.
 class Inventory {
 public:
     // The Minecraft arrangement: nine across, three rows of it, and the bar as a
@@ -47,6 +63,11 @@ public:
 
         // Whether the click asked for the panel to be closed.
         bool close = false;
+
+        // Whether the click landed on the pack or on anything hanging off it — the
+        // bin, a tab. The caller uses it to keep one press from also being read by
+        // the panel beside this one.
+        bool took = false;
     };
 
     // The pages of the creative palette, and the tabs along the top of the panel
@@ -64,12 +85,21 @@ public:
 
     // Reads the mouse over the open panel: picking a stack up onto the cursor,
     // putting it down, splitting it, sweeping it between the grid and the bar,
-    // and throwing it away.
+    // throwing it away, and dropping it in the bin.
     //
     // In creative the grid is not the player's own slots but the palette — see
     // Draw — so a click on one of them copies rather than moves. Everything the
     // bar does is the same in both modes, which is what lets one panel serve them.
-    Gesture Update(Gamemode mode);
+    //
+    // `at` is where the pack is this frame, worked out by `pack::Of` for both panels
+    // at once rather than by each of them separately — §25.1's rule, and the reason
+    // this no longer decides its own position.
+    //
+    // `store` is the chest standing open beside it, or nothing. It is here for one
+    // gesture only: a shift-click sweeps into the store rather than between the bar
+    // and the grid, which is what shift-click means in every game that has a chest.
+    // Nothing about a chest reaches this file — a store is a run of slots.
+    Gesture Update(Gamemode mode, const pack::Layout &at, slots::Bank *store = nullptr);
 
     // In survival, the player's own thirty-six slots.
     //
@@ -77,10 +107,17 @@ public:
     // material in the game and a row of tabs over it — Minecraft's arrangement,
     // and it is the same panel rather than a second one so that the bar, the
     // cursor, the tips and the layout cannot drift apart between the two modes.
-    void Draw(Gamemode mode) const;
+    void Draw(Gamemode mode, const pack::Layout &at) const;
 
-    // Where the tabs sit, above the panel's top edge.
-    static Rectangle TabBounds(int tab);
+    // The name of what the cursor is over, beside the cursor, and the stack riding on
+    // the cursor itself.
+    //
+    // Drawn by the pack today and by the chest panel beside it, which is why they are
+    // out here rather than at the end of `Draw`: whichever panel the pointer is over,
+    // the tip and the carried stack have to be the last two things on the screen or
+    // the panel next door is drawn over them.
+    static void DrawTip(const Stack &stack, Vector2 mouse, int font);
+    void DrawCarried(const pack::Layout &at) const;
 
     // What is on one page, in the order the tables give it.
     //
@@ -124,23 +161,25 @@ public:
     // is another tab — see Tab, where the rule that sorts things into them lives.
     static constexpr int kSlotsPerPage = kColumns * kRows;
 
-    // Where the panel is on screen this frame, and whether a point is on it.
-    static Rectangle Bounds();
-    static Rectangle SlotBounds(int slot);
-    static bool Contains(Vector2 screen);
-
     const Stack &Carried() const { return carried_; }
+
+    // The same, for the panel beside this one.
+    //
+    // There is one cursor because the player has one hand: a stack lifted out of a
+    // chest and put down in the bag is one gesture and not a handover between two
+    // containers, and it is the pack that owns it because it is the pack that
+    // outlives the chest being shut.
+    Stack &Carrying() { return carried_; }
 
     // Takes whatever is on the cursor away, for a caller that is closing the
     // panel. A stack left on the cursor when the panel shuts would be held by
     // nothing and drawn nowhere, which is how an inventory eats things.
     Stack Release();
 
+    // The player's thirty-six as a run of slots, for the rules in `item/slots.h`.
+    slots::Bank Run() { return slots::Bank(slots_.data(), kSlots); }
+
     // Puts as much of `stack` away as will fit and returns what would not go.
-    //
-    // Nothing is dropped silently. A caller that ignores the remainder has to
-    // have decided that losing it is right, and mostly it is not — what does not
-    // fit belongs on the ground.
     int Add(Stack stack);
 
     // How many of `stack` would go in, without putting any of it away.
@@ -150,9 +189,7 @@ public:
     int Tally(const Stack &like) const;
 
     // Takes `count` of a thing from wherever it is lying, in whatever number of
-    // slots that means, and says whether there was enough. All or nothing: a
-    // half-spent cost leaves the world changed and the player charged for
-    // something that did not happen.
+    // slots that means, and says whether there was enough. All or nothing.
     bool Remove(const Stack &what);
 
     const Stack &At(int slot) const { return slots_[static_cast<std::size_t>(slot)]; }
@@ -161,9 +198,7 @@ public:
     // Lifts up to `count` off one slot and returns what came away.
     Stack Take(int slot, int count);
 
-    // Puts `stack` into one slot, returning whatever was displaced — which is
-    // the whole of the exchange the cursor performs, including the case where
-    // the two merge and nothing comes back.
+    // Puts `stack` into one slot, returning whatever was displaced.
     Stack Put(int slot, Stack stack);
 
     int Selected() const { return selected_; }
@@ -192,6 +227,15 @@ public:
 
     void Clear();
 
+    // The thirty-six slots and which one is in hand.
+    //
+    // The cursor is deliberately not written. A stack on the cursor is a gesture
+    // half-made, and the loop already puts one back into the world when the panel
+    // shuts — so there is no moment at which a save can be taken with something held,
+    // and writing the field would be writing a state the game cannot be in.
+    void Save(save::Writer &out) const;
+    void Load(save::Reader &in);
+
     // Tops the inventory up with a full stack of every material.
     //
     // The terrain in this project is tuned by walking around in it and building
@@ -208,17 +252,10 @@ public:
     static constexpr bool OnHand(int slot) { return slot >= 0 && slot < kOnHand; }
 
 private:
-    // Pours as much of `stack` as will fit into the slots in [from, upto), and
-    // leaves the rest in it.
-    //
-    // The range is what makes a shift-click one call: sweeping a stack out of
-    // the bar means offering it to the grid and nowhere else, and offering it to
-    // everywhere would put it straight back where it came from.
-    void Fill(Stack &stack, int from, int upto);
-
     // Moves the whole of one slot to the other half of the inventory — grid to
-    // bar, bar to grid — and leaves behind whatever would not go.
-    void Sweep(int slot);
+    // bar, bar to grid — or into the store standing open, and leaves behind
+    // whatever would not go.
+    void Sweep(int slot, slots::Bank *store);
 
     std::array<Stack, kSlots> slots_{};
 

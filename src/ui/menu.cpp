@@ -1,8 +1,10 @@
 #include "ui/menu.h"
 
 #include "core/config.h"
+#include "save/record.h"
 
 #include <algorithm>
+#include <ctime>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -142,6 +144,10 @@ struct TitleAt {
     Rectangle quit;
 };
 
+// One layout for both, and the four buttons mean different things on each — see the
+// draw. Two layouts would be two things to keep the same size, and the pause screen
+// and the title screen looking alike is the point: it is the same screen, standing on
+// a world instead of on nothing.
 TitleAt LayTitle() {
     TitleAt at{};
 
@@ -160,15 +166,30 @@ TitleAt LayTitle() {
     return at;
 }
 
+// How tall one row of the list is, and how much air is inside the box around them.
+constexpr float kRowHigh = 58.0f;
+constexpr float kListPad = 8.0f;
+
 struct SavesAt {
     Rectangle list;
     Rectangle bar;
     Rectangle preview;
 
+    // Under the picture: what the picked save is, in words the row has no room for.
+    Rectangle facts;
+
     Rectangle fresh;
     Rectangle load;
     Rectangle edit;
     Rectangle drop;
+
+    // How many rows the box has room for, and where one of them is.
+    int rows = 0;
+
+    Rectangle Row(int at) const {
+        return {list.x + kListPad, list.y + kListPad + static_cast<float>(at) * kRowHigh,
+                list.width - kListPad * 2.0f - 22.0f, kRowHigh - 4.0f};
+    }
 };
 
 SavesAt LaySaves() {
@@ -191,8 +212,30 @@ SavesAt LaySaves() {
     // box is one thing to look at.
     at.bar = {at.list.x + at.list.width - 22.0f, at.list.y + 8.0f, 14.0f, at.list.height - 16.0f};
 
-    at.preview = {std::floor(left + whole - whole * 0.36f), std::floor(top), std::floor(whole * 0.36f),
-                  std::floor(high * 0.72f)};
+    // The picture box is the shape of the screen the picture was taken of, and that is
+    // the whole of it: a preview is a screenshot, screenshots are the shape of the
+    // window, and a box of some other shape shows one with a band of empty panel above
+    // and below it. Fitted into a tall box it looked like a strip floating in a hole —
+    // which is what it was.
+    //
+    // Taken from *this* window rather than from the picture, so the layout stays a pure
+    // function of the frame and does not move when the selection does. A save written
+    // at another shape is still fitted inside and still centred; it is simply the rare
+    // case rather than every case.
+    const float previewWide = std::floor(whole * 0.36f);
+
+    at.preview = {std::floor(left + whole - previewWide), std::floor(top), previewWide,
+                  std::floor(previewWide * High() / Wide())};
+
+    // And the rest of the column is the facts, however much that turns out to be. It
+    // was a fixed share of the height, which meant the two of them added up to the box
+    // only at the one window shape they were written against.
+    at.facts = {at.preview.x, std::floor(at.preview.y + at.preview.height + kGap), at.preview.width,
+                std::floor(high - at.preview.height - kGap)};
+
+    // Worked out from the box rather than fixed, so a tall window lists more saves
+    // instead of listing the same six with a gap under them.
+    at.rows = std::max(1, static_cast<int>((at.list.height - kListPad * 2.0f) / kRowHigh));
 
     // Four across, under both, sharing the width the two of them cover.
     const float wide = std::floor((whole - 3.0f * kGap) / 4.0f);
@@ -208,6 +251,7 @@ SavesAt LaySaves() {
 
 struct NewAt {
     Rectangle group;
+    Rectangle name;
     Rectangle seed;
     Rectangle mode;
     Rectangle survival;
@@ -221,13 +265,17 @@ NewAt LayNew() {
     const float wide = std::min(Wide() * 0.66f, 700.0f);
     const float top  = High() * 0.26f;
 
-    at.group = Middle(top, wide, High() * 0.36f);
+    at.group = Middle(top, wide, High() * 0.36f + 46.0f + kGap);
 
     const float rowWide = std::floor(wide * 0.68f);
     const float rowHigh = 46.0f;
 
-    at.seed = Middle(top + 46.0f, rowWide, rowHigh);
-    at.mode = Middle(top + 46.0f + rowHigh + kGap, rowWide, rowHigh);
+    // The name first, because it is the field a player fills in and the seed is the
+    // one they mostly leave alone. A screen whose first row is the optional one reads
+    // as a screen about seeds.
+    at.name = Middle(top + 46.0f, rowWide, rowHigh);
+    at.seed = Middle(top + 46.0f + 1.0f * (rowHigh + kGap), rowWide, rowHigh);
+    at.mode = Middle(top + 46.0f + 2.0f * (rowHigh + kGap), rowWide, rowHigh);
 
     // The list hangs *under* the row it belongs to and overlaps whatever is below,
     // which is what a dropped list does and why it is drawn last.
@@ -292,6 +340,83 @@ void Waiting(Rectangle box, const char *first, const char *second) {
     Label(second, low, 16, kFaint);
 }
 
+// One row of the form: a word on the left, what has been typed on the right, and a
+// caret at the end of it while it is taking keys.
+//
+// Written once and called three times — the name of a new world, its seed, and the
+// renaming of an old one. The seed's row was here first and the other two were about
+// to be copies of it, which is how three fields end up with three different amounts of
+// padding and only one of them lining up with the box it is in.
+void FieldRow(Rectangle at, const char *label, const std::string &text, const char *hint, bool taking) {
+    const bool hot = taking || Over(at);
+
+    DrawRectangleRec(at, taking ? kHot : kSlot);
+    DrawRectangleLinesEx(at, 2.0f, hot ? kInk : kEdge);
+
+    DrawText(label, static_cast<int>(at.x + 14.0f), static_cast<int>(at.y + (at.height - kBodyType) / 2.0f),
+             kBodyType, kFaint);
+
+    // The placeholder is set smaller than what is typed, and not only to fit: it is a
+    // hint about the field rather than a value in it, and at the same size it reads as
+    // one — a player who has not typed anything sees a name they did not choose.
+    const bool empty = text.empty();
+
+    const char *shown = empty ? hint : text.c_str();
+    const int size    = empty ? 16 : kBodyType;
+
+    const float from = at.x + 150.0f;
+
+    DrawText(shown, static_cast<int>(from), static_cast<int>(at.y + (at.height - static_cast<float>(size)) / 2.0f),
+             size, empty ? kFaint : kInk);
+
+    if (!taking) return;
+
+    const float caret = from + static_cast<float>(MeasureText(text.c_str(), kBodyType)) + 3.0f;
+
+    DrawRectangleRec({caret, at.y + 10.0f, 2.0f, at.height - 20.0f}, kAccent);
+}
+
+// Letters into a field, and the two keys that let go of it.
+//
+// Returns whether the field still has the keyboard, so the caller's own state is set
+// from the answer rather than in three places inside.
+bool TakeKeys(std::string &into, std::size_t most) {
+    for (int letter = GetCharPressed(); letter > 0; letter = GetCharPressed()) {
+        if (into.size() >= most) break;
+        if (letter < 32 || letter > 126) continue;
+
+        into += static_cast<char>(letter);
+    }
+
+    if (IsKeyPressed(KEY_BACKSPACE) && !into.empty()) into.pop_back();
+
+    return !IsKeyPressed(KEY_ENTER) && !IsKeyPressed(KEY_KP_ENTER) && !IsKeyPressed(KEY_ESCAPE);
+}
+
+// How long ago, in the coarsest unit that is still true.
+//
+// "3 days ago" and never "3 days, 4 hours and 12 minutes ago": what the row is for is
+// telling one save from another at a glance, and a precise answer is a longer string
+// that answers the same question.
+const char *Since(std::int64_t written) {
+    if (written <= 0) return "never played";
+
+    const std::int64_t now  = static_cast<std::int64_t>(std::time(nullptr));
+    const std::int64_t gone = now - written;
+
+    // Singular where it is one, because "1 hours ago" is the sort of thing a player
+    // reads once and stops trusting the rest of the screen over.
+    const auto many = [](std::int64_t count, const char *unit) {
+        return TextFormat("%lld %s%s ago", count, unit, (count == 1) ? "" : "s");
+    };
+
+    if (gone < 90) return "just now";
+    if (gone < 3600) return many(gone / 60, "minute");
+    if (gone < 86400) return many(gone / 3600, "hour");
+
+    return many(gone / 86400, "day");
+}
+
 // What the typed seed comes to.
 //
 // Empty is a world nobody chose, which is the commonest thing a player wants from
@@ -320,13 +445,119 @@ int Seeded(const std::string &text) {
 
 } // namespace
 
+void menu::Menu::Open(Screen screen) {
+    // Re-read on the way in rather than watched. A folder that changes while the menu
+    // is up is not a case worth carrying machinery for, and every path that can change
+    // it goes through here or through `Refresh` directly.
+    if (screen == Screen::Saves) Refresh();
+
+    stack_.push_back(screen);
+}
+
+Rectangle menu::Menu::Preview() const {
+    return LaySaves().preview;
+}
+
+void menu::Menu::Refresh() {
+    saves_ = save::List();
+
+    asking_.clear();
+
+    if (field_ == Field::Rename) Typing(Field::None);
+
+    // The one that was picked, found again by id. By id and never by position: a save
+    // that was deleted moves every row under it up one, and a remembered position would
+    // quietly select whatever slid into it — which is the row the next click deletes.
+    int found = -1;
+
+    for (std::size_t i = 0; i < saves_.size(); i++) {
+        if (saves_[i].id == shotOf_) found = static_cast<int>(i);
+    }
+
+    // Falling back to the first, which is the newest — and to nothing where there are
+    // no saves at all.
+    if (found < 0) found = saves_.empty() ? -1 : 0;
+
+    picked_ = -1;
+
+    Select(found);
+}
+
+void menu::Menu::Typing(Field field) {
+    field_ = field;
+}
+
+int menu::Menu::RowAt(Vector2 where) const {
+    const SavesAt at = LaySaves();
+
+    if (!CheckCollisionPointRec(where, at.list)) return -1;
+
+    for (int row = 0; row < at.rows; row++) {
+        const int which = scroll_ + row;
+
+        if (which >= static_cast<int>(saves_.size())) break;
+        if (CheckCollisionPointRec(where, at.Row(row))) return which;
+    }
+
+    return -1;
+}
+
+void menu::Menu::Select(int row) {
+    if (row == picked_) return;
+
+    picked_ = row;
+
+    Show(row);
+}
+
+void menu::Menu::Show(int row) {
+    const bool valid = row >= 0 && row < static_cast<int>(saves_.size());
+
+    const std::string wants = valid ? saves_[static_cast<std::size_t>(row)].id : std::string();
+
+    if (wants == shotOf_ && shot_.id != 0) return;
+
+    Unload();
+
+    shotOf_ = wants;
+
+    if (!valid || !saves_[static_cast<std::size_t>(row)].shot) return;
+
+    shot_ = LoadTexture(saves_[static_cast<std::size_t>(row)].ShotPath().c_str());
+
+    // Point sampling, like everything else drawn from a file in this project: the
+    // preview is a picture of a pixel-art world, and bilinear turns it into a smear
+    // at every scale but one.
+    if (shot_.id != 0) SetTextureFilter(shot_, TEXTURE_FILTER_POINT);
+}
+
+void menu::Menu::Unload() {
+    if (shot_.id != 0) UnloadTexture(shot_);
+
+    shot_ = {};
+}
+
+void menu::Menu::Home() {
+    stack_.clear();
+    stack_.push_back(Screen::Title);
+
+    playing_ = {};
+
+    Typing(Field::None);
+
+    dropped_ = false;
+}
+
 void menu::Menu::Back() {
     if (stack_.size() > 1) stack_.pop_back();
 
     // Whatever was half done on the screen being left does not survive it. A field
     // still taking keystrokes after the player has walked away from it is how a
     // menu ends up eating the movement keys.
-    typing_  = false;
+    Typing(Field::None);
+
+    asking_.clear();
+
     dropped_ = false;
 }
 
@@ -334,7 +565,8 @@ void menu::Menu::Play() {
     stack_.clear();
     stack_.push_back(Screen::World);
 
-    typing_  = false;
+    Typing(Field::None);
+
     dropped_ = false;
 }
 
@@ -344,11 +576,37 @@ menu::Wish menu::Menu::Update() {
     // Escape means back on every screen it can mean anything on, and the arrow in
     // the corner means the same thing. Asked once, here, rather than per screen —
     // the one rule this module exists to make true.
-    const bool back = (Pressed(BackAt()) && CanBack()) || (IsKeyPressed(KEY_ESCAPE) && CanBack() && !typing_);
+    const bool back =
+        (Pressed(BackAt()) && CanBack()) || (IsKeyPressed(KEY_ESCAPE) && CanBack() && field_ == Field::None);
 
     switch (Top()) {
     case Screen::Title: {
         const TitleAt at = LayTitle();
+
+        // Paused, the same four buttons mean four different things.
+        //
+        // One screen and not two, because it *is* one screen: the title standing on a
+        // world rather than on nothing, which is exactly what the stack already says
+        // (see `Paused`). Two screens would be two layouts to keep the same size and a
+        // second place to add a button to.
+        if (Paused()) {
+            if (Pressed(at.play)) Back();
+
+            if (Pressed(at.party)) wish.save = true;
+
+            if (Pressed(at.options)) Open(Screen::Options);
+
+            // Saved *and* left, in that order and reported together, so the loop
+            // writes the world before the menu forgets which save it was — see
+            // Wish::leaving.
+            if (Pressed(at.quit)) {
+                wish.save    = true;
+                wish.leaving = true;
+            }
+
+            if (back) Back();
+            break;
+        }
 
         if (Pressed(at.play)) Open(Screen::Saves);
         if (Pressed(at.party)) Open(Screen::Multiplayer);
@@ -362,12 +620,85 @@ menu::Wish menu::Menu::Update() {
     case Screen::Saves: {
         const SavesAt at = LaySaves();
 
+        const bool any    = picked_ >= 0 && picked_ < static_cast<int>(saves_.size());
+        const save::Slot &one = any ? saves_[static_cast<std::size_t>(picked_)] : playing_;
+
+        // The question about deleting, asked over the screen rather than on one of its
+        // own. It answers first and swallows everything under it, because a click that
+        // reached the list while a confirm is up would move the selection out from
+        // under the very question being asked.
+        if (!asking_.empty()) {
+            const Rectangle box  = Middle(High() * 0.42f, std::min(Wide() * 0.6f, 620.0f), 150.0f);
+            const float half     = std::floor((box.width - kGap * 3.0f) / 2.0f);
+            const Rectangle sure = {box.x + kGap, box.y + box.height - kButtonHigh - kGap, half, kButtonHigh};
+            const Rectangle keep = {sure.x + half + kGap, sure.y, half, kButtonHigh};
+
+            if (Pressed(sure)) {
+                save::Erase(asking_);
+
+                asking_.clear();
+                shotOf_.clear();
+
+                Refresh();
+            }
+
+            if (Pressed(keep) || back) asking_.clear();
+
+            break;
+        }
+
+        // Renaming happens in the row itself rather than on a screen of its own. What
+        // is being renamed is the row the player is looking at, and moving them
+        // somewhere else to type would take it off the screen.
+        if (field_ == Field::Rename) {
+            if (!TakeKeys(rename_, 32)) {
+                if (any && !rename_.empty()) save::Rename(one.id, rename_);
+
+                Typing(Field::None);
+                Refresh();
+            }
+
+            // A click anywhere else finishes it too, which is what a field in a list
+            // does everywhere else and is the only way out that needs no key.
+            if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !Over(at.Row(picked_ - scroll_))) {
+                if (any && !rename_.empty()) save::Rename(one.id, rename_);
+
+                Typing(Field::None);
+                Refresh();
+            }
+
+            break;
+        }
+
+        // The wheel over the list, bounded by what there is. Bounded rather than
+        // wrapped: a list that scrolls past its end and comes back round is a list
+        // whose position tells the player nothing.
+        if (CheckCollisionPointRec(GetMousePosition(), at.list)) {
+            const int most = std::max(0, static_cast<int>(saves_.size()) - at.rows);
+
+            scroll_ = std::clamp(scroll_ - static_cast<int>(GetMouseWheelMove()), 0, most);
+        }
+
+        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+            const int row = RowAt(GetMousePosition());
+
+            if (row >= 0) Select(row);
+        }
+
         if (Pressed(at.fresh)) Open(Screen::NewWorld);
 
-        // Load, edit and delete need saves to act on, and there are none: the store
-        // is a system of its own and is deliberately not being invented here. They
-        // are drawn and refused rather than left out, because what they are for is
-        // plain and leaving them out would make the screen look finished.
+        if (Pressed(at.load, any)) {
+            wish.load = true;
+            wish.slot = one.id;
+        }
+
+        if (Pressed(at.edit, any)) {
+            rename_ = one.name;
+
+            Typing(Field::Rename);
+        }
+
+        if (Pressed(at.drop, any)) asking_ = one.id;
 
         if (back) Back();
         break;
@@ -381,20 +712,12 @@ menu::Wish menu::Menu::Update() {
         // else on this screen reads a key, so there is nothing to fight over — but
         // the loop behind it does, which is why Escape is spoken for above only
         // when the field is quiet.
-        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) typing_ = Over(at.seed);
-
-        if (typing_) {
-            for (int letter = GetCharPressed(); letter > 0; letter = GetCharPressed()) {
-                if (seed_.size() >= 24) break;
-                if (letter < 32 || letter > 126) continue;
-
-                seed_ += static_cast<char>(letter);
-            }
-
-            if (IsKeyPressed(KEY_BACKSPACE) && !seed_.empty()) seed_.pop_back();
-            if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER)) typing_ = false;
-            if (IsKeyPressed(KEY_ESCAPE)) typing_ = false;
+        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+            Typing(Over(at.name) ? Field::Name : (Over(at.seed) ? Field::Seed : Field::None));
         }
+
+        if (field_ == Field::Name && !TakeKeys(name_, 32)) Typing(Field::None);
+        if (field_ == Field::Seed && !TakeKeys(seed_, 24)) Typing(Field::None);
 
         // The list, which is only ever two rows and could have been a click that
         // toggles. It is a list because the mock asks for one and because a third
@@ -417,6 +740,18 @@ menu::Wish menu::Menu::Update() {
             wish.create = true;
             wish.seed   = Seeded(seed_);
             wish.mode   = mode_;
+
+            // A world nobody named is called after its seed, which is the one thing
+            // about it that is already true and is what a player would have typed. An
+            // empty name would list as an empty row.
+            wish.name = name_.empty() ? std::string("world ") + std::to_string(wish.seed) : name_;
+
+            // The form is left empty behind them, because the next world made is a
+            // different world: a name still sitting in the box is a save called after
+            // the last one, which is exactly the pair of worlds a player cannot tell
+            // apart afterwards.
+            name_.clear();
+            seed_.clear();
         }
 
         if (back) Back();
@@ -455,7 +790,25 @@ void menu::Menu::Draw() const {
         const TitleAt at = LayTitle();
 
         Box(at.name, kPanel);
-        Label(config::kGameName, at.name, kTitleType, kInk);
+        Label(Paused() ? playing_.name.c_str() : config::kGameName, at.name, kTitleType, kInk);
+
+        if (Paused()) {
+            Button(at.play, "back to game");
+            Button(at.party, "save");
+            Button(at.options, "options");
+            Button(at.quit, "save and quit");
+
+            // What saving will write to, under the buttons. A player with three worlds
+            // on the go is owed the name of the one they are about to overwrite, and the
+            // row above says it in the size a title is rather than the size an answer is.
+            const Rectangle says = {at.quit.x, at.quit.y + at.quit.height + kGap, at.quit.width, 22.0f};
+
+            Label(playing_.id.empty() ? "this world has nowhere to be saved" : "saving keeps everything you built",
+                  says, 16, kFaint);
+
+            DrawBack(CanBack());
+            break;
+        }
 
         Button(at.play, "play");
         Button(at.party, "multiplayer");
@@ -476,21 +829,130 @@ void menu::Menu::Draw() const {
         DrawBack(true);
 
         Box(at.list, kPanel);
-        Waiting(at.list, "no saves yet - the store is not written", "start a new world below");
 
-        // The scrollbar, drawn full and quiet. It is the shape of the screen rather
-        // than a working control: there is nothing to scroll past until there is
-        // something to scroll.
-        DrawRectangleRec(at.bar, kSlot);
+        if (saves_.empty()) Waiting(at.list, "no worlds yet", "start a new one below");
+
+        for (int row = 0; row < at.rows; row++) {
+            const int which = scroll_ + row;
+
+            if (which >= static_cast<int>(saves_.size())) break;
+
+            const save::Slot &slot = saves_[static_cast<std::size_t>(which)];
+
+            const Rectangle box = at.Row(row);
+
+            const bool picked = which == picked_;
+            const bool hot    = Over(box);
+
+            DrawRectangleRec(box, picked ? kHot : (hot ? kSlot : kPanel));
+            DrawRectangleLinesEx(box, 2.0f, picked ? kInk : kEdge);
+
+            // The name on top and everything else under it, smaller and quieter. What
+            // the eye is doing here is finding one name in a column of them, and a row
+            // where every word carries the same weight is a row that has to be read.
+            const bool renaming = picked && field_ == Field::Rename;
+
+            const std::string &shown = renaming ? rename_ : slot.name;
+
+            DrawText(shown.c_str(), static_cast<int>(box.x + 12.0f), static_cast<int>(box.y + 8.0f), kBodyType, kInk);
+
+            if (renaming) {
+                const float caret = box.x + 12.0f + static_cast<float>(MeasureText(rename_.c_str(), kBodyType)) + 3.0f;
+
+                DrawRectangleRec({caret, box.y + 8.0f, 2.0f, static_cast<float>(kBodyType)}, kAccent);
+            }
+
+            DrawText(TextFormat("%s  -  seed %d  -  %s", slot.creative ? "creative" : "survival", slot.seed,
+                                Since(slot.written)),
+                     static_cast<int>(box.x + 12.0f), static_cast<int>(box.y + 8.0f + kBodyType + 4.0f), 15, kFaint);
+        }
+
+        // The scrollbar: its ground, and a thumb as long a share of it as the rows on
+        // screen are of the rows there are. A bar that is always full says nothing, and
+        // one that is always the same length lies about how much is under it.
+        DrawRectangleRec(at.bar, kPanel);
         DrawRectangleLinesEx(at.bar, 1.0f, kEdge);
 
+        {
+            const int total = std::max(1, static_cast<int>(saves_.size()));
+            const float has = std::min(1.0f, static_cast<float>(at.rows) / static_cast<float>(total));
+
+            const float span = std::max(18.0f, at.bar.height * has);
+            const int most   = std::max(1, total - at.rows);
+
+            const float down = (at.bar.height - span) * (static_cast<float>(scroll_) / static_cast<float>(most));
+
+            DrawRectangleRec({at.bar.x + 2.0f, at.bar.y + down + 2.0f, at.bar.width - 4.0f, span - 4.0f}, kSlot);
+        }
+
         Box(at.preview, kPanel);
-        Waiting(at.preview, "screenshot of the", "selected save");
+
+        if (shot_.id != 0) {
+            // Fitted inside the box and centred, keeping its shape. A preview stretched
+            // to fill the panel is a picture of a world nobody is looking at.
+            const float scale = std::min(at.preview.width / static_cast<float>(shot_.width),
+                                         at.preview.height / static_cast<float>(shot_.height));
+
+            const float wide = static_cast<float>(shot_.width) * scale;
+            const float high = static_cast<float>(shot_.height) * scale;
+
+            DrawTexturePro(shot_, {0.0f, 0.0f, static_cast<float>(shot_.width), static_cast<float>(shot_.height)},
+                           {std::floor(at.preview.x + (at.preview.width - wide) / 2.0f),
+                            std::floor(at.preview.y + (at.preview.height - high) / 2.0f), wide, high},
+                           {0.0f, 0.0f}, 0.0f, WHITE);
+        } else if (picked_ >= 0) {
+            Waiting(at.preview, "no picture of this one", "it was written before there was one");
+        } else {
+            Waiting(at.preview, "pick a world", "and it is shown here");
+        }
+
+        Box(at.facts, kPanel);
+
+        if (picked_ >= 0 && picked_ < static_cast<int>(saves_.size())) {
+            const save::Slot &slot = saves_[static_cast<std::size_t>(picked_)];
+
+            // The clock as an hour of the day. A world is left at a time and comes back
+            // at it, and the number of seconds it has been running is not a thing
+            // anybody wants to read.
+            const int hour   = static_cast<int>(slot.clock / 3600.0f) % 24;
+            const int minute = static_cast<int>(slot.clock / 60.0f) % 60;
+
+            DrawText(TextFormat("world  %d", slot.seed), static_cast<int>(at.facts.x + 12.0f),
+                     static_cast<int>(at.facts.y + 10.0f), 16, kFaint);
+
+            DrawText(TextFormat("left at  %02d:%02d", hour, minute), static_cast<int>(at.facts.x + 12.0f),
+                     static_cast<int>(at.facts.y + 32.0f), 16, kFaint);
+
+            DrawText(slot.creative ? "creative" : "survival", static_cast<int>(at.facts.x + 12.0f),
+                     static_cast<int>(at.facts.y + 54.0f), 16, kAccent);
+        } else {
+            Waiting(at.facts, "nothing picked", "");
+        }
+
+        const bool any = picked_ >= 0 && picked_ < static_cast<int>(saves_.size());
 
         Button(at.fresh, "new");
-        Button(at.load, "load", false);
-        Button(at.edit, "edit", false);
-        Button(at.drop, "delete", false);
+        Button(at.load, "load", any);
+        Button(at.edit, "rename", any);
+        Button(at.drop, "delete", any);
+
+        // Last of all, over everything, because a question about the screen has to be
+        // in front of the screen it is about.
+        if (asking_.empty()) break;
+
+        DrawRectangleRec({0.0f, 0.0f, Wide(), High()}, {0, 0, 0, 170});
+
+        const Rectangle box = Middle(High() * 0.42f, std::min(Wide() * 0.6f, 620.0f), 150.0f);
+
+        Box(box, kPanel);
+
+        Label("delete this world?", {box.x, box.y + 18.0f, box.width, 26.0f}, kHeadType, kInk);
+        Label("it cannot be got back", {box.x, box.y + 52.0f, box.width, 22.0f}, 16, kFaint);
+
+        const float half = std::floor((box.width - kGap * 3.0f) / 2.0f);
+
+        Button({box.x + kGap, box.y + box.height - kButtonHigh - kGap, half, kButtonHigh}, "delete");
+        Button({box.x + kGap + half + kGap, box.y + box.height - kButtonHigh - kGap, half, kButtonHigh}, "keep it");
         break;
     }
 
@@ -502,34 +964,8 @@ void menu::Menu::Draw() const {
 
         Box(at.group, kPanel);
 
-        // The seed row: the word on the left of the box and what has been typed on
-        // the right of it, with a bar at the end while it is taking keys.
-        const bool hot = typing_ || Over(at.seed);
-
-        DrawRectangleRec(at.seed, typing_ ? kHot : kSlot);
-        DrawRectangleLinesEx(at.seed, 2.0f, hot ? kInk : kEdge);
-
-        DrawText("seed", static_cast<int>(at.seed.x + 14.0f),
-                 static_cast<int>(at.seed.y + (at.seed.height - kBodyType) / 2.0f), kBodyType, kFaint);
-
-        // The placeholder is set smaller than what is typed, and not only to fit: it
-        // is a hint about the field rather than a value in it, and at the same size
-        // it reads as one — a player who has not typed anything sees a seed they did
-        // not choose.
-        const bool empty = seed_.empty();
-
-        const char *typed = empty ? "anything you like, or leave it empty" : seed_.c_str();
-        const int size    = empty ? 16 : kBodyType;
-
-        DrawText(typed, static_cast<int>(at.seed.x + 90.0f),
-                 static_cast<int>(at.seed.y + (at.seed.height - static_cast<float>(size)) / 2.0f), size,
-                 empty ? kFaint : kInk);
-
-        if (typing_) {
-            const float caret = at.seed.x + 90.0f + static_cast<float>(MeasureText(seed_.c_str(), kBodyType)) + 3.0f;
-
-            DrawRectangleRec({caret, at.seed.y + 10.0f, 2.0f, at.seed.height - 20.0f}, kAccent);
-        }
+        FieldRow(at.name, "name", name_, "what to call it", field_ == Field::Name);
+        FieldRow(at.seed, "seed", seed_, "anything, or leave it empty", field_ == Field::Seed);
 
         // The gamemode row, which is the same shape wearing a mark on the right to
         // say it opens.

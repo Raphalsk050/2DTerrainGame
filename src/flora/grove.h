@@ -60,6 +60,11 @@ inline constexpr float kLeafFall = 26.0f;
 //
 // It reads the world but never writes to it. A tree stands on the surface and
 // stops nothing, so nothing in the lattice has to know it is there.
+namespace save {
+class Writer;
+class Reader;
+} // namespace save
+
 class Grove {
 public:
     // Bakes the sprites as well as settling the placement, so it needs a window
@@ -79,6 +84,17 @@ public:
     // tree in a place that never had one, which is exactly the shape of bug that
     // takes a day to find.
     void Clear();
+
+    // What the wood holds that the scatter cannot produce again: every tree that has
+    // been struck, felled, cleared or planted.
+    //
+    // The map is the whole of it. A tree nobody has touched has no record at all —
+    // that is what makes a wood of ten thousand plants cost nothing — so what is saved
+    // is exactly the difference between the wood the seed grows and the one the player
+    // has been living in, and it is the same argument `World::Save` makes about the
+    // journal.
+    void Save(save::Writer &out) const;
+    void Load(save::Reader &in);
 
     // Grows the plants covering `view` plus the margin a canopy can hang over,
     // then runs what has been done to them: trees finishing their fall give up

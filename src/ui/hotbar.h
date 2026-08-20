@@ -55,7 +55,16 @@ Rectangle SlotBounds(int slot);
 // Shared with the panel for the same reason the bounds are: a slot in the grid
 // and a slot in the bar are the same thing seen twice, and the moment they are
 // drawn by two routines they start to look like two different things.
-void DrawSlot(const Stack &stack, Rectangle bounds, bool active);
+//
+// `pixel` is the width of one texel of the picture inside, and it is a parameter
+// rather than the constant above because a chest standing open beside the pack can
+// take the whole layout down to a smaller slot — see `ui/pack.h`. The default is the
+// bar's own, so every caller that is not part of that layout is unchanged.
+//
+// `dim` shades the whole square without touching what is in it, which is how a slot
+// that a search has passed over is drawn: the picture is still there to be recognised,
+// and the ones that matched are the ones that are lit.
+void DrawSlot(const Stack &stack, Rectangle bounds, bool active, float pixel = kIconPixel, bool dim = false);
 
 // True when a screen position lies on the bar. Callers test this before acting
 // on a click, so selecting a slot does not also paint the world behind it.

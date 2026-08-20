@@ -120,6 +120,30 @@ public:
     // Where the cursor is pointing, in world space.
     Vector2 Aim() const { return aim_; }
 
+    // The cell of a store the right hand asked to open this frame, or nothing.
+    //
+    // Reported rather than acted on, which is the arrangement this module already has
+    // with the axe: `Left()` says the press became a chop and the caller swings the
+    // arm, because what a blow hits is the wood's business. What a panel does is the
+    // loop's business for the same reason — opening one stops the world (§14), and a
+    // gate hidden inside the thing it gates is a gate nobody finds.
+    //
+    // Cleared at the top of every update, so it is an answer about this frame and never
+    // a latch. A press that opened a chest last frame must not open it again.
+    struct Cell {
+        int cx = 0;
+        int cy = 0;
+    };
+
+    std::optional<Cell> Opened() const { return opened_; }
+
+    // Whether the cell under the cursor is a store the right hand would open.
+    //
+    // Worked out beside everything else the cursor promises and read by the drawing, so
+    // the square goes a different colour *before* the button is pressed. The same
+    // one-answer rule `footing_` and `buildable_` follow.
+    bool Opening() const { return opening_; }
+
     // Whether that point is close enough to act on.
     bool Reachable() const { return reachable_; }
 
@@ -393,6 +417,10 @@ private:
     // no use for it.
     std::optional<Vector2> footing_;
     bool rooted_ = false;
+
+    // What the right hand would open, and what it did open this frame.
+    bool opening_ = false;
+    std::optional<Cell> opened_;
 
     bool reachable_ = false;
 };

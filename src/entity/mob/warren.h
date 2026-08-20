@@ -10,6 +10,11 @@
 
 class World;
 
+namespace save {
+class Writer;
+class Reader;
+} // namespace save
+
 namespace mob {
 
 // Where the creatures of a world are, including the ones nobody is looking at.
@@ -91,6 +96,20 @@ public:
     bool Sleeping(Rectangle active, Vector2 at) const;
 
     void Close(Rectangle active);
+
+    // Every cell that has ever been decided about, and every creature in one.
+    //
+    // `living` is the herd's own — the creatures near enough to be walking about, which
+    // are *not* in any patch's `asleep` while they are awake (holding a second copy
+    // would be two answers to where a boar is). They are filed into their patches as
+    // this writes, without the live game being touched: a save must not be a thing that
+    // happens *to* the world.
+    //
+    // Everything comes back asleep. That is not a compromise — it is what loading is:
+    // the view wakes what it covers on the first frame, exactly as walking back into
+    // country does.
+    void Save(save::Writer &out, const std::vector<Life> &living) const;
+    void Load(save::Reader &in);
 
     void Clear() {
         patches_.clear();

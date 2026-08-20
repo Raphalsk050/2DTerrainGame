@@ -1,5 +1,7 @@
 #include "world/world.h"
 
+#include "save/record.h"
+
 #include "core/config.h"
 #include "world/marching_squares.h"
 #include "core/pool.h"
@@ -1061,6 +1063,107 @@ void World::Reset() {
     // And what was outstanding about them. A world with nothing built in it has
     // no turned earth waiting to green over.
     sown_.clear();
+}
+
+void World::Save(save::Writer &out) const {
+    // Gathered and sorted rather than written as the map hands them over.
+    //
+    // A save has to be a function of the *world* and not of a hash table's iteration
+    // order, or two saves of the same country come out as two different files and the
+    // round trip in `--saves` has nothing to compare. Sorted by row and then column,
+    // which also makes a save readable: the journal reads down the world the way the
+    // world is drawn.
+    std::vector<const Edit *> all;
+
+    for (const auto &[key, bucket] : edits_) {
+        for (const Edit &edit : bucket) all.push_back(&edit);
+    }
+
+    std::sort(all.begin(), all.end(), [](const Edit *a, const Edit *b) {
+        if (a->j != b->j) return a->j < b->j;
+
+        return a->i < b->i;
+    });
+
+    out.Tag("edits").Done();
+
+    const auto named = [](const std::optional<Element> &what) {
+        return what.has_value() ? kElements[ElementIndex(*what)].name : "";
+    };
+
+    for (const Edit *edit : all) {
+        // The flag *and* the name, on both layers, because the flag is what says the
+        // record speaks for that layer at all and an empty name is what says the layer
+        // was dug out. `std::optional` cannot mean both "nothing" and "not asked"
+        // (§11.2), and neither can one field on disk.
+        out.Tag("edit")
+            .Int(edit->i)
+            .Int(edit->j)
+            .Flag(edit->front)
+            .Text(named(edit->element))
+            .Flag(edit->back)
+            .Text(named(edit->behind))
+            .Done();
+    }
+}
+
+void World::Load(save::Reader &in) {
+    const float step = static_cast<float>(spacing_);
+
+    while (in.Next()) {
+        if (!in.Is("edit")) {
+            in.Again();
+            break;
+        }
+
+        Edit edit;
+
+        edit.i = static_cast<int>(in.Int());
+        edit.j = static_cast<int>(in.Int());
+
+        edit.front              = in.Flag();
+        const std::string front = in.Text();
+
+        edit.back              = in.Flag();
+        const std::string back = in.Text();
+
+        if (!in.Ok()) return;
+
+        // A name that resolves to nothing is a save this build cannot read, and it is
+        // refused rather than dropped: a hillside missing the one material the reader
+        // did not recognise is a world that is quietly not the saved one.
+        if (edit.front && !front.empty()) {
+            edit.element = ElementNamed(front);
+
+            if (!edit.element.has_value()) {
+                in.Fail();
+                return;
+            }
+        }
+
+        if (edit.back && !back.empty()) {
+            edit.behind = ElementNamed(back);
+
+            if (!edit.behind.has_value()) {
+                in.Fail();
+                return;
+            }
+        }
+
+        // Filed under the chunk the vertex falls in, which is the same rule
+        // `Remember` files by — a vertex on a border belongs to four chunks and is
+        // kept by one of them, and `ApplyEdits` looks in all four.
+        int cx = 0;
+        int cy = 0;
+
+        ToChunk({static_cast<float>(edit.i) * step, static_cast<float>(edit.j) * step}, cx, cy);
+
+        // Appended rather than merged. A journal holds one record per vertex already,
+        // so there is nothing to merge with — and a hand-edited file with two records
+        // for one vertex replays in order, which makes the later one win exactly as a
+        // second stroke would.
+        edits_[Key(cx, cy)].push_back(edit);
+    }
 }
 
 int World::PinnedChunks() const {

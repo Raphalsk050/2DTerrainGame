@@ -1,5 +1,7 @@
 #include "entity/player/player.h"
 
+#include "save/record.h"
+
 #include "item/icon.h"
 #include "world/world.h"
 
@@ -25,6 +27,36 @@ constexpr float kGrip = 0.72f;
 } // namespace
 
 Player::Player(Vector2 spawn) : body_(player_config::Build(), spawn) {}
+
+void Player::Save(save::Writer &out) const {
+    const Vector2 at = body_.Position();
+
+    out.Tag("player").Real(at.x).Real(at.y).Int(health_.now).Int(health_.most).Done();
+}
+
+void Player::Load(save::Reader &in) {
+    const float x = in.Real();
+    const float y = in.Real();
+
+    const long long now  = in.Int();
+    const long long most = in.Int();
+
+    if (!in.Ok()) return;
+
+    // Through `PlaceAt`, which clears the momentum with it. A character put down
+    // carrying the speed of the fall it was in the middle of is a character that
+    // arrives underground — the same reason the console's teleport goes this way.
+    body_.PlaceAt({x, y});
+
+    health_.most = (most > 0) ? static_cast<int>(most) : player_config::kHealth;
+    health_.now  = std::clamp(static_cast<int>(now), 0, health_.most);
+
+    // Neither timer is saved and both are cleared. They are seconds of "was just hit",
+    // which is a thing that happened rather than a thing that is true — and a world
+    // loaded into a flash the player never saw is a world that starts by lying.
+    health_.flashFor = 0.0f;
+    health_.mercyFor = 0.0f;
+}
 
 Rectangle Player::AttackHitbox() const {
     if (attackTimer_ <= 0.0f) return {};

@@ -22,6 +22,11 @@ struct Stack;
 // What is left in this class is what is actually the character: where it is pointing,
 // the swing, how much it can take, the state its animation is in, and how it is
 // drawn. Everything else is composed.
+namespace save {
+class Writer;
+class Reader;
+} // namespace save
+
 class Player {
 public:
     enum class State { Idle, Running, Jumping, Falling, Crouching, Attacking, Swimming, Flying };
@@ -94,6 +99,16 @@ public:
     bool Hurt(const life::Blow &blow);
 
     const life::Health &Vigour() const { return health_; }
+
+    // Where the character is and what is left of them.
+    //
+    // Two facts and no more. Everything else about a `Player` — velocity, which way it
+    // is facing, how far through a swing it is, whether it is in the air — is a
+    // fraction of a second of state, and a world you load is a world you arrive in
+    // standing still. It is the same argument `mob::Life` makes about a creature:
+    // what is saved is history, not description.
+    void Save(save::Writer &out) const;
+    void Load(save::Reader &in);
 
     // Back on its feet, wherever it is. What a respawn and a change of gamemode both
     // want, and neither should have to know which fields that means.
