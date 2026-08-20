@@ -922,7 +922,7 @@ const char *Editor::Update(World &world, Inventory &inventory, Grove &grove, fix
         if (!kind.has_value()) return "that is not something to put down";
 
         if (fixtures.At(cellX_, cellY_).has_value()) return "there is already something here";
-        if (!fixture::Fixtures::Holds(world, *kind, cellX_, cellY_)) return "nothing here to fix it to";
+        if (!fixtures.Holds(world, *kind, cellX_, cellY_)) return "nothing here to fix it to";
 
         // The join cap, spoken rather than left as a click that does nothing. A run of
         // chests that has reached its length is the one refusal in here a player cannot

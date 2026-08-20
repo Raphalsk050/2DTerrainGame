@@ -65,9 +65,16 @@ enum Anchor : unsigned char {
     kWall   = 1 << 1, // solid to the left or the right
     kRoof   = 1 << 2, // solid above it
     kBehind = 1 << 3, // a background wall in its own cell
+    kAtop   = 1 << 4, // another fixture standing in the cell below
 
     kAnywhere = kFloor | kWall | kRoof | kBehind,
 };
+
+// `kAtop` is deliberately outside `kAnywhere`. Everything else in this enum is a
+// question about the *world*, which is the same question wherever it is asked; this
+// one is about what somebody else has put up, and a torch that could be stuck to the
+// lid of a chest is not what "any surface" was asked for. A row that wants to stand on
+// its own kind says so.
 
 enum class Kind : std::uint8_t { Torch, Chest, Count };
 
@@ -318,12 +325,17 @@ inline constexpr Def kKinds[] = {
         // bank size. The 64-square canvas is the one every tool is drawn on, and only
         // the drawn-on part of it reaches the screen — see `Def::art`.
         .art     = "chest",
-        .artWide = 64,
+        .artWide = 18,
 
-        // The floor and nothing else. A chest hangs off no wall and off no ceiling: it
-        // is the one fixture in here that is furniture rather than fitting, and a
-        // chest stuck to a roof would be a thing the player cannot reach into.
-        .anchors = kFloor,
+        // The floor, or the lid of another chest. A chest hangs off no wall and off no
+        // ceiling: it is the one fixture in here that is furniture rather than fitting,
+        // and a chest stuck to a roof would be a thing the player cannot reach into.
+        //
+        // `kAtop` is what makes a store room go upwards as well as sideways. It is not
+        // the same thing as joining — a chest above another is its own store with its
+        // own contents, exactly as `Def::joins` being horizontal already says — it is
+        // only a second thing that will hold one up.
+        .anchors = kFloor | kAtop,
 
         // Dark, like everything else that is not a lamp.
         .light = {.opacity = 0.0f, .glow = {0, 0, 0, 0}, .strength = 0.0f},
@@ -467,6 +479,23 @@ struct Placed {
     // because they are all told to and not because one of them is keeping the state
     // for the other two.
     float lid = 0.0f;
+
+    // World Y this one is *drawn* standing on, or nothing until the world has been
+    // asked.
+    //
+    // The cell's own floor is the wrong answer and was the bug: a cell is eighteen
+    // pixels of the build grid and the ground inside it is a contour that crosses it
+    // wherever the field says, so a fixture stood on the grid line hangs by up to a
+    // whole cell over the hillside it is supposed to be resting on. §12.3 is the same
+    // argument for a tree and for the player's feet, and `World::FootingUnder` is the
+    // one answer all three read.
+    //
+    // Kept rather than worked out in `Draw` because `Draw` has no world and must not
+    // grow one: it is called by `--chest` against a `Fixtures` with no world anywhere
+    // near it. Refreshed every frame by `Settle`, which is already walking every
+    // fixture with the world in its hand, so it is a reading and not a cache — there
+    // is nothing to invalidate and nothing that can go stale by more than a frame.
+    std::optional<float> seat;
 };
 
 // A run of joined units, as one store.
@@ -519,6 +548,15 @@ public:
 
     std::optional<Kind> At(int cx, int cy) const;
 
+    // World Y the one in this cell is drawn standing on, or nothing where there is
+    // nothing here or the world has not been asked yet — see `Placed::seat`.
+    //
+    // Public so `--seat` can read the very number the draw uses. A probe that worked the
+    // seat out for itself would be checking its own arithmetic against the world's
+    // rather than the game's against the picture, which is §13.6's rule about
+    // `Editor::WorkFor` being reachable from outside.
+    std::optional<float> SeatAt(int cx, int cy) const;
+
     // The run of joined units this cell belongs to. Empty where there is nothing here,
     // or where what is here remembers nothing.
     Joined Run(int cx, int cy) const;
@@ -542,11 +580,16 @@ public:
     // an array made up on the spot, with no world anywhere near it.
     void Rules(const Joined &run, std::vector<slots::Kind *> &out);
 
-    // Whether the world will hold this kind in this cell.
+    // Whether anything will hold this kind in this cell.
     //
-    // Static and taking the world, because the hand has to ask it a frame before
-    // the click — the same one-answer rule the rest of the cursor follows.
-    static bool Holds(const World &world, Kind kind, int cx, int cy);
+    // Asked by the hand a frame before the click as well as by `Settle`, because the
+    // refusal has to be drawable and not only speakable — the same one-answer rule the
+    // rest of the cursor follows.
+    //
+    // A member rather than a free function taking the world, because `kAtop` made the
+    // answer depend on what else is standing: what holds a chest up may be the world,
+    // and may be another chest.
+    bool Holds(const World &world, Kind kind, int cx, int cy) const;
 
     // Which run is standing open, if any. Told rather than worked out, because what is
     // open is a fact about the screen and not about the world — §14's argument for
@@ -573,10 +616,24 @@ public:
     // to keep burning needs nothing told to it when what carries it is gone.
     void Illuminate(World &world, Rectangle view) const;
 
-    // Drops any that have lost the surface they were fixed to, onto the ground as
-    // pickups — with whatever was in them. The precedent is Grove::Undermine, which
-    // fells a tree whose footing was dug away.
-    void Undermine(const World &world, Drops &drops, float now);
+    // What the world does to what is standing in it, once a frame.
+    //
+    // Two things, in the one walk of the map that is already being paid for:
+    //
+    // - Anything that has lost the surface it was fixed to comes down, onto the ground
+    //   as pickups and with whatever was in it. The precedent is `Grove::Undermine`,
+    //   which fells a tree whose footing was dug away.
+    // - Everything left is seated on the surface it is actually standing on — see
+    //   `Placed::seat`.
+    //
+    // Named for the settling rather than for the falling because it is both, and a
+    // function called `Undermine` that also decided where things were drawn would be a
+    // fact about the picture hidden inside a fact about the world.
+    //
+    // A stack comes down a level a frame: the chest above one that has just fallen is
+    // still held at the moment the list is taken, and fails on the next pass. That is
+    // the same walk `Grove` makes and it needs no ordering to be got right.
+    void Settle(const World &world, Drops &drops, float now);
 
     int Held() const { return static_cast<int>(placed_.size()); }
 
@@ -601,6 +658,10 @@ private:
 
     // How many same-kind neighbours run away from this cell in one direction.
     int Reach(Kind kind, int cx, int cy, int step) const;
+
+    // World Y a fixture in this cell is drawn standing on - see `Placed::seat`. Walks
+    // down whatever is stacked under it first, so a tower is seated from its base.
+    float SeatOf(const World &world, int cx, int cy) const;
 
     std::unordered_map<std::int64_t, Placed> placed_;
 

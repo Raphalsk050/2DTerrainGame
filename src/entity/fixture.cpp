@@ -27,6 +27,21 @@ namespace {
 // a torch does not read as a sprite pasted over a pixel-art world.
 constexpr float kTexel = 3.0f;
 
+// How far under its own cell a fixture will look for the ground it is standing on.
+//
+// Two cells. One would do for the common case — a fixture sits in the cell above the
+// one that holds it, and that cell's ground is drawn somewhere inside it — and two is
+// what makes the reading survive a surface drawn at the very bottom of the cell below
+// without the answer depending on where the walk happened to start.
+constexpr float kSeatReach = 2.0f * config::kBuildCell;
+
+// How far down a stack of fixtures the seating walks before it gives up and takes the
+// grid line.
+//
+// A bound rather than a belief: nothing stops a player standing chests to the sky, and
+// a walk down a stack must not be a walk with no end.
+constexpr int kMostStacked = 64;
+
 // Radius of the light a fixture offers, in world pixels.
 //
 // Well past its own cell, since what a torch is for is the room and not the wall
@@ -208,6 +223,14 @@ std::optional<Kind> Fixtures::At(int cx, int cy) const {
     return one->kind;
 }
 
+std::optional<float> Fixtures::SeatAt(int cx, int cy) const {
+    const Placed *one = Find(cx, cy);
+
+    if (one == nullptr) return std::nullopt;
+
+    return one->seat;
+}
+
 Joined Fixtures::Run(int cx, int cy) const {
     const Placed *one = Find(cx, cy);
 
@@ -261,12 +284,22 @@ void Fixtures::Rules(const Joined &run, std::vector<slots::Kind *> &out) {
     }
 }
 
-bool Fixtures::Holds(const World &world, Kind kind, int cx, int cy) {
+bool Fixtures::Holds(const World &world, Kind kind, int cx, int cy) const {
     const unsigned char anchors = Of(kind).anchors;
 
     // Its own cell has to be clear of ground — a torch is not driven into rock —
     // and something around it has to be solid.
     if (world.OverlapsSolid(World::CellBounds(cx, cy))) return false;
+
+    // What is standing in the cell below, before the world is asked about it. A chest
+    // on a chest is held by the chest and not by whatever that one is standing on, and
+    // it is the only anchor in here whose answer is not a fact about the ground.
+    //
+    // Nothing is asked about the one below beyond its being there: it is held itself or
+    // it would not be, since `Settle` walks every fixture every frame and takes down the
+    // ones nothing is holding. A stack is therefore held all the way to the floor by
+    // induction, and comes down a level a frame when the floor goes.
+    if ((anchors & kAtop) != 0 && Find(cx, cy + 1) != nullptr) return true;
 
     if ((anchors & kBehind) != 0 && world.WalledAt(cx, cy)) return true;
     if ((anchors & kFloor) != 0 && world.OverlapsSolid(World::CellBounds(cx, cy + 1))) return true;
@@ -278,6 +311,62 @@ bool Fixtures::Holds(const World &world, Kind kind, int cx, int cy) {
     }
 
     return false;
+}
+
+float Fixtures::SeatOf(const World &world, int cx, int cy) const {
+    // Down the stack first, to whichever unit is standing on the world itself. A stack
+    // is seated from its base up — the one on the ground finds the ground, and each one
+    // above it is exactly a cell higher than the one it stands on — so a tower of them
+    // stays glued together and glued to the hillside under it, and no unit has to know
+    // whether its neighbours have been asked yet.
+    int levels = 0;
+    int baseY  = cy;
+
+    while (levels < kMostStacked && Find(cx, baseY + 1) != nullptr) {
+        baseY++;
+        levels++;
+    }
+
+    const Rectangle base = World::CellBounds(cx, baseY);
+
+    // The grid line: the bottom edge of the cell, which is what this used to draw on and
+    // is still the right answer where there is no ground to be found.
+    const float grid = base.y + base.height;
+    const float lift = static_cast<float>(levels * config::kBuildCell);
+
+    // Only what the floor is holding up comes down to the floor, and it is asked with
+    // the very test that let it be put there: `Holds`'s own `kFloor` arm. A torch fixed
+    // to the wall beside it, or hung from the roof, has open air underneath and belongs
+    // where its cell says it is — sliding that down to the ground would be this bug's
+    // mirror image.
+    //
+    // Written as the anchor rather than as a distance, which is what the first cut of
+    // this had: a seat clamped to one cell below the grid line, on the reasoning that
+    // the ground holding a cell up must be inside the cell under it. It is not — the
+    // vertex `OverlapsSolid` accepts reaches half a lattice step past that cell's own
+    // floor, and the paint reaches a texel past the vertex. `--seat` reported ten
+    // hillsides in sixty still floating, every one of them by exactly the difference,
+    // and every one of them seated precisely on the clamp. A bound that has to be
+    // rederived whenever a neighbouring rule moves is a bound that will be wrong again.
+    const Placed *base_ = Find(cx, baseY);
+
+    const unsigned char anchors = (base_ != nullptr) ? Of(base_->kind).anchors : 0;
+
+    if ((anchors & kFloor) == 0 || !world.OverlapsSolid(World::CellBounds(cx, baseY + 1))) return grid - lift;
+
+    float top = 0.0f;
+
+    // Asked from the middle of the cell, which is air — a fixture is refused a cell the
+    // ground is in — and falling from there. Asked at the top edge it would start on a
+    // lattice row belonging to the cell above, and a solid one there sends
+    // `FootingUnder` up through its other branch to answer about a ceiling.
+    const Vector2 from = {base.x + base.width * 0.5f, base.y + base.height * 0.5f};
+
+    if (!world.FootingUnder(from, kSeatReach, top)) return grid - lift;
+
+    // Never above its own cell, which nothing can produce — a cell with ground in it
+    // holds no fixture — and is cheap to be sure of.
+    return std::max(top, base.y) - lift;
 }
 
 void Fixtures::Animate(float dt) {
@@ -312,10 +401,20 @@ void Fixtures::Draw(Rectangle view) const {
 
         const sheet::Strip *strip = run.Any() ? worn.For(run.count) : worn.For(1);
 
+        // Where it is drawn standing, which is the ground under it and not the line the
+        // build grid rules across the hillside — see `Placed::seat`. The grid line until
+        // the world has been asked, which is what `--chest` photographs and what the
+        // first frame after a load shows.
+        const float seat = one.seat.value_or(at.y + at.height);
+
         if (strip == nullptr) {
             if (!CheckCollisionRecs(at, view)) continue;
 
-            DrawPicture(FaceOf(def, piece), {at.x, at.y}, kTexel);
+            // Hung from its foot rather than from its corner, so the fallback face and
+            // the authored picture stand on one line. Six texels at three is one cell
+            // exactly, so on flat ground this is the corner it was drawn from before,
+            // and on a contour it is lower by however much the ground is.
+            DrawPicture(FaceOf(def, piece), {at.x, seat - kPictureSide * kTexel}, kTexel);
             continue;
         }
 
@@ -332,6 +431,20 @@ void Fixtures::Draw(Rectangle view) const {
 
         if (!CheckCollisionRecs(bank, view)) continue;
 
+        // One picture over several cells, so it stands on the deepest ground any of them
+        // found. The other reading is the shallowest and it is the wrong one: a bank
+        // seated on its highest unit hangs every other unit in the air, which is the
+        // complaint this seat exists to answer — where one seated on its lowest merely
+        // has its far end in the hillside, and furniture set into a slope is what
+        // furniture on a slope looks like.
+        float stands = seat;
+
+        for (int i = 1; i < run.count; i++) {
+            const Placed *unit = Find(run.cx + i, run.cy);
+
+            if (unit != nullptr && unit->seat.has_value()) stands = std::max(stands, *unit->seat);
+        }
+
         // The lid, as a frame of the strip. Nought is shut and the last is wide open, so
         // a chest that never opens is drawn from its first frame and an artist who ships
         // one frame gets a chest that works.
@@ -342,7 +455,7 @@ void Fixtures::Draw(Rectangle view) const {
         // one world pixel per texel and always will be (§24), so a picture forty-two
         // texels wide standing over fifty-four pixels of cells sits in the middle of them
         // with the floor showing at either end, which is what furniture does.
-        sheet::DrawSolid(*strip, frame, {bank.x + bank.width * 0.5f, bank.y + bank.height}, 1.0f, WHITE);
+        sheet::DrawSolid(*strip, frame, {bank.x + bank.width * 0.5f, stands}, 1.0f, WHITE);
     }
 }
 
@@ -482,7 +595,7 @@ void Fixtures::Load(save::Reader &in) {
     }
 }
 
-void Fixtures::Undermine(const World &world, Drops &drops, float now) {
+void Fixtures::Settle(const World &world, Drops &drops, float now) {
     falling_.clear();
 
     for (const auto &[key, one] : placed_) {
@@ -521,6 +634,12 @@ void Fixtures::Undermine(const World &world, Drops &drops, float now) {
             if (!stack.Empty()) drops.Scatter(stack, where, 1.0f, now);
         }
     }
+
+    // And everything still standing is seated on the ground it is standing on. After the
+    // falling rather than before it, so a stack whose base has just gone is not seated
+    // against the hole it used to stand over for the frame it takes to come down after
+    // it.
+    for (auto &[key, one] : placed_) one.seat = SeatOf(world, one.cx, one.cy);
 }
 
 } // namespace fixture

@@ -5,6 +5,21 @@
 
 namespace {
 
+// The faintest a texel may be and still count as drawn on.
+//
+// Not `alpha > 0`, which is what this measured first and is the wrong question. A canvas
+// exported from a paint program carries stray alpha — an eraser stroke that left a one or
+// a two behind, a layer's antialiased fringe over transparent ground — and none of it is
+// visible at any size. Measured against zero, a single such texel in the top row of a
+// sixty-four-square canvas puts forty empty rows inside the window, and everything stood
+// on that window's foot hangs forty pixels over the ground with nothing on screen saying
+// why. It cost an afternoon of looking at the sprite.
+//
+// Eight of two hundred and fifty-five, which is three per cent: under it a texel cannot
+// be told from the background it is drawn over, and over it the artist meant something by
+// it.
+constexpr unsigned char kFaintest = 8;
+
 // The union of every frame's drawn-on part, in frame-local texels.
 //
 // Walked over the pixels once at load. It is the only reason the image is opened as an
@@ -23,7 +38,7 @@ void Solid(const Image &picture, int wide, int frames, sheet::Strip &strip) {
 
     for (int y = 0; y < picture.height; y++) {
         for (int x = 0; x < picture.width; x++) {
-            if (pixels[y * picture.width + x].a == 0) continue;
+            if (pixels[y * picture.width + x].a < kFaintest) continue;
 
             // Folded into one frame, so every frame shares the window.
             const int local = x % wide;

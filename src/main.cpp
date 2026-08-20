@@ -1611,12 +1611,6 @@ int main(int argc, char **argv) {
                 grove.Update(world, view::Bounds(camera), player.Centre(), world.Sky().Time(), dt, inventory);
             }
 
-            // Anything whose surface has been dug out from under it comes down.
-            // Beside the grove's own pass and for the same reason: what a fixture
-            // is fixed to is the world, and the world is what the player has just
-            // been changing.
-            fixtures.Undermine(world, grove.Fallen(), world.Sky().Time());
-
             // And whatever walks. Over the simulated region rather than the visible
             // one — a creature just off screen has to keep walking, or the world
             // reorganises itself every time the player turns round.
@@ -1673,6 +1667,20 @@ int main(int argc, char **argv) {
                     notice    = said;
                     noticeFor = kNoticeTime;
                 }
+
+                // Anything whose surface has been dug out from under it comes down, and
+                // everything left standing is seated on the ground it is standing on.
+                // Beside the grove's own pass and for the same reason: what a fixture is
+                // fixed to is the world, and the world is what the player has just been
+                // changing.
+                //
+                // *After* the hand rather than before it, which is the one thing about
+                // where this sits that matters: a chest put up this frame is seated this
+                // frame, and ground dug this frame drops what was standing on it this
+                // frame. Before the hand, both were a frame late — which nobody could see
+                // while a fixture was drawn on the grid line, and which is a piece of
+                // furniture visibly hanging in the air now that it is not.
+                fixtures.Settle(world, grove.Fallen(), world.Sky().Time());
 
                 // A chest the right hand asked to open.
                 //

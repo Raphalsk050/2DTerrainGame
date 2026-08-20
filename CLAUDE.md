@@ -110,6 +110,7 @@ whole phases, never inside a `pool::For` body.
 | `--craft out.png [w] [h]` | the recipe panel in every state it has (§28.7) |
 | `--gear out.png [zoom]` | every item as a slot draws it, the wear bar, and the tool in hand (§29.5) |
 | `--chest out.png [w] [h]` | the store at every size it joins to, and what a break pays out (§30.11) |
+| `--seat [cells]` | whether what is put down stands on the ground it is drawn over (§30.12) |
 | `--saves` | a world written down, read back, and written again (§31.3) |
 | `--menu out.png [w] [h]` | every screen in front of the game, with worlds in the list (§31.9) |
 
@@ -790,10 +791,14 @@ admitted the second.
 - **`Illuminate` re-offers the light every frame**, which is the contract
   `World::AddLight` already had with the lantern, so nothing in the solver knows
   fixtures exist.
-- **`Undermine`** drops one whose surface was dug away, beside the grove's own
-  pass and for the same reason.
-- **Anchors are a bitmask** — floor, wall, roof, behind — so "any surface" is a
-  real answer and a workbench asking for floor alone is one field.
+- **`Settle`** drops one whose surface was dug away, beside the grove's own pass
+  and for the same reason — and seats what is left on the ground it is standing
+  on, which is §30.12. It was `Undermine`, and the name went with the second job:
+  a function that also decides where a thing is drawn is not named for falling.
+- **Anchors are a bitmask** — floor, wall, roof, behind, atop — so "any surface"
+  is a real answer and a workbench asking for floor alone is one field. `kAtop`
+  is the one that is not a question about the world, and it is deliberately
+  outside `kAnywhere`: see §30.12.
 
 `fixture::KindOf` matches an item to a fixture **by name**, the same trick
 `flora::SpeciesOf` uses. The alternative is an index written down in two tables
@@ -3403,6 +3408,76 @@ nine where it should have read twenty-seven. And writing straight into a slot go
 the stack limit `Fill` keeps, so a stack of seven wood shovels went in, the sort
 correctly split it back out into sevens of one, and the sheet came out a wall of
 shovels. A probe that cannot be read is not an instrument.
+
+### 30.12 A cell is not where the ground is, and that is what the floating was
+
+Reported from play, twice: *the chest is floating.* It was, and it had two causes that
+looked like one — which is why the first fix, a sprite drawn to fill its whole canvas,
+changed nothing.
+
+**The first is the window.** `sheet::Strip` measures the drawn-on part of a canvas at
+load and `sheet::DrawSolid` stands *that* on the floor, which is what lets a fixture be
+authored anywhere in the same 64-square canvas every tool uses (§30.10). It measured the
+window against `alpha > 0`. A canvas exported from a paint program carries stray alpha —
+an eraser stroke that left a one behind, an antialiased fringe over transparent ground —
+and none of it can be seen at any size. One such texel in the top row puts forty empty
+rows inside the window, and the drawing hangs forty pixels over the ground with nothing
+on screen saying why. The threshold is eight of 255 now: under it a texel cannot be told
+from what it is drawn over, and over it the artist meant it.
+
+**The second is the grid, and it is the one that survived filling the canvas.** A cell is
+eighteen pixels of the build lattice; the ground inside it is a contour that crosses
+wherever the field says. So the bottom edge of a cell is not where the ground is — it is
+up to a whole cell above it — and a fixture stood on that line hangs over the hillside it
+is supposed to be resting on. This is §12.3 for the third time: `World::FootingUnder` is
+the one answer to *where was this surface actually drawn*, already read by a planted tree
+and by the player's feet, and now by `Placed::seat`.
+
+Three things about the seat are decisions rather than arithmetic:
+
+- **It is a reading, not a cache.** `Settle` already walks every fixture every frame with
+  the world in its hand, so it takes the seat in the same pass. There is nothing to
+  invalidate (§5.4) and nothing that can go stale by more than a frame. `Draw` keeps no
+  world, deliberately: `--chest` photographs a `Fixtures` with no world anywhere near it,
+  and an unseated fixture draws on the grid line exactly as it always did.
+- **`Settle` moved to after the hand.** A chest put up this frame is seated this frame,
+  and ground dug this frame drops what stood on it this frame. Both were a frame late
+  before, which nobody could see while a fixture was drawn on the grid line and which is
+  a piece of furniture visibly jumping now that it is not.
+- **A bank stands on its deepest unit.** One picture over three cells has one foot. Seated
+  on the highest, the other two hang in the air, which is the whole complaint; seated on
+  the lowest, its far end is in the hillside — and furniture set into a slope is what
+  furniture on a slope looks like.
+- **Only what the floor holds up comes down to the floor**, asked with `Holds`'s own
+  `kFloor` arm. A torch fixed to the wall beside it has open air underneath and belongs
+  where its cell says it is; sliding that down to the ground is this bug's mirror image.
+
+**That last one was written as a distance first, and it is the lesson worth keeping.** The
+seat was clamped to one cell below the grid line, on the reasoning that the ground holding
+a cell up must lie inside the cell under it. It does not: the vertex `OverlapsSolid` will
+accept reaches half a lattice step past that cell's own floor, and the paint reaches a
+texel past the vertex. `--seat` reported **ten hillsides in sixty still floating, every one
+of them seated exactly on the clamp** — which is what a bound being wrong looks like when
+it is nearly right. Stating the rule as the anchor instead has nothing to rederive the day
+a neighbouring rule moves.
+
+`--seat [cells]` is the check, and it asks the **picture** rather than the arithmetic:
+whether the world is painted immediately under a fixture's feet and clear immediately over
+them. Asking `FootingUnder` what `FootingUnder` said would be photographing the
+reproduction (§28.7). It reports what the grid line would have left — **24 px**, more than
+a whole cell — so the number the fix bought is in the report rather than in this file.
+
+**And a chest stands on a chest.** `kAtop` is the anchor for it, and it is the only one in
+that bitmask whose answer is not a fact about the world, which is why it is outside
+`kAnywhere`: "any surface" was asked for the torch, and a torch stuck to the lid of a
+chest is not what that meant. Nothing is asked of the unit below beyond its being there —
+it is held itself or `Settle` would have taken it down — so a stack is held to the floor
+by induction and comes down a level a frame when the floor goes. The seating walks the
+same way: down to whichever unit stands on the world, then a cell per level back up, so a
+tower stays glued together and glued to the ground under it.
+
+Neither of these is a fact about the chest. A torch on a hillside was drawn the same way
+and hung the same way, and it is fixed by the same three lines.
 
 ---
 
