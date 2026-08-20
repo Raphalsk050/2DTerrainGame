@@ -3276,25 +3276,58 @@ slot it is about to go into. Over the bin, that is the only moment the question 
 a red square is not self-evident, and what the player needs to know is whether letting go
 here destroys what they are holding.
 
-### 30.10 The art is front-on, and switching it on is one field
+### 30.10 A bank is a picture, not a row of tiles
 
-`fixture::Def::art` names a folder under `assets/fixtures/`, and the strips inside are
-always called `alone`, `left`, `middle` and `right` — §24.2's rule, so there is no
-filename in the table to misspell. Each strip's **frames are the lid opening**: nought
-shut, the last one wide open, and the lid is a play-head between them. A one-frame strip
-is a chest that never appears to open and is still correct; a missing `left` falls back
-to `alone`, so a bank drawn before the ends exist is three identical chests.
+`fixture::Def::art` names a folder under `assets/fixtures/`, and what is in it is **one
+picture per bank size** — `small_chest.png`, `medium_chest.png`, `large_chest.png`, as
+many as the row `joins`. The name is `<size>_<row name>.png` and both halves come from
+the row, so there is no filename in the table to misspell (§24.2).
 
-**It is drawn front-on and never mirrored.** A fixture has no facing at all —
-`sheet::Draw` is always handed `+1` — and that is not a simplification: a chest seen from
-the side could not show which of its neighbours it had joined with, which is the whole of
-what a bank has to say for itself.
+**The first design was three pieces** — a left end, a middle and a right end, to be laid
+side by side — and it is worth writing down why the art that arrived was the better
+answer. Tiles make joining a problem of *hiding seams*: every edge that continues has to
+lose its border, nothing dark may stand at a join, and §30.10b is a whole section about
+getting that right. A picture of the whole bank has no seams to hide, because there are
+none. Two chests joined are one drawing of two chests joined, and what the artist drew is
+what the player sees.
 
-`assets/fixtures/chest/README.md` is the contract, and the row's `art` is still
-`nullptr` today so that nothing warns about a file nobody has drawn yet. The hand-drawn
-`picture` on the row is what it falls back to, and §24.2's reason for keeping it holds
-here too: it is the one description of the chest that cannot go out of date, being in the
-same file as everything else about it.
+The tiles are still there and still correct — as the **fallback**. A size with no file
+falls back to the hand-drawn faces, which tile, because a fallback has to work at any
+size. Where there is art, the art is the bank.
+
+Three things follow, and each is a rule rather than a detail:
+
+- **Only the drawn-on part is drawn.** `sheet::Strip` measures the opaque bounds of a
+  file at load — the union over every frame, so the frames share one window and the
+  drawing does not jump — and `sheet::DrawSolid` stands *that* on the floor of the cells
+  the bank occupies. It is what lets a fixture be authored on the same 64-square canvas
+  every tool is drawn on (§29.1), anywhere in it, with no margin to get right and no
+  ground line to line up with. `sheet::Draw` is untouched, so a creature's window is
+  still the window its cutter chose (§24.1) and the boar draws exactly as it did.
+- **One texel is one world pixel, and nothing is stretched.** A cell is 18 px and the
+  three chests are 20, 32 and 42 texels wide, so a bank of three is 42 px of chest over
+  54 px of cells and sits in the middle of them with the floor showing at each end.
+  Stretching to fill would be 54/42, which is not a whole number and is the one thing
+  that must never happen to art of this size (§29.1).
+- **A bank draws once, from its leftmost unit.** Drawn by all three it would be the same
+  chest painted three times, two of them a cell out. Culled against the whole run rather
+  than against that one cell, because a bank whose left unit has scrolled off the edge is
+  a bank with two units still on screen.
+
+Each file's frames are the lid opening: nought shut, the last one wide open. The three
+that exist are one frame each, so the lid does not animate yet and the machinery is
+waiting for the frames — 128 px wide is two, 256 is four, and nothing else changes.
+
+**It is drawn front-on and never mirrored.** A fixture has no facing at all — there is no
+`facing` on `DrawSolid` to hand one to — and that is not a simplification: a chest seen
+from the side could not show how wide the bank behind it is, which is the whole of what
+the three sizes are for.
+
+`assets/fixtures/chest/README.md` is the contract. **The item's icon is still the
+hand-drawn `picture`**, deliberately: §29.1's rule is that an icon fills its box from the
+*whole* canvas, and the chest occupies twenty of its sixty-four — so pointing
+`ItemDef::art` at the sprite would put an eleven-pixel chest in a forty-four-pixel slot.
+It is one field the day the drawing fills more of its canvas.
 
 ### 30.10b The fallback joins too, and that is `Def::joined`
 
@@ -3349,6 +3382,15 @@ exactly the ones nobody reaches by accident. It draws through `Inventory::Draw` 
 | no two parts of the layout touch | §25.1, in a layout with two panels, a bin, a field, three buttons and a column of headers |
 | sorting keeps every count | counted **per kind**, because a total is blind to two kinds swapped |
 | breaking one takes its own | rule six, through `Place`, `Run`, `Store` and `Remove` rather than by reasoning about them |
+| the fallback joins with no seam | §30.10b, measured as border texels left at a join |
+| every bank size has a picture | §29.5's rule — a missing file falls back to a drawing that looks like a perfectly good chest |
+
+The sheet carries two bands under the panels: the chests **as the game draws them**, put
+in a real `Fixtures` and rendered through `Fixtures::Draw` itself, and the hand-drawn
+faces under them. The first is §24.4's argument — everything else on a sheet draws the
+art directly, which proves the files are right without proving the game will ever show
+them, and which picture a bank uses and where it stands are decisions inside that
+function.
 
 `Store::Ruling` and `Store::Seeking` are settable from outside for `Crafting::Open`'s
 reason: the panel reaches those states from a click, a probe has no mouse, and a probe

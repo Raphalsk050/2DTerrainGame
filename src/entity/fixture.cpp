@@ -63,17 +63,6 @@ light::Radiance Glow(const ElementLight &light) {
 
 } // namespace
 
-const sheet::Strip &Wardrobe::For(Piece piece) const {
-    switch (piece) {
-    case Piece::Left: return left.Ready() ? left : alone;
-    case Piece::Middle: return middle.Ready() ? middle : alone;
-    case Piece::Right: return right.Ready() ? right : alone;
-    case Piece::Alone: break;
-    }
-
-    return alone;
-}
-
 const Wardrobe &Dressed(const Def &def) {
     static const Wardrobe bare;
 
@@ -85,10 +74,18 @@ const Wardrobe &Dressed(const Def &def) {
 
     rack.tried = true;
 
-    rack.alone  = Wear(def.art, "alone", def.artWide);
-    rack.left   = Wear(def.art, "left", def.artWide);
-    rack.middle = Wear(def.art, "middle", def.artWide);
-    rack.right  = Wear(def.art, "right", def.artWide);
+    // As many sizes as the row joins, and no more. A fixture that never joins looks for
+    // one file; the chest looks for three. Asking for sizes a row can never be is three
+    // files opened to find they are not there, once per run, and a warning that would
+    // have to be explained away.
+    const int sizes = std::min(std::max(def.joins, 1), static_cast<int>(kMostSizes));
+
+    for (int at = 0; at < sizes; at++) {
+        // `<size>_<name>.png` — the size word and the row's own name, so there is no
+        // filename anywhere in the table and nothing to misspell. §24.2's rule, with the
+        // row supplying both halves.
+        rack.banks[at] = Wear(def.art, (std::string(kSizes[at]) + "_" + def.name).c_str(), def.artWide);
+    }
 
     if (!rack.Any()) {
         // Said once, and only once, because `tried` is already set.
@@ -105,10 +102,7 @@ const Wardrobe &Dressed(const Def &def) {
 
 void Undress() {
     for (auto &[folder, rack] : Racks()) {
-        sheet::Unload(rack.alone);
-        sheet::Unload(rack.left);
-        sheet::Unload(rack.middle);
-        sheet::Unload(rack.right);
+        for (sheet::Strip &strip : rack.banks) sheet::Unload(strip);
 
         rack.tried = false;
     }
@@ -307,35 +301,48 @@ void Fixtures::Draw(Rectangle view) const {
     for (const auto &[key, one] : placed_) {
         const Rectangle at = World::CellBounds(one.cx, one.cy);
 
-        if (!CheckCollisionRecs(at, view)) continue;
-
         const Def &def       = Of(one.kind);
         const Wardrobe &worn = Dressed(def);
 
-        // Which piece of its bank this is, so a run of three is drawn as one chest with
-        // two ends rather than as three chests standing in a row. Worked out before the
-        // art is asked for, because the hand-drawn fallback needs it just as much —
-        // that was the whole complaint: joined chests that did not look joined.
+        // Which run this belongs to, and where in it. Both are wanted whichever way it
+        // is drawn: the art picks its picture by how many are joined, and the hand-drawn
+        // fallback picks its face by which end this is.
         const Joined run  = Run(one.cx, one.cy);
         const Piece piece = run.Any() ? run.PieceAt(one.cx - run.cx) : Piece::Alone;
 
-        if (!worn.Any()) {
+        const sheet::Strip *strip = run.Any() ? worn.For(run.count) : worn.For(1);
+
+        if (strip == nullptr) {
+            if (!CheckCollisionRecs(at, view)) continue;
+
             DrawPicture(FaceOf(def, piece), {at.x, at.y}, kTexel);
             continue;
         }
 
-        const sheet::Strip &strip = worn.For(piece);
-        if (!strip.Ready()) continue;
+        // A bank is one picture, so only one of its units draws it — the leftmost, which
+        // is the one every other unit of the run agrees on. Drawn by all of them it would
+        // be the same chest painted three times, and the two that were wrong would be
+        // wrong by a cell each.
+        if (run.Any() && one.cx != run.cx) continue;
+
+        // Culled against the whole run rather than against this cell, because this cell
+        // is only the left end of what is about to be drawn: a bank whose left unit has
+        // scrolled off the edge is a bank that still has two units on screen.
+        const Rectangle bank = {at.x, at.y, at.width * static_cast<float>(std::max(run.count, 1)), at.height};
+
+        if (!CheckCollisionRecs(bank, view)) continue;
 
         // The lid, as a frame of the strip. Nought is shut and the last is wide open, so
         // a chest that never opens is drawn from its first frame and an artist who ships
         // one frame gets a chest that works.
-        const int frame = std::min(static_cast<int>(one.lid * static_cast<float>(strip.frames)), strip.frames - 1);
+        const int frame = std::min(static_cast<int>(one.lid * static_cast<float>(strip->frames)), strip->frames - 1);
 
-        // Bottom-centre of the cell, and `facing` is always forward. A fixture has no
-        // side: mirroring one would put the left end of a bank on the right of it, and
-        // there is nothing a mirrored chest could mean.
-        sheet::Draw(strip, frame, {at.x + at.width * 0.5f, at.y + at.height}, 1.0f, +1, WHITE);
+        // Bottom-centre of the *bank*, and only the drawn-on part of the canvas — see
+        // `sheet::DrawSolid`. Centred rather than stretched to fill: the art is drawn at
+        // one world pixel per texel and always will be (§24), so a picture forty-two
+        // texels wide standing over fifty-four pixels of cells sits in the middle of them
+        // with the floor showing at either end, which is what furniture does.
+        sheet::DrawSolid(*strip, frame, {bank.x + bank.width * 0.5f, bank.y + bank.height}, 1.0f, WHITE);
     }
 }
 

@@ -10,6 +10,7 @@
 #include "ui/skin.h"
 #include "ui/store.h"
 #include "world/element.h"
+#include "world/world.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -279,6 +280,77 @@ Image Faces(int zoom, int &seams) {
     }
 
     return sheet;
+}
+
+// The chests as the game actually draws them, at one, two and three joined.
+//
+// Through `Fixtures::Draw` itself — a real `Fixtures` with real chests in it, rendered
+// through a camera — because what is being looked at is the *drawing*, and the whole
+// lesson of §24.4 is that a sheet which draws the art directly proves the files are
+// right without proving the game will ever show them. Which picture a bank uses, where
+// it stands, and whether it stands on the floor at all are decisions inside that
+// function.
+//
+// The band above it is the hand-drawn fallback, which is a different question and stays
+// a different picture: what happens when a size has no file.
+Image Standing(int zoom, int &sizes) {
+    fixture::Fixtures chests;
+
+    // Three runs with a clear cell between them, so a bank's own width is visible and
+    // two runs cannot be mistaken for one.
+    constexpr int kRow  = 0;
+    constexpr int kAt[] = {0, 3, 7};
+
+    for (int group = 0; group < 3; group++) {
+        for (int unit = 0; unit <= group; unit++) chests.Place(fixture::Kind::Chest, kAt[group] + unit, kRow);
+    }
+
+    // Every size the row joins to has a picture that loaded — §29.5's rule, and the one
+    // fault that is invisible in the sheet: a missing file falls back to the hand-drawn
+    // face, which looks like a perfectly good chest.
+    const fixture::Wardrobe &worn = fixture::Dressed(fixture::Of(fixture::Kind::Chest));
+
+    sizes = 0;
+
+    for (int units = 1; units <= fixture::Of(fixture::Kind::Chest).joins; units++) {
+        if (worn.For(units) != nullptr) sizes++;
+    }
+
+    const Rectangle first = World::CellBounds(kAt[0], kRow);
+    const Rectangle last  = World::CellBounds(kAt[2] + 2, kRow);
+
+    // The view: the whole run of them, with room above for a chest taller than its cell
+    // and a strip of ground under it.
+    const Rectangle view = {first.x - 6.0f, first.y - 26.0f, last.x + last.width - first.x + 12.0f,
+                            first.height + 34.0f};
+
+    RenderTexture2D shot = LoadRenderTexture(static_cast<int>(view.width) * zoom, static_cast<int>(view.height) * zoom);
+
+    BeginTextureMode(shot);
+
+    ClearBackground(Color{58, 54, 62, 255});
+
+    const Camera2D camera = {.offset = {0.0f, 0.0f}, .target = {view.x, view.y}, .rotation = 0.0f,
+                             .zoom = static_cast<float>(zoom)};
+
+    BeginMode2D(camera);
+
+    // The ground the cells stand on, so "it stands on the floor" is a thing the eye can
+    // check rather than a thing the comment claims.
+    DrawRectangleRec({view.x, first.y + first.height, view.width, view.y + view.height - first.y - first.height},
+                     Color{96, 142, 78, 255});
+
+    chests.Draw(view);
+
+    EndMode2D();
+    EndTextureMode();
+
+    Image whole = LoadImageFromTexture(shot.texture);
+    ImageFlipVertical(&whole);
+
+    UnloadRenderTexture(shot);
+
+    return whole;
 }
 
 // Rule six, checked through the fixtures themselves.
@@ -567,7 +639,13 @@ int Run(const probes::Bench &bench) {
     // whether a join is visible, which at one pixel a texel it is not — for anybody.
     Image faces = Faces(14, seams);
 
-    std::printf("  joined: %d border texels left on a seam (0 is one chest, not three)\n\n", seams);
+    int sizes = 0;
+
+    Image standing = Standing(4, sizes);
+
+    std::printf("  drawn:  %d of %d bank sizes have a picture that loaded\n", sizes,
+                fixture::Of(fixture::Kind::Chest).joins);
+    std::printf("  joined: %d border texels left on a seam of the fallback (0 is one chest, not three)\n\n", seams);
 
     // The sheet: the panels side by side, on one plate, each with its name over it, and
     // the chests along the foot of it.
@@ -581,7 +659,8 @@ int Run(const probes::Bench &bench) {
 
     constexpr int kLabelTall = 22;
 
-    Image sheet = GenImageColor(sheetWide + 16, sheetTall + kLabelTall + 32 + faces.height + 16,
+    Image sheet = GenImageColor(std::max(sheetWide + 16, standing.width + 32),
+                                sheetTall + kLabelTall + 32 + faces.height + standing.height + 48,
                                 Color{16, 18, 22, 255});
 
     int at = 16;
@@ -598,18 +677,30 @@ int Run(const probes::Bench &bench) {
         at += shots[i].width + 16;
     }
 
-    ImageDraw(&sheet, faces, {0.0f, 0.0f, static_cast<float>(faces.width), static_cast<float>(faces.height)},
-              {16.0f, static_cast<float>(kLabelTall + 8 + sheetTall + 12), static_cast<float>(faces.width),
-               static_cast<float>(faces.height)},
+    const int under = kLabelTall + 8 + sheetTall;
+
+    ImageDraw(&sheet, standing,
+              {0.0f, 0.0f, static_cast<float>(standing.width), static_cast<float>(standing.height)},
+              {16.0f, static_cast<float>(under + 12), static_cast<float>(standing.width),
+               static_cast<float>(standing.height)},
               WHITE);
 
-    ImageDrawText(&sheet, "one, two and three joined", 16, kLabelTall + 8 + sheetTall - 6, 16, skin::kMuted);
+    ImageDrawText(&sheet, "as the game draws them: one, two and three joined", 16, under - 6, 16, skin::kMuted);
+
+    const int below = under + 12 + standing.height + 22;
+
+    ImageDraw(&sheet, faces, {0.0f, 0.0f, static_cast<float>(faces.width), static_cast<float>(faces.height)},
+              {16.0f, static_cast<float>(below), static_cast<float>(faces.width), static_cast<float>(faces.height)},
+              WHITE);
+
+    ImageDrawText(&sheet, "and the hand-drawn fallback, where a size has no file", 16, below - 18, 16, skin::kMuted);
 
     const bool wrote = ExportImage(sheet, path);
 
     for (Image &shot : shots) UnloadImage(shot);
 
     UnloadImage(faces);
+    UnloadImage(standing);
     UnloadImage(sheet);
 
     std::printf("  %s\n", offscreen ? "OFF THE SCREEN — a slot of the store is outside the frame"
@@ -620,10 +711,14 @@ int Run(const probes::Bench &bench) {
                                : "sorting keeps every count and honours every row set aside");
     std::printf("  %s\n", broke ? "breaking one unit takes its own things and leaves the rest"
                                 : "BROKE WRONG — a unit dug up took more or less than its own");
-    std::printf("  %s\n\n", seams == 0 ? "joined chests are drawn as one chest, with no seam down them"
-                                       : "SEAMED — a bank is drawn as separate boxes standing in a row");
+    const bool dressed = sizes == fixture::Of(fixture::Kind::Chest).joins;
 
-    return (wrote && !offscreen && !crowded && !lost && broke && seams == 0) ? 0 : 1;
+    std::printf("  %s\n", seams == 0 ? "the fallback joins as one chest, with no seam down it"
+                                     : "SEAMED — a bank is drawn as separate boxes standing in a row");
+    std::printf("  %s\n\n", dressed ? "every bank size the chest joins to has its own picture"
+                                    : "UNDRESSED — a bank size has no picture and falls back to the drawing");
+
+    return (wrote && !offscreen && !crowded && !lost && broke && seams == 0 && dressed) ? 0 : 1;
 }
 
 const probes::Report row = {

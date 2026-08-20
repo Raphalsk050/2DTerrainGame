@@ -32,6 +32,24 @@ struct Strip {
     int wide   = 0;
     int tall   = 0;
 
+    // The part of a frame that is actually drawn on, in texels, measured from the
+    // frame's own top left.
+    //
+    // Worked out at load rather than authored, and it is the **union over every frame**
+    // rather than each frame's own — so the frames share one window and the drawing does
+    // not jump between them. That is §24.1's rule about one window per creature, met from
+    // the other side: there the window was chosen by hand and written into the cutter;
+    // here the file may be a canvas with the thing sitting somewhere in it, and the
+    // window is what the artist drew inside it.
+    //
+    // What it buys is that a fixture can be drawn on a 64-square canvas — the same one
+    // every tool is drawn on (§29.1) — and still stand on the ground rather than floating
+    // above the empty rows under it.
+    int solidX    = 0;
+    int solidY    = 0;
+    int solidWide = 0;
+    int solidTall = 0;
+
     bool Ready() const { return texture.id != 0 && frames > 0; }
 };
 
@@ -53,6 +71,17 @@ Strip Load(const char *path, int wide);
 // `facing` is +1 right and -1 left, and it mirrors the source rather than needing a
 // second strip. `tint` multiplies, which is what the hurt flash is made of.
 void Draw(const Strip &strip, int frame, Vector2 at, float pixel, int facing, Color tint);
+
+// The same, but drawing only what is drawn on — see `Strip::solidX`.
+//
+// Bottom-centre of the *content* rather than of the canvas, so a picture with empty rows
+// under it stands on the ground instead of hanging over it. Kept apart from `Draw`
+// rather than folded into it, because the two answer different questions: a creature's
+// window was cut to the ground line on purpose and its empty margin is part of the
+// framing, while a fixture's canvas is a canvas.
+//
+// No facing. A fixture has none — see `fixture::Def::art`.
+void DrawSolid(const Strip &strip, int frame, Vector2 at, float pixel, Color tint);
 
 void Unload(Strip &strip);
 

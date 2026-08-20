@@ -120,15 +120,29 @@ struct Def {
 
 
     // Where the authored art for this row lives, under `assets/fixtures/`, and how
-    // wide one frame of it is in world pixels. Nothing where the row is drawn from
-    // the `picture` above instead.
+    // wide one frame of it is. Nothing where the row is drawn from the `picture` above
+    // instead.
     //
     // **A folder and not a file**, which is §24.2's rule and for its reason: there is
-    // more than one clip inside. A fixture that joins has one strip per piece — the
-    // files are always called `alone`, `left`, `middle` and `right` — and each strip's
-    // frames are the thing opening, frame nought shut and the last one wide open. So
-    // an artist can ship `alone.png` alone and the rest fall back to it, and a chest
-    // that never opens is still drawn correctly from its first frame.
+    // more than one picture inside. What is in there is **one picture per bank size** —
+    // `small_<name>.png` for a fixture standing alone, then `medium_`, `large_` and
+    // `huge_`, as many as the row `joins`.
+    //
+    // That is the contract the art arrived in, and it is the better one. The first
+    // design was three *pieces* — a left end, a middle and a right end — to be laid
+    // side by side, which is how a tiling engine would do it and which makes joining a
+    // problem of hiding the seams. A picture of the whole bank has no seams to hide: two
+    // chests joined are one drawing of two chests joined, and what the artist drew is
+    // what the player sees. The hand-drawn `picture` still tiles, because a fallback has
+    // to work at any size (§30.10b) — but where there is art, the art is the bank.
+    //
+    // Each file's frames are the lid opening: frame nought shut, the last one wide open.
+    // A one-frame file is a chest that never appears to open and is still correct.
+    //
+    // **Only the drawn-on part is drawn**, and it stands on the floor of the cells the
+    // bank occupies — see `sheet::Strip::solidX`. So these may be authored on the same
+    // 64-square canvas every tool is drawn on (§29.1) with the chest sitting anywhere in
+    // it, and `artWide` is that canvas rather than a cell.
     //
     // **It is drawn front-on and never mirrored.** A fixture has no facing: a chest
     // seen from the side could not show the player which of its neighbours it had
@@ -300,12 +314,11 @@ inline constexpr Def kKinds[] = {
         // their pictures. See `Def::joined`.
         .joined = kChestFaces,
 
-        // Waiting for art. A folder here and four files under `assets/fixtures/chest/`
-        // is the whole of what putting a drawing on it takes — nothing else in the
-        // project learns that the chest has a picture, and the animation comes with it
-        // because the frames of a strip *are* the lid opening.
-        .art     = nullptr,
-        .artWide = config::kBuildCell,
+        // `assets/fixtures/chest/small_chest.png` and its two larger brothers, one per
+        // bank size. The 64-square canvas is the one every tool is drawn on, and only
+        // the drawn-on part of it reaches the screen — see `Def::art`.
+        .art     = "chest",
+        .artWide = 64,
 
         // The floor and nothing else. A chest hangs off no wall and off no ceiling: it
         // is the one fixture in here that is furniture rather than fitting, and a
@@ -362,31 +375,53 @@ inline std::optional<Item> ItemOf(Kind kind) {
     return item::Named(Of(kind).from);
 }
 
-// The strips one fixture is drawn from, loaded once and kept.
+// What a bank of one, two, three or four is called on disk.
+//
+// Words rather than numbers, because that is how the art arrived and because it is what
+// an artist would name them. The row's own `joins` says how many of these are ever
+// looked for, so a fixture that never joins costs one file and one load.
+inline constexpr const char *kSizes[] = {"small", "medium", "large", "huge"};
+
+inline constexpr std::size_t kMostSizes = std::size(kSizes);
+
+// The pictures one fixture is drawn from, loaded once and kept.
 //
 // `mob::Wardrobe`'s design, and the head of that file gives the reasons: it is asked
 // for by row and never by path, so there is no filename anywhere in the table to
 // misspell, and it is lazy because `content::Open` runs before there is a window and a
 // texture needs one.
+//
+// One entry per bank size rather than one per piece — see `Def::art` for why the whole
+// bank is a picture rather than a row of tiles.
 struct Wardrobe {
-    sheet::Strip alone;
-    sheet::Strip left;
-    sheet::Strip middle;
-    sheet::Strip right;
+    sheet::Strip banks[kMostSizes];
 
     // Whether the load has been attempted. Distinct from whether it worked: a fixture
     // with no art, and one whose art is missing, must both stop trying — a load retried
     // every frame is a file opened sixty times a second for as long as the game runs.
     bool tried = false;
 
-    bool Any() const { return alone.Ready() || left.Ready() || middle.Ready() || right.Ready(); }
+    bool Any() const {
+        for (const sheet::Strip &strip : banks) {
+            if (strip.Ready()) return true;
+        }
 
-    // The strip for one piece, falling back to `alone`.
+        return false;
+    }
+
+    // The picture for a run of `units`, or nothing where that size was never drawn.
     //
-    // The fallback is the point rather than a safety net: an artist who has drawn one
-    // chest and not yet drawn the ends of a bank gets a bank of three identical chests,
-    // which is legible and is what most games shipped for years.
-    const sheet::Strip &For(Piece piece) const;
+    // Nothing rather than a fallback to another size. A run of three drawn from the
+    // picture of one is a chest that does not cover the ground it stands on, and a run
+    // of three drawn from the picture of two is simply the wrong chest — where the size
+    // is missing the hand-drawn faces tile, which at least covers the right cells.
+    const sheet::Strip *For(int units) const {
+        const std::size_t at = static_cast<std::size_t>(units - 1);
+
+        if (units < 1 || at >= kMostSizes || !banks[at].Ready()) return nullptr;
+
+        return &banks[at];
+    }
 };
 
 const Wardrobe &Dressed(const Def &def);
